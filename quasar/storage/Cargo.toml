@@ -17,5 +17,8 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 
+[dev-dependencies]
+serial_test = "3"
+
 [lints]
 workspace = true
