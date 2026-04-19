@@ -16,7 +16,7 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 
 | 属性 | 值 |
 |------|---|
-| **阶段** | S0（项目骨架） |
+| **阶段** | S1（Core 层定义） |
 | **Phase** | Phase 1（Lance REST Namespace） |
 | **状态** | 未开始 |
 
@@ -28,7 +28,7 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 
 | 阶段 | 名称 | 状态 | 验收标准 |
 |------|------|------|---------|
-| S0 | 项目骨架 | 未开始 | `cargo build` 成功编译 |
+| S0 | 项目骨架 | 已完成 | `cargo build` 成功编译 |
 | S1 | Core 层定义 | 未开始 | 所有 trait 和数据结构定义完毕 |
 | S2 | Storage 基础 | 未开始 | PostgreSQL 可连接，DDL 可迁移，基础 CRUD 可运行 |
 | S3 | Lance Namespace 端点 | 未开始 | `curl` 可操作 Lance Namespace |
@@ -49,11 +49,20 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 
 ## 已完成的里程碑
 
-暂无。
+- **S0 — 项目骨架**（2026-04-19）
+  - Cargo workspace 初始化，4 个 crate 结构就位
+  - `cargo build` / `cargo clippy` 通过
+  - `quasar-server` 可启动，`/healthz` 返回 `ok`
 
 ---
 
 ## 修订记录
+
+### V1.1（2026-04-19）
+
+- 更新：S0 状态标记为"已完成"
+- 更新：当前阶段推进至 S1
+- 新增：已完成里程碑记录 S0
 
 ### V1.0（2026-04-19）
 
