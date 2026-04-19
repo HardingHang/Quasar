@@ -1,19 +1,50 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use deadpool_postgres::{Pool, Runtime};
+use postgresql_embedded::PostgreSQL;
 use quasar_storage::{AssetCommitUpdate, AssetFormat, CatalogStore, PgCatalogStore, StoreError};
 use serial_test::serial;
 use std::collections::HashMap;
+use tokio::sync::OnceCell;
 
-fn test_pool() -> Pool {
-    let database_url = std::env::var("DATABASE_URL").expect(
-        "DATABASE_URL must be set for integration tests. \
-         Example: DATABASE_URL=postgres://postgres:postgres@localhost:5432/quasar_test",
-    );
+static PG_INSTANCE: OnceCell<PgInstance> = OnceCell::const_new();
 
-    let config = database_url
+struct PgInstance {
+    #[allow(dead_code)]
+    postgresql: PostgreSQL,
+    url: String,
+}
+
+impl PgInstance {
+    async fn get() -> &'static Self {
+        PG_INSTANCE
+            .get_or_init(|| async {
+                let mut postgresql = PostgreSQL::default();
+                postgresql
+                    .setup()
+                    .await
+                    .expect("PostgreSQL setup failed");
+                postgresql
+                    .start()
+                    .await
+                    .expect("PostgreSQL start failed");
+
+                postgresql
+                    .create_database("quasar_test")
+                    .await
+                    .expect("create database failed");
+
+                let url = postgresql.settings().url("quasar_test");
+                PgInstance { postgresql, url }
+            })
+            .await
+    }
+}
+
+fn test_pool(url: &str) -> Pool {
+    let config = url
         .parse::<tokio_postgres::Config>()
-        .expect("invalid DATABASE_URL");
+        .expect("invalid database URL");
 
     let mgr = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
     Pool::builder(mgr)
@@ -23,18 +54,13 @@ fn test_pool() -> Pool {
 }
 
 async fn setup() -> PgCatalogStore {
-    let pool = test_pool();
-    let store = PgCatalogStore::new(pool);
+    let instance = PgInstance::get().await;
+    let pool = test_pool(&instance.url);
+    let store = PgCatalogStore::new(pool.clone());
 
     store.migrate().await.expect("migration failed");
 
-    // Use a separate connection to truncate tables before testing.
-    let clean_pool = test_pool();
-    let client = clean_pool
-        .get()
-        .await
-        .expect("failed to get client");
-
+    let client = pool.get().await.expect("failed to get client");
     client
         .execute(
             "TRUNCATE asset_versions, assets, namespaces CASCADE",
@@ -51,7 +77,6 @@ async fn setup() -> PgCatalogStore {
 async fn test_namespace_crud() {
     let store = setup().await;
 
-    // create
     let ns = store
         .create_namespace("test_ns", AssetFormat::Lance, HashMap::new())
         .await
@@ -59,31 +84,25 @@ async fn test_namespace_crud() {
     assert_eq!(ns.name, "test_ns");
     assert!(matches!(ns.format, AssetFormat::Lance));
 
-    // list
     let list = store.list_namespaces().await.unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].name, "test_ns");
 
-    // get
     let got = store.get_namespace("test_ns").await.unwrap();
     assert_eq!(got.id, ns.id);
 
-    // exists
     assert!(store.namespace_exists("test_ns").await.unwrap());
     assert!(!store.namespace_exists("missing").await.unwrap());
 
-    // duplicate create
     let err = store
         .create_namespace("test_ns", AssetFormat::Lance, HashMap::new())
         .await
         .unwrap_err();
     assert!(matches!(err, StoreError::AlreadyExists(_)));
 
-    // drop
     store.drop_namespace("test_ns").await.unwrap();
     assert!(!store.namespace_exists("test_ns").await.unwrap());
 
-    // drop missing
     let err = store.drop_namespace("test_ns").await.unwrap_err();
     assert!(matches!(err, StoreError::NotFound(_)));
 }
@@ -98,38 +117,31 @@ async fn test_asset_crud() {
         .await
         .unwrap();
 
-    // create
     let asset = store
         .create_asset("ns1", "asset_a", HashMap::new())
         .await
         .unwrap();
     assert_eq!(asset.name, "asset_a");
 
-    // list
     let list = store.list_assets("ns1").await.unwrap();
     assert_eq!(list.len(), 1);
 
-    // get
     let got = store.get_asset("ns1", "asset_a").await.unwrap();
     assert_eq!(got.id, asset.id);
 
-    // exists
     assert!(store.asset_exists("ns1", "asset_a").await.unwrap());
     assert!(!store.asset_exists("ns1", "missing").await.unwrap());
 
-    // duplicate
     let err = store
         .create_asset("ns1", "asset_a", HashMap::new())
         .await
         .unwrap_err();
     assert!(matches!(err, StoreError::AlreadyExists(_)));
 
-    // rename
     store.rename_asset("ns1", "asset_a", "asset_b").await.unwrap();
     assert!(store.asset_exists("ns1", "asset_b").await.unwrap());
     assert!(!store.asset_exists("ns1", "asset_a").await.unwrap());
 
-    // rename conflict
     store
         .create_asset("ns1", "asset_c", HashMap::new())
         .await
@@ -140,7 +152,6 @@ async fn test_asset_crud() {
         .unwrap_err();
     assert!(matches!(err, StoreError::AlreadyExists(_)));
 
-    // drop
     store.drop_asset("ns1", "asset_b").await.unwrap();
     store.drop_asset("ns1", "asset_c").await.unwrap();
 
@@ -162,7 +173,6 @@ async fn test_version_commit_and_load() {
         .await
         .unwrap();
 
-    // first commit (no previous)
     let v1 = store
         .commit_version(
             "ns1",
@@ -177,7 +187,6 @@ async fn test_version_commit_and_load() {
     assert_eq!(v1.version_id, 1);
     assert_eq!(v1.metadata_location, "s3://bucket/v1");
 
-    // second commit
     let v2 = store
         .commit_version(
             "ns1",
@@ -192,16 +201,13 @@ async fn test_version_commit_and_load() {
     assert_eq!(v2.version_id, 2);
     assert_eq!(v2.previous_version_id, Some(1));
 
-    // load current
     let current = store.load_current_version("ns1", "tbl").await.unwrap();
     assert_eq!(current.version_id, 2);
 
-    // load specific
     let loaded = store.load_version("ns1", "tbl", 1).await.unwrap();
     assert_eq!(loaded.version_id, 1);
     assert_eq!(loaded.metadata_location, "s3://bucket/v1");
 
-    // list
     let versions = store.list_versions("ns1", "tbl").await.unwrap();
     assert_eq!(versions.len(), 2);
     assert_eq!(versions[0].version_id, 1);
@@ -222,7 +228,6 @@ async fn test_version_conflict() {
         .await
         .unwrap();
 
-    // commit v1
     store
         .commit_version(
             "ns1",
@@ -235,7 +240,6 @@ async fn test_version_conflict() {
         .await
         .unwrap();
 
-    // commit with wrong previous_version_id
     let err = store
         .commit_version(
             "ns1",
@@ -255,15 +259,12 @@ async fn test_version_conflict() {
 async fn test_not_found_errors() {
     let store = setup().await;
 
-    // namespace
     let err = store.get_namespace("missing").await.unwrap_err();
     assert!(matches!(err, StoreError::NotFound(_)));
 
-    // asset (namespace doesn't exist)
     let err = store.get_asset("missing", "tbl").await.unwrap_err();
     assert!(matches!(err, StoreError::NotFound(_)));
 
-    // asset (namespace exists, asset missing)
     store
         .create_namespace("ns1", AssetFormat::Lance, HashMap::new())
         .await
@@ -271,7 +272,6 @@ async fn test_not_found_errors() {
     let err = store.get_asset("ns1", "tbl").await.unwrap_err();
     assert!(matches!(err, StoreError::NotFound(_)));
 
-    // version (asset missing)
     let err = store.load_current_version("ns1", "tbl").await.unwrap_err();
     assert!(matches!(err, StoreError::NotFound(_)));
 }

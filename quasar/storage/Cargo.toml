@@ -19,6 +19,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 serial_test = "3"
+postgresql_embedded = { version = "0.20", default-features = false, features = ["tokio", "zonky"] }
 
 [lints]
 workspace = true
