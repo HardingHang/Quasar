@@ -1,0 +1,49 @@
+[workspace]
+members = ["core", "storage", "adapter", "server"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Quasar Team"]
+license = "Apache-2.0"
+
+[workspace.dependencies]
+# internal
+quasar-core = { path = "core" }
+quasar-storage = { path = "storage" }
+quasar-adapter = { path = "adapter" }
+
+# async
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+
+# serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# types
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# error handling
+thiserror = "2"
+
+# database
+tokio-postgres = "0.7"
+deadpool-postgres = "0.14"
+
+# migration
+refinery = { version = "0.8", features = ["tokio-postgres"] }
+
+# web framework
+axum = "0.8"
+tower = "0.5"
+
+# tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
