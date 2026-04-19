@@ -16,7 +16,7 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 
 | 属性 | 值 |
 |------|---|
-| **阶段** | S2（Storage 基础） |
+| **阶段** | S3（Lance Namespace 端点） |
 | **Phase** | Phase 1（Lance REST Namespace） |
 | **状态** | 未开始 |
 
@@ -30,7 +30,7 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 |------|------|------|---------|
 | S0 | 项目骨架 | 已完成 | `cargo build` 成功编译 |
 | S1 | Core 层定义 | 已完成 | 所有 trait 和数据结构定义完毕 |
-| S2 | Storage 基础 | 未开始 | PostgreSQL 可连接，DDL 可迁移，基础 CRUD 可运行 |
+| S2 | Storage 基础 | 已完成 | PostgreSQL 可连接，DDL 可迁移，基础 CRUD 可运行 |
 | S3 | Lance Namespace 端点 | 未开始 | `curl` 可操作 Lance Namespace |
 | S4 | Lance Table 基础操作 | 未开始 | `curl` 可操作 Lance Table |
 | S5 | Lance 版本管理 | 未开始 | `curl` 可注册和查询版本 |
@@ -49,6 +49,11 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 
 ## 已完成的里程碑
 
+- **S2 — Storage 基础**（2026-04-19）
+  - `quasar-storage` 创建 refinery migration `V1__init.sql`（namespaces / assets / asset_versions）
+  - `PgCatalogStore` 实现 `CatalogStore` trait 全部方法（含 CAS 冲突检测的 `commit_version`）
+  - `cargo build` / `cargo clippy` 零警告通过
+
 - **S1 — Core 层定义**（2026-04-19）
   - `quasar-core` 定义 `StoreError`、`AssetFormat`、`Namespace`、`Asset`、`AssetVersion`、`AssetCommitUpdate`
   - `CatalogStore` trait 完整签名定义（Namespace / Asset / Version 全生命周期）
@@ -62,6 +67,12 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 ---
 
 ## 修订记录
+
+### V1.3（2026-04-19）
+
+- 更新：S2 状态标记为"已完成"
+- 更新：当前阶段推进至 S3
+- 新增：已完成里程碑记录 S2
 
 ### V1.2（2026-04-19）
 
