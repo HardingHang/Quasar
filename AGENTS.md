@@ -32,8 +32,9 @@ Project/
 │   │   └── MVP_DESIGN.md         # 完整设计规格：架构、数据模型、端点、接口、开发阶段划分
 │   │
 │   └── conventions/       # 项目规范
-│       ├── COMMIT_CONVENTION.md  # Git commit message 格式规范
-│       └── CODING_CONVENTION.md  # Rust 编码规范
+│       ├── COMMIT_CONVENTION.md      # Git commit message 格式规范
+│       ├── CODING_CONVENTION.md      # Rust 编码规范
+│       └── DEVELOPMENT_CONVENTION.md # 项目开发规范（测试、文档、审查、验收）
 ```
 
 ---
@@ -122,10 +123,21 @@ Project/
 
 ## 规范遵循要求
 
-1. **每次提交前**检查 commit message 是否符合 `docs/conventions/COMMIT_CONVENTION.md`
-2. **编写代码时**遵循 `docs/conventions/CODING_CONVENTION.md`
-3. **修改设计文档时**在对应文档的"修订记录"末尾追加新条目，按规则增长版本号
-4. **实现端点前**先对照 `MVP_DESIGN.md` 确认端点路径、请求/响应格式、错误码映射
-5. **修改数据模型时**同步更新 `DATA_MODEL.md` 中的 Rust 定义和 DDL
-6. **完成一个阶段的全部工作（功能实现 + 测试通过 + 文档更新）后**，更新 `docs/PROGRESS.md`，将该阶段状态标记为"已完成"
+### 三类规范的关系
+
+| 规范 | 定义 | 文档 |
+|------|------|------|
+| 开发规范 | 做什么、何时做 | `docs/conventions/DEVELOPMENT_CONVENTION.md` |
+| 编码规范 | 怎么写 | `docs/conventions/CODING_CONVENTION.md` |
+| 提交规范 | 怎么记 | `docs/conventions/COMMIT_CONVENTION.md` |
+
+### 具体要求
+
+1. **每次提交前**检查 commit message 是否符合提交规范
+2. **编写代码时**遵循编码规范
+3. **开发功能/模块时**遵循开发规范中的工作流、测试、文档、审查要求
+4. **修改设计文档时**在对应文档的"修订记录"末尾追加新条目，按规则增长版本号
+5. **实现端点前**先对照**设计规格文档**确认端点路径、请求/响应格式、错误码映射
+6. **修改数据模型时**同步更新**数据模型文档**中的 Rust 定义和 DDL
+7. **完成一个阶段的全部工作（功能实现 + 测试通过 + 文档更新）后**，更新**进度跟踪文档**，将该阶段状态标记为"已完成"
 
