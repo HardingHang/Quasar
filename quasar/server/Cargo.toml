@@ -1,0 +1,21 @@
+[package]
+name = "quasar-server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "quasar-server"
+path = "src/main.rs"
+
+[dependencies]
+quasar-core = { workspace = true }
+quasar-storage = { workspace = true }
+quasar-adapter = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tower = { workspace = true }
+
+[lints]
+workspace = true
