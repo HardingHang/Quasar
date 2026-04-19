@@ -165,7 +165,49 @@ feat(all): add format field to Namespace
 
 ---
 
+## 分支策略
+
+Quasar 采用 **main + dev + feature** 三层分支模型。
+
+### 分支定义
+
+| 分支 | 用途 | 规则 |
+|------|------|------|
+| `main` | 稳定分支 | 只接受 `dev` 分支的合并，不直接提交代码 |
+| `dev` | 开发集成 | 接受 feature 分支合并，阶段性里程碑完成后合并到 `main` |
+| `feature/s{N}-{name}` | 阶段开发 | 每个开发阶段一个分支，从 `dev` 切出，完成后 PR 合并到 `dev` |
+
+### feature 分支命名
+
+```
+feature/s0-project-skeleton
+feature/s1-core-definition
+feature/s2-storage-basics
+feature/s3-lance-namespace
+feature/s4-lance-table
+feature/s5-lance-version
+feature/s6-infrastructure
+feature/s7-lance-integration
+feature/s8-iceberg-crud
+feature/s9-iceberg-cas
+feature/s10-spark-integration
+```
+
+### 工作流
+
+1. 从 `dev` 切出 feature 分支：`git checkout -b feature/s3-lance-namespace dev`
+2. 在 feature 分支上开发，按本规范提交 commit
+3. 阶段完成后，发起 PR 合并到 `dev`
+4. Phase 1（S0~S7）全部完成后，`dev` 合并到 `main`，打 tag `v0.1.0`
+5. Phase 2（S8~S10）完成后，`dev` 合并到 `main`，打 tag `v1.0.0`
+
+---
+
 ## 修订记录
+
+### V1.1
+
+- 新增：分支策略章节（main + dev + feature 三层模型、feature 分支命名规则、工作流）
 
 ### V1.0
 
