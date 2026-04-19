@@ -10,6 +10,15 @@ pub enum AssetFormat {
     Lance,
 }
 
+impl AssetFormat {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AssetFormat::Iceberg => "iceberg",
+            AssetFormat::Lance => "lance",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Namespace {
     pub id: Uuid,
