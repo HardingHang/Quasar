@@ -1,6 +1,7 @@
 pub mod error;
 pub mod namespace;
 pub mod table;
+pub mod version;
 
 use axum::{
     routing::{get, post},
@@ -28,4 +29,8 @@ pub fn routes() -> Router<Arc<dyn CatalogStore>> {
         .route("/lance/v1/table/{id}/drop", post(table::drop_table))
         .route("/lance/v1/table/{id}/exists", post(table::table_exists))
         .route("/lance/v1/table/{id}/rename", post(table::rename_table))
+        // Version routes
+        .route("/lance/v1/table/{id}/version/create", post(version::create_version))
+        .route("/lance/v1/table/{id}/version/list", get(version::list_versions))
+        .route("/lance/v1/table/{id}/version/describe", post(version::describe_version))
 }

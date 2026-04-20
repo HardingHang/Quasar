@@ -12,7 +12,7 @@ use super::error::{store_error_to_lance_table, LanceError, ProblemDetails};
 
 // ── Path Parsing ───────────────────────────────────────────
 
-fn parse_table_id(id: &str) -> Result<(&str, &str), LanceError> {
+pub(crate) fn parse_table_id(id: &str) -> Result<(&str, &str), LanceError> {
     id.rsplit_once('$').ok_or_else(|| LanceError::InvalidInput {
         detail: format!("invalid table id '{}': expected '{{namespace}}${{table}}'", id),
         instance: format!("/lance/v1/table/{}", id),
