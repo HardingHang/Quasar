@@ -16,7 +16,7 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 
 | 属性 | 值 |
 |------|---|
-| **阶段** | S5（Lance 版本管理） |
+| **阶段** | S6（基础设施） |
 | **Phase** | Phase 1（Lance REST Namespace） |
 | **状态** | 未开始 |
 
@@ -33,7 +33,7 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 | S2 | Storage 基础 | 已完成 | PostgreSQL 可连接，DDL 可迁移，基础 CRUD 可运行 |
 | S3 | Lance Namespace 端点 | 已完成 | `curl` 可操作 Lance Namespace |
 | S4 | Lance Table 基础操作 | 已完成 | `curl` 可操作 Lance Table |
-| S5 | Lance 版本管理 | 未开始 | `curl` 可注册和查询版本 |
+| S5 | Lance 版本管理 | 已完成 | `curl` 可注册和查询版本 |
 | S6 | 基础设施 | 未开始 | 容器化部署，`/healthz` 和 `/readyz` 正常 |
 | S7 | Lance 集成验证 | 未开始 | Lance Python SDK 端到端跑通 |
 
@@ -51,13 +51,30 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 
 | 属性 | 值 |
 |------|---|
-| **阶段** | S4（Lance Table 基础操作） |
+| **阶段** | S6（基础设施） |
 | **Phase** | Phase 1（Lance REST Namespace） |
 | **状态** | 未开始 |
 
 ---
 
 ## 已完成的里程碑
+
+- **S5 — Lance 版本管理**（2026-04-20）
+  - `CatalogStore` trait 新增 `create_version` 方法（客户端指定 version_id，区别于 Iceberg CAS 的 `commit_version`）
+  - `PgCatalogStore` 实现 `create_version`（INSERT 带 version_id，`UNIQUE(asset_id, version_id)` 约束冲突 → 409）
+  - Lance 错误模块扩展：新增 `TableVersionAlreadyExists` 变体
+  - Lance 版本管理 3 个端点全部实现：
+    - `POST /lance/v1/table/{id}/version/create` — 注册版本（version + manifest_path）
+    - `GET /lance/v1/table/{id}/version/list` — 列出版本历史
+    - `POST /lance/v1/table/{id}/version/describe` — 获取指定版本详情
+  - 测试覆盖（`adapter/tests/lance_version.rs`，6 个）：
+    - 创建/描述版本正常流
+    - 重复创建返回 409 + TableVersionAlreadyExists
+    - 列出版本（v1, v2）
+    - 描述不存在的版本返回 404
+    - 对不存在的表创建版本返回 404
+    - 创建版本后 describe_table 返回 current_version
+  - `cargo build` / `cargo clippy` 零警告 / `cargo test` 全通过（27 个测试）
 
 - **S4 — Lance Table 基础操作**（2026-04-20）
   - Lance 错误模块扩展：新增 `TableNotFound`、`TableAlreadyExists`、`TableNotEmpty` 变体
@@ -130,18 +147,26 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 | S2 | `storage/tests/integration.rs` | 5 | Namespace CRUD、Asset CRUD、版本提交/加载/冲突、NotFound |
 | S3 | `adapter/tests/lance_namespace.rs` | 6 | Lance Namespace 创建/描述/列表/存在检查/删除、409 冲突、404 NotFound、格式隔离 |
 | S4 | `adapter/tests/lance_table.rs` | 10 | Lance Table 声明/描述/列表/注册/注销/删除/存在检查/重命名、409 冲突、404 NotFound |
+| S5 | `adapter/tests/lance_version.rs` | 6 | Lance 版本创建/列表/描述、409 版本冲突、404 NotFound、current_version 联动 |
 
 **运行方式：**
 ```bash
 cd quasar
-cargo test                      # 全部 21 个测试
+cargo test                      # 全部 27 个测试
 cargo test -p quasar-storage    # Storage 层 5 个
-cargo test -p quasar-adapter    # Adapter 层 16 个
+cargo test -p quasar-adapter    # Adapter 层 22 个
 ```
 
 ---
 
 ## 修订记录
+
+### V1.6（2026-04-20）
+
+- 更新：S5 状态标记为"已完成"
+- 更新：当前阶段推进至 S6
+- 新增：已完成里程碑记录 S5（含测试覆盖详情）
+- 新增：S5 测试覆盖条目至测试覆盖总览表
 
 ### V1.5（2026-04-20）
 
