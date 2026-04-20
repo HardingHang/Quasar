@@ -8,9 +8,26 @@
 
 ### 1.1 最小部署（Server + PostgreSQL）
 
+首次使用需先编译并构建镜像：
+
 ```bash
 cd quasar
-docker-compose up -d
+
+# 1. 本地编译 release 二进制
+cargo build --release -p quasar-server
+
+# 2. 构建 Docker 镜像
+docker build -t quasar-server:latest .
+
+# 3. 启动最小部署
+docker compose up -d
+```
+
+后续直接启动：
+
+```bash
+cd quasar
+docker compose up -d
 ```
 
 启动后访问：
@@ -31,22 +48,32 @@ curl http://localhost:8080/lance/v1/namespace/default/list
 停止：
 
 ```bash
-docker-compose down
+docker compose down
 ```
 
 ### 1.2 Lance 集成环境（Server + PostgreSQL + MinIO）
 
-用于 Lance Python SDK 端到端验证：
+用于 Lance Python SDK 端到端验证，需要先本地编译再启动：
 
 ```bash
 cd quasar
-docker-compose -f docker-compose.lance.yml up -d
+
+# 1. 本地编译 release 二进制（复用宿主机的 cargo 缓存）
+cargo build --release -p quasar-server
+
+# 2. 构建 Docker 镜像（基于本地二进制，无需容器内重新下载依赖）
+docker build -t quasar-server:latest .
+
+# 3. 启动 Lance 集成环境
+docker compose -f docker-compose.lance.yml up -d
 ```
 
-该环境包含：
-- **Quasar Server**（端口 8080）
-- **PostgreSQL**（内部端口 5432）
-- **MinIO**（对象存储，S3 API 端口 9000，Console 端口 9001）
+> **说明：** `docker-compose.lance.yml` 使用 `image: quasar-server:latest` 而非 `build: .`，避免容器内重复下载 crates.io 依赖。
+>
+> 该环境包含：
+> - **Quasar Server**（端口 8080）
+> - **PostgreSQL**（内部端口 5432）
+> - **MinIO**（对象存储，S3 API 端口 9000，Console 端口 9001）
 
 ---
 
@@ -138,7 +165,7 @@ Dockerfile 的核心逻辑：
 
 ```dockerfile
 # Stage 1: Build（构建阶段）
-FROM rust:1.86-slim-bookworm AS builder
+FROM rust:1.94-slim-bookworm AS builder
 COPY . .
 RUN cargo build --release -p quasar-server
 
@@ -423,7 +450,7 @@ services:
       retries: 5
 
   server:
-    build: .
+    image: quasar-server:latest
     environment:
       QUASAR_DATABASE_URL: postgres://quasar:quasar@db:5432/quasar
     ports:
@@ -469,10 +496,13 @@ export QUASAR_DATABASE_URL="postgres://postgres:postgres@localhost:5432/quasar"
 
 ### 5.1 启动环境
 
+按 [1.2 节](#12-lance-集成环境server--postgresql--minio) 启动 Lance 集成环境，确保容器状态正常：
+
 ```bash
-cd quasar
-docker-compose -f docker-compose.lance.yml up -d
+docker compose -f docker-compose.lance.yml ps
 ```
+
+确认 `quasar-server-1`、`quasar-db-1`、`quasar-minio-1` 均为 `healthy` 状态后即可开始验证。
 
 ### 5.2 安装 Python 依赖
 
@@ -530,7 +560,7 @@ Quasar S7: Lance Integration Test
 [PASS] Drop table + namespace
 
 ==================================================
-Results: 11 passed, 0 failed
+Results: 12 passed, 0 failed
 ==================================================
 ```
 
@@ -647,7 +677,7 @@ GET /readyz    # Readiness（检查 DB 连通性）
 | Server 启动失败，日志显示 "error connecting to server" | PostgreSQL 未就绪 | 确保 DB 先启动并可通过 `QUASAR_DATABASE_URL` 连接 |
 | `readyz` 返回 503 | DB 连接池耗尽或网络不通 | 检查 DB 状态，确认连接串正确 |
 | `declare_table` 返回 `lance://...` | `QUASAR_WAREHOUSE_PATH` 未设置 | 配置环境变量 |
-| Lance Python SDK 无法写入 MinIO | storage_options 不匹配 | 确认 endpoint、access_key、secret_key 正确；若 MinIO 在容器内，endpoint 应为 `http://minio:9000` |
+| Lance Python SDK 无法写入 MinIO | storage_options 不匹配 | 确认 endpoint、access_key、secret_key 正确；测试脚本会自动将 `http://minio:9000` 替换为 `http://localhost:9000` 以适配宿主机执行 |
 | `docker-compose.lance.yml` server 启动报错 | MinIO bucket 不存在 | 测试脚本会自动创建 bucket；手动验证时需先用 `boto3` 或 MinIO Console 创建 |
 | 集成测试失败 "Quasar server did not become ready" | Server 启动慢或端口冲突 | 检查 `docker-compose -f docker-compose.lance.yml logs server`，确认端口 8080 未被占用 |
 
@@ -657,8 +687,24 @@ GET /readyz    # Readiness（检查 DB 连通性）
 
 | 组件 | 版本 |
 |------|------|
-| Rust | 1.86+ |
+| Rust | 1.94+ |
 | PostgreSQL | 14+ |
 | Python | 3.10+ |
 | Lance (Python) | 0.25+ |
 | PyArrow | 16+ |
+
+---
+
+## 9. 修订记录
+
+### V1.1（2026-04-20）
+
+- 更新：Dockerfile Rust 基础镜像 1.86 → 1.94（`time` crate 要求 1.88+）
+- 更新：最小部署和 Lance 集成环境启动流程，增加本地编译 + 镜像构建步骤
+- 更新：预期输出 11 passed → 12 passed（清理步骤 PASS）
+- 更新：故障排查中 MinIO endpoint 说明（脚本自动替换 `localhost:9000`）
+- 更新：版本兼容性 Rust 1.86+ → 1.94+
+
+### V1.0（2026-04-20）
+
+- 初始版本：完整部署与验证指南

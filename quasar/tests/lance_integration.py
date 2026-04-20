@@ -29,6 +29,8 @@ def quasar_post(path: str, payload: dict | None = None) -> dict:
         timeout=QUASAR_TIMEOUT,
     )
     resp.raise_for_status()
+    if not resp.text:
+        return {}
     return resp.json()
 
 
@@ -123,6 +125,9 @@ def main() -> int:
         declare_resp = quasar_post(f"/lance/v1/table/{table_id}/declare")
         location = declare_resp.get("location", "")
         storage_options = declare_resp.get("storage_options", {})
+        # Replace internal Docker endpoint with host-accessible endpoint
+        if storage_options.get("endpoint") == "http://minio:9000":
+            storage_options["endpoint"] = "http://localhost:9000"
 
         expected_location = "s3://warehouse/prod/users/"
         if check(
