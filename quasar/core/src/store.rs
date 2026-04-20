@@ -110,4 +110,13 @@ pub trait CatalogStore: Send + Sync {
         format: AssetFormat,
         asset_name: &str,
     ) -> Result<Vec<AssetVersion>, StoreError>;
+
+    async fn create_version(
+        &self,
+        namespace_name: &str,
+        format: AssetFormat,
+        asset_name: &str,
+        version_id: i64,
+        metadata_location: String,
+    ) -> Result<AssetVersion, StoreError>;
 }

@@ -602,4 +602,39 @@ impl CatalogStore for PgCatalogStore {
 
         rows.iter().map(row_to_version).collect()
     }
+
+    async fn create_version(
+        &self,
+        namespace_name: &str,
+        format: AssetFormat,
+        asset_name: &str,
+        version_id: i64,
+        metadata_location: String,
+    ) -> Result<AssetVersion, StoreError> {
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+
+        let asset = self.get_asset(namespace_name, format, asset_name).await?;
+
+        let row = client
+            .query_one(
+                "INSERT INTO asset_versions (asset_id, version_id, metadata_location) VALUES ($1, $2, $3) RETURNING *",
+                &[&asset.id, &version_id, &metadata_location],
+            )
+            .await
+            .map_err(|e| match e.code() {
+                Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) => {
+                    StoreError::AlreadyExists(format!(
+                        "version {} for asset '{}'",
+                        version_id, asset_name
+                    ))
+                }
+                _ => StoreError::Internal(e.to_string()),
+            })?;
+
+        row_to_version(&row)
+    }
 }
