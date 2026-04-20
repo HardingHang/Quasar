@@ -30,6 +30,7 @@ serde_json = { workspace = true }
 deadpool-postgres = { workspace = true }
 tokio-postgres = { workspace = true }
 http-body-util = "0.1"
+serial_test = "3"
 
 [lints]
 workspace = true
