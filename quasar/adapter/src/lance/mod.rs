@@ -8,10 +8,31 @@ use axum::{
     Router,
 };
 use quasar_core::CatalogStore;
+use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Configuration for Lance REST Namespace endpoints.
+#[derive(Clone, Default)]
+pub struct LanceConfig {
+    /// Base warehouse path for table location allocation.
+    /// e.g. `s3://bucket/warehouse/` or `file:///tmp/warehouse/`
+    pub warehouse_path: Option<String>,
+    /// Storage options passed back to clients for object store access.
+    pub storage_options: HashMap<String, String>,
+}
+
+static LANCE_CONFIG: std::sync::OnceLock<LanceConfig> = std::sync::OnceLock::new();
+
+pub(crate) fn lance_config() -> &'static LanceConfig {
+    LANCE_CONFIG.get().unwrap_or_else(|| {
+        static DEFAULT: std::sync::OnceLock<LanceConfig> = std::sync::OnceLock::new();
+        DEFAULT.get_or_init(LanceConfig::default)
+    })
+}
+
 /// Create Lance REST Namespace routes mounted at `/lance/v1/...`.
-pub fn routes() -> Router<Arc<dyn CatalogStore>> {
+pub fn routes(config: LanceConfig) -> Router<Arc<dyn CatalogStore>> {
+    let _ = LANCE_CONFIG.set(config);
     Router::new()
         // Namespace routes
         .route("/lance/v1/namespace/{id}/create", post(namespace::create_namespace))

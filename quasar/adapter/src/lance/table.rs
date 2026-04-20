@@ -74,9 +74,20 @@ pub async fn declare_table(
     let instance = format!("/lance/v1/table/{}/declare", id);
     let (namespace, table) = parse_table_id(&id)?;
 
-    let location = format!("lance://{}/{}", namespace, table);
+    let config = super::lance_config();
+    let location = if let Some(ref wp) = config.warehouse_path {
+        format!("{}/{}/{}/", wp.trim_end_matches('/'), namespace, table)
+    } else {
+        format!("lance://{}/{}", namespace, table)
+    };
+
     let mut properties = req.options;
     properties.insert("location".to_string(), location.clone());
+
+    // Persist storage options into properties with prefix for later retrieval.
+    for (key, value) in &config.storage_options {
+        properties.insert(format!("storage_{}", key), value.clone());
+    }
 
     let asset = store
         .create_asset(namespace, AssetFormat::Lance, table, properties)
@@ -88,7 +99,7 @@ pub async fn declare_table(
         Json(DeclareTableResponse {
             name: asset.name,
             location,
-            storage_options: HashMap::new(),
+            storage_options: config.storage_options.clone(),
         }),
     ))
 }

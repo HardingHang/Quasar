@@ -3,6 +3,12 @@ pub struct Config {
     pub port: u16,
     pub database_url: String,
     pub log_level: String,
+    pub warehouse_path: Option<String>,
+    pub s3_endpoint: Option<String>,
+    pub s3_access_key: Option<String>,
+    pub s3_secret_key: Option<String>,
+    pub s3_region: String,
+    pub s3_allow_http: bool,
 }
 
 impl Config {
@@ -19,6 +25,14 @@ impl Config {
             log_level: std::env::var("QUASAR_LOG_LEVEL")
                 .or_else(|_| std::env::var("RUST_LOG"))
                 .unwrap_or_else(|_| "info".to_string()),
+            warehouse_path: std::env::var("QUASAR_WAREHOUSE_PATH").ok(),
+            s3_endpoint: std::env::var("QUASAR_S3_ENDPOINT").ok(),
+            s3_access_key: std::env::var("QUASAR_S3_ACCESS_KEY").ok(),
+            s3_secret_key: std::env::var("QUASAR_S3_SECRET_KEY").ok(),
+            s3_region: std::env::var("QUASAR_S3_REGION").unwrap_or_else(|_| "us-east-1".to_string()),
+            s3_allow_http: std::env::var("QUASAR_S3_ALLOW_HTTP")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
         }
     }
 }

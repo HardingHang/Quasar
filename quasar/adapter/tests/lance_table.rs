@@ -75,7 +75,7 @@ async fn setup() -> PgCatalogStore {
 
 fn test_app(store: PgCatalogStore) -> axum::Router {
     let store: Arc<dyn CatalogStore> = Arc::new(store);
-    lance::routes().with_state(store)
+    lance::routes(lance::LanceConfig::default()).with_state(store)
 }
 
 async fn body_json(response: axum::response::Response) -> Value {

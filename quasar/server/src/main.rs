@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use tracing::info;
 
@@ -18,7 +19,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store = std::sync::Arc::new(quasar_storage::PgCatalogStore::new(pool.clone()));
     store.migrate().await?;
 
-    let app = quasar_server::create_app(pool);
+    let mut storage_options = HashMap::new();
+    if let Some(ref endpoint) = cfg.s3_endpoint {
+        storage_options.insert("endpoint".to_string(), endpoint.clone());
+    }
+    if let Some(ref access_key) = cfg.s3_access_key {
+        storage_options.insert("access_key_id".to_string(), access_key.clone());
+    }
+    if let Some(ref secret_key) = cfg.s3_secret_key {
+        storage_options.insert("secret_access_key".to_string(), secret_key.clone());
+    }
+    if !cfg.s3_region.is_empty() {
+        storage_options.insert("region".to_string(), cfg.s3_region.clone());
+    }
+    if cfg.s3_allow_http {
+        storage_options.insert("allow_http".to_string(), "true".to_string());
+    }
+
+    let lance_config = quasar_adapter::lance::LanceConfig {
+        warehouse_path: cfg.warehouse_path,
+        storage_options,
+    };
+
+    let app = quasar_server::create_app_with_config(pool, lance_config);
 
     let addr = SocketAddr::from((cfg.host.parse::<std::net::IpAddr>()?, cfg.port));
     info!("Quasar server listening on {}", addr);
