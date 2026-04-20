@@ -34,7 +34,7 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 | S3 | Lance Namespace 端点 | 已完成 | `curl` 可操作 Lance Namespace |
 | S4 | Lance Table 基础操作 | 已完成 | `curl` 可操作 Lance Table |
 | S5 | Lance 版本管理 | 已完成 | `curl` 可注册和查询版本 |
-| S6 | 基础设施 | 未开始 | 容器化部署，`/healthz` 和 `/readyz` 正常 |
+| S6 | 基础设施 | 已完成 | 容器化部署，`/healthz` 和 `/readyz` 正常 |
 | S7 | Lance 集成验证 | 未开始 | Lance Python SDK 端到端跑通 |
 
 ### Phase 2：Iceberg REST Catalog（MVP）
@@ -51,13 +51,27 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 
 | 属性 | 值 |
 |------|---|
-| **阶段** | S6（基础设施） |
+| **阶段** | S7（Lance 集成验证） |
 | **Phase** | Phase 1（Lance REST Namespace） |
 | **状态** | 未开始 |
 
 ---
 
 ## 已完成的里程碑
+
+- **S6 — 基础设施**（2026-04-20）
+  - 配置模块（`server/src/config.rs`）：环境变量驱动的结构化配置
+    - `QUASAR_HOST` / `QUASAR_PORT` / `QUASAR_DATABASE_URL` / `QUASAR_LOG_LEVEL`
+  - 健康检查模块（`server/src/health.rs`）：
+    - `GET /healthz` — Liveness Probe，始终返回 `{"status": "ok"}`
+    - `GET /readyz` — Readiness Probe，检查 DB 连通性（`SELECT 1`），DB 不可达返回 503
+  - 优雅关闭：SIGTERM/SIGINT 信号捕获，axum `with_graceful_shutdown`
+  - 请求日志中间件：`tower_http::TraceLayer` 自动输出访问日志（方法、路径、状态码、耗时）
+  - 容器化：
+    - `Dockerfile` — 多阶段构建（rust:1.86-slim → debian:bookworm-slim）
+    - `docker-compose.yml` — 本地开发栈（server + PostgreSQL，db healthcheck + depends_on）
+    - `.dockerignore`
+  - `cargo build` / `cargo clippy` 零警告 / `cargo test` 全通过（27 个测试）
 
 - **S5 — Lance 版本管理**（2026-04-20）
   - `CatalogStore` trait 新增 `create_version` 方法（客户端指定 version_id，区别于 Iceberg CAS 的 `commit_version`）
@@ -148,18 +162,26 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 | S3 | `adapter/tests/lance_namespace.rs` | 6 | Lance Namespace 创建/描述/列表/存在检查/删除、409 冲突、404 NotFound、格式隔离 |
 | S4 | `adapter/tests/lance_table.rs` | 10 | Lance Table 声明/描述/列表/注册/注销/删除/存在检查/重命名、409 冲突、404 NotFound |
 | S5 | `adapter/tests/lance_version.rs` | 6 | Lance 版本创建/列表/描述、409 版本冲突、404 NotFound、current_version 联动 |
+| S6 | `server/tests/health.rs` | 3 | /healthz 存活性、/readyz 就绪性（DB 连通性）、Lance 路由集成回归 |
 
 **运行方式：**
 ```bash
 cd quasar
-cargo test                      # 全部 27 个测试
+cargo test                      # 全部 30 个测试
 cargo test -p quasar-storage    # Storage 层 5 个
 cargo test -p quasar-adapter    # Adapter 层 22 个
+cargo test -p quasar-server     # Server 层 3 个
 ```
 
 ---
 
 ## 修订记录
+
+### V1.7（2026-04-20）
+
+- 更新：S6 状态标记为"已完成"
+- 更新：当前阶段推进至 S7
+- 新增：已完成里程碑记录 S6（含基础设施详情）
 
 ### V1.6（2026-04-20）
 
