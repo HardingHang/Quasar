@@ -468,7 +468,50 @@ volumes:
 - PostgreSQL 数据持久化到命名卷
 - Server 等待 DB 就绪后才启动
 
-### 4.2 原生二进制
+### 4.2 本地预编译快速构建（推荐日常开发）
+
+原 `Dockerfile` 在容器内编译时，需要从零下载所有 Rust 依赖（crates.io），网络慢时需 **10 分钟以上**。
+
+本方案改为**本地编译**（复用 cargo 缓存，约 15 秒）+ **镜像打包**（只 COPY 二进制，约 1 秒）：
+
+```bash
+cd quasar
+./scripts/docker-build.sh
+```
+
+脚本自动化三步：
+1. `cargo build --release -p quasar-server` — 本地编译
+2. `cp target/release/quasar-server quasar-server-bin` — 复制二进制到 build context
+3. `docker build -f Dockerfile.fast -t quasar-server:latest .` — 快速打包
+4. 退出时自动清理临时文件
+
+**Dockerfile.fast 原理：**
+
+```dockerfile
+FROM debian:bookworm-slim
+RUN apt-get install ca-certificates
+COPY quasar-server-bin /usr/local/bin/quasar-server
+CMD ["quasar-server"]
+```
+
+只做两件事：安装 HTTPS 证书、复制已编译好的二进制。没有 Rust 工具链、没有 crate 下载。
+
+**完整流程示例：**
+
+```bash
+cd quasar
+
+# 编译 + 打包镜像（约 15-30 秒）
+./scripts/docker-build.sh
+
+# 启动最小部署
+docker compose up -d
+
+# 或启动 Lance 集成环境
+docker compose -f docker-compose.lance.yml up -d
+```
+
+### 4.3 原生二进制
 
 ```bash
 # 编译
@@ -480,7 +523,7 @@ export QUASAR_DATABASE_URL="postgres://postgres:postgres@localhost:5432/quasar"
 ./target/release/quasar-server
 ```
 
-### 4.3 生产环境注意事项
+### 4.4 生产环境注意事项
 
 - **数据库迁移**：Server 启动时会自动运行 `refinery` 迁移。多实例部署时建议先由单个实例完成迁移，再扩容。
 - **连接池**：当前使用 `deadpool_postgres` 默认配置，生产环境可通过 `QUASAR_DATABASE_URL` 的连接参数调整（如 `?pool.max_size=20`）。
@@ -701,6 +744,7 @@ GET /readyz    # Readiness（检查 DB 连通性）
 
 - 更新：Dockerfile Rust 基础镜像 1.86 → 1.94（`time` crate 要求 1.88+）
 - 更新：最小部署和 Lance 集成环境启动流程，增加本地编译 + 镜像构建步骤
+- 新增：4.2 节「本地预编译快速构建」及配套 `scripts/docker-build.sh` / `Dockerfile.fast`
 - 更新：预期输出 11 passed → 12 passed（清理步骤 PASS）
 - 更新：故障排查中 MinIO endpoint 说明（脚本自动替换 `localhost:9000`）
 - 更新：版本兼容性 Rust 1.86+ → 1.94+
