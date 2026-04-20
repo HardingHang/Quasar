@@ -18,6 +18,18 @@ tracing-subscriber = { workspace = true }
 tower = { workspace = true }
 deadpool-postgres = { workspace = true }
 tokio-postgres = { workspace = true }
+tower-http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+quasar-storage = { workspace = true }
+postgresql_embedded = { version = "0.20", default-features = false, features = ["tokio", "zonky"] }
+tower = { workspace = true, features = ["util"] }
+serde_json = { workspace = true }
+deadpool-postgres = { workspace = true }
+tokio-postgres = { workspace = true }
+http-body-util = "0.1"
 
 [lints]
 workspace = true
