@@ -35,6 +35,8 @@ pub enum LanceError {
     TableNotFound { name: String, instance: String },
     TableAlreadyExists { name: String, instance: String },
     TableNotEmpty { name: String, instance: String },
+    // --- Version errors ---
+    TableVersionAlreadyExists { version: i64, instance: String },
     // --- Generic errors ---
     InvalidInput { detail: String, instance: String },
     InternalError { detail: String, instance: String },
@@ -77,6 +79,12 @@ impl LanceError {
                 error: "TableNotEmpty".to_string(),
                 code: 409,
                 detail: format!("Table '{}' is not empty", name),
+                instance,
+            },
+            LanceError::TableVersionAlreadyExists { version, instance } => ProblemDetails {
+                error: "TableVersionAlreadyExists".to_string(),
+                code: 409,
+                detail: format!("Version {} already exists", version),
                 instance,
             },
             LanceError::InvalidInput { detail, instance } => ProblemDetails {
@@ -136,6 +144,46 @@ pub fn store_error_to_lance_table(err: StoreError, instance: &str) -> LanceError
             name: msg,
             instance: instance.to_string(),
         },
+        StoreError::Conflict(msg) => LanceError::TableNotEmpty {
+            name: msg,
+            instance: instance.to_string(),
+        },
+        StoreError::InvalidInput(msg) => LanceError::InvalidInput {
+            detail: msg,
+            instance: instance.to_string(),
+        },
+        StoreError::Internal(msg) => LanceError::InternalError {
+            detail: msg,
+            instance: instance.to_string(),
+        },
+    }
+}
+
+pub fn store_error_to_lance_version(err: StoreError, instance: &str) -> LanceError {
+    match err {
+        StoreError::NotFound(msg) => LanceError::TableNotFound {
+            name: msg,
+            instance: instance.to_string(),
+        },
+        StoreError::AlreadyExists(msg) => {
+            if msg.starts_with("version ") {
+                let version_str = msg
+                    .trim_start_matches("version ")
+                    .split(' ')
+                    .next()
+                    .unwrap_or("0");
+                let version = version_str.parse::<i64>().unwrap_or(0);
+                LanceError::TableVersionAlreadyExists {
+                    version,
+                    instance: instance.to_string(),
+                }
+            } else {
+                LanceError::TableAlreadyExists {
+                    name: msg,
+                    instance: instance.to_string(),
+                }
+            }
+        }
         StoreError::Conflict(msg) => LanceError::TableNotEmpty {
             name: msg,
             instance: instance.to_string(),
