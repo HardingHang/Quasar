@@ -14,5 +14,15 @@ chrono = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+[dev-dependencies]
+quasar-storage = { workspace = true }
+postgresql_embedded = { version = "0.20", default-features = false, features = ["tokio", "zonky"] }
+serial_test = "3"
+tower = { workspace = true, features = ["util"] }
+serde_json = { workspace = true }
+deadpool-postgres = { workspace = true }
+tokio-postgres = { workspace = true }
+http-body-util = "0.1"
+
 [lints]
 workspace = true
