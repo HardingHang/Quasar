@@ -16,7 +16,7 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 
 | 属性 | 值 |
 |------|---|
-| **阶段** | S3（Lance Namespace 端点） |
+| **阶段** | S4（Lance Table 基础操作） |
 | **Phase** | Phase 1（Lance REST Namespace） |
 | **状态** | 未开始 |
 
@@ -31,7 +31,7 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 | S0 | 项目骨架 | 已完成 | `cargo build` 成功编译 |
 | S1 | Core 层定义 | 已完成 | 所有 trait 和数据结构定义完毕 |
 | S2 | Storage 基础 | 已完成 | PostgreSQL 可连接，DDL 可迁移，基础 CRUD 可运行 |
-| S3 | Lance Namespace 端点 | 未开始 | `curl` 可操作 Lance Namespace |
+| S3 | Lance Namespace 端点 | 已完成 | `curl` 可操作 Lance Namespace |
 | S4 | Lance Table 基础操作 | 未开始 | `curl` 可操作 Lance Table |
 | S5 | Lance 版本管理 | 未开始 | `curl` 可注册和查询版本 |
 | S6 | 基础设施 | 未开始 | 容器化部署，`/healthz` 和 `/readyz` 正常 |
@@ -47,11 +47,43 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 
 ---
 
+## 当前阶段
+
+| 属性 | 值 |
+|------|---|
+| **阶段** | S4（Lance Table 基础操作） |
+| **Phase** | Phase 1（Lance REST Namespace） |
+| **状态** | 未开始 |
+
+---
+
 ## 已完成的里程碑
+
+- **S3 — Lance Namespace 端点**（2026-04-20）
+  - `namespaces` 表约束修正为 `UNIQUE(name, format)`，修复双协议隔离策略
+  - `CatalogStore` trait 增加 `AssetFormat` 参数到全部方法
+  - Lance RFC-7807 错误模块实现
+  - Lance Namespace 5 个端点全部实现（create/list/describe/drop/exists）
+  - 测试覆盖（`adapter/tests/lance_namespace.rs`，6 个）：
+    - 创建/获取 Namespace 正常流（含 properties）
+    - 重复创建返回 409 + RFC-7807 错误体
+    - 列出 Namespace 只返回对应格式（Iceberg/Lance 隔离）
+    - 存在检查（true/false）
+    - 删除成功 + 重复删除返回 404
+    - 描述不存在的 Namespace 返回 404 + RFC-7807
+  - `cargo build` / `cargo clippy` 零警告 / `cargo test` 全通过
 
 - **S2 — Storage 基础**（2026-04-19）
   - `quasar-storage` 创建 refinery migration `V1__init.sql`（namespaces / assets / asset_versions）
   - `PgCatalogStore` 实现 `CatalogStore` trait 全部方法（含 CAS 冲突检测的 `commit_version`）
+  - 测试覆盖（`storage/tests/integration.rs`，5 个）：
+    - Namespace CRUD：创建/列出/获取/存在检查/删除
+    - 重复创建 Namespace 返回 `AlreadyExists`
+    - Asset CRUD：创建/列出/获取/存在检查/重命名/删除
+    - 重命名冲突返回 `AlreadyExists`
+    - 版本提交与加载：顺序提交 v1→v2，获取当前版本/指定版本/列表
+    - 版本冲突：`previous_version_id` 不匹配返回 `Conflict`
+    - NotFound 场景：namespace 不存在、asset 不存在、无版本记录
   - `cargo build` / `cargo clippy` 零警告通过
 
 - **S1 — Core 层定义**（2026-04-19）
@@ -66,7 +98,32 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 
 ---
 
+## 测试覆盖总览
+
+| 阶段 | 测试文件 | 测试数 | 覆盖场景 |
+|------|---------|-------|---------|
+| S2 | `storage/tests/integration.rs` | 5 | Namespace CRUD、Asset CRUD、版本提交/加载/冲突、NotFound |
+| S3 | `adapter/tests/lance_namespace.rs` | 6 | Lance Namespace 创建/描述/列表/存在检查/删除、409 冲突、404 NotFound、格式隔离 |
+
+**运行方式：**
+```bash
+cd quasar
+cargo test                      # 全部 11 个测试
+cargo test -p quasar-storage    # Storage 层 5 个
+cargo test -p quasar-adapter    # Adapter 层 6 个
+```
+
+---
+
 ## 修订记录
+
+### V1.4（2026-04-20）
+
+- 更新：S3 状态标记为"已完成"
+- 更新：当前阶段推进至 S4
+- 新增：已完成里程碑记录 S3（含测试覆盖详情）
+- 新增：测试覆盖总览章节
+- 修正：S2/S3 里程碑补充测试覆盖明细
 
 ### V1.3（2026-04-19）
 
