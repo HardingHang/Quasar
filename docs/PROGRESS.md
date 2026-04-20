@@ -16,8 +16,8 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 
 | 属性 | 值 |
 |------|---|
-| **阶段** | S6（基础设施） |
-| **Phase** | Phase 1（Lance REST Namespace） |
+| **阶段** | S8（Iceberg Namespace + Table CRUD） |
+| **Phase** | Phase 2（Iceberg REST Catalog） |
 | **状态** | 未开始 |
 
 ---
@@ -35,7 +35,7 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 | S4 | Lance Table 基础操作 | 已完成 | `curl` 可操作 Lance Table |
 | S5 | Lance 版本管理 | 已完成 | `curl` 可注册和查询版本 |
 | S6 | 基础设施 | 已完成 | 容器化部署，`/healthz` 和 `/readyz` 正常 |
-| S7 | Lance 集成验证 | 未开始 | Lance Python SDK 端到端跑通 |
+| S7 | Lance 集成验证 | 已完成 | Lance Python SDK 端到端跑通 |
 
 ### Phase 2：Iceberg REST Catalog（MVP）
 
@@ -58,6 +58,18 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 ---
 
 ## 已完成的里程碑
+
+- **S7 — Lance 集成验证**（2026-04-20）
+  - 扩展 Server Config：新增 `QUASAR_WAREHOUSE_PATH` 和 S3 配置（`S3_ENDPOINT`、`S3_ACCESS_KEY`、`S3_SECRET_KEY`、`S3_REGION`、`S3_ALLOW_HTTP`）
+  - `adapter/src/lance/mod.rs`：新增 `LanceConfig` 结构体，通过 `OnceLock` 全局注入配置
+  - `declare_table` location 分配逻辑：
+    - 若配置 `warehouse_path`，location = `{warehouse_path}/{namespace}/{table}/`
+    - 否则：`lance://{namespace}/{table}`（向后兼容）
+  - `storage_options` 在 `DeclareTableResponse` 中返回，并持久化到 asset properties
+  - `docker-compose.lance.yml`：Quasar + PostgreSQL + MinIO 完整集成环境
+  - Python 集成测试脚本（`tests/lance_integration.py`）：
+    - 创建 Namespace → DeclareTable → Lance Python SDK 写数据 → 注册版本 → 读回验证 → 追加数据 → 列出版本 → 清理
+  - `cargo build` / `cargo clippy` 零警告 / `cargo test` 全通过（30 个测试）
 
 - **S6 — 基础设施**（2026-04-20）
   - 配置模块（`server/src/config.rs`）：环境变量驱动的结构化配置
@@ -176,6 +188,12 @@ cargo test -p quasar-server     # Server 层 3 个
 ---
 
 ## 修订记录
+
+### V1.8（2026-04-20）
+
+- 更新：S7 状态标记为"已完成"
+- 更新：当前阶段推进至 S8（Phase 2：Iceberg REST Catalog）
+- 新增：已完成里程碑记录 S7（含 Lance 集成验证详情）
 
 ### V1.7（2026-04-20）
 
