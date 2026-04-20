@@ -11,6 +11,12 @@ pub struct ProblemDetails {
     pub instance: String,
 }
 
+impl From<LanceError> for ProblemDetails {
+    fn from(err: LanceError) -> Self {
+        err.to_problem_details()
+    }
+}
+
 impl IntoResponse for ProblemDetails {
     fn into_response(self) -> Response {
         let status = StatusCode::from_u16(self.code)
@@ -21,9 +27,15 @@ impl IntoResponse for ProblemDetails {
 
 /// Lance 协议错误类型。
 pub enum LanceError {
+    // --- Namespace errors ---
     NamespaceNotFound { name: String, instance: String },
     NamespaceAlreadyExists { name: String, instance: String },
     NamespaceNotEmpty { name: String, instance: String },
+    // --- Table errors ---
+    TableNotFound { name: String, instance: String },
+    TableAlreadyExists { name: String, instance: String },
+    TableNotEmpty { name: String, instance: String },
+    // --- Generic errors ---
     InvalidInput { detail: String, instance: String },
     InternalError { detail: String, instance: String },
 }
@@ -47,6 +59,24 @@ impl LanceError {
                 error: "NamespaceNotEmpty".to_string(),
                 code: 409,
                 detail: format!("Namespace '{}' is not empty", name),
+                instance,
+            },
+            LanceError::TableNotFound { name, instance } => ProblemDetails {
+                error: "TableNotFound".to_string(),
+                code: 404,
+                detail: format!("Table '{}' not found", name),
+                instance,
+            },
+            LanceError::TableAlreadyExists { name, instance } => ProblemDetails {
+                error: "TableAlreadyExists".to_string(),
+                code: 409,
+                detail: format!("Table '{}' already exists", name),
+                instance,
+            },
+            LanceError::TableNotEmpty { name, instance } => ProblemDetails {
+                error: "TableNotEmpty".to_string(),
+                code: 409,
+                detail: format!("Table '{}' is not empty", name),
                 instance,
             },
             LanceError::InvalidInput { detail, instance } => ProblemDetails {
@@ -82,6 +112,31 @@ pub fn store_error_to_lance(err: StoreError, instance: &str) -> LanceError {
             instance: instance.to_string(),
         },
         StoreError::Conflict(msg) => LanceError::NamespaceNotEmpty {
+            name: msg,
+            instance: instance.to_string(),
+        },
+        StoreError::InvalidInput(msg) => LanceError::InvalidInput {
+            detail: msg,
+            instance: instance.to_string(),
+        },
+        StoreError::Internal(msg) => LanceError::InternalError {
+            detail: msg,
+            instance: instance.to_string(),
+        },
+    }
+}
+
+pub fn store_error_to_lance_table(err: StoreError, instance: &str) -> LanceError {
+    match err {
+        StoreError::NotFound(msg) => LanceError::TableNotFound {
+            name: msg,
+            instance: instance.to_string(),
+        },
+        StoreError::AlreadyExists(msg) => LanceError::TableAlreadyExists {
+            name: msg,
+            instance: instance.to_string(),
+        },
+        StoreError::Conflict(msg) => LanceError::TableNotEmpty {
             name: msg,
             instance: instance.to_string(),
         },
