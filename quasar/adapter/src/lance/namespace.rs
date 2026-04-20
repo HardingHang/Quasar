@@ -31,6 +31,12 @@ pub struct ListNamespacesQuery {
     pub limit: Option<i32>,
 }
 
+#[derive(Deserialize, Default)]
+pub struct ListTablesQuery {
+    pub page_token: Option<String>,
+    pub limit: Option<i32>,
+}
+
 // ── Response DTOs ──────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -63,6 +69,33 @@ pub struct ListNamespacesResponse {
 #[derive(Serialize)]
 pub struct ExistsResponse {
     pub exists: bool,
+}
+
+#[derive(Serialize)]
+pub struct TableResponse {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub properties: HashMap<String, String>,
+    pub created_at: String,
+}
+
+impl From<quasar_core::Asset> for TableResponse {
+    fn from(asset: quasar_core::Asset) -> Self {
+        Self {
+            id: asset.id.to_string(),
+            name: asset.name,
+            properties: asset.properties,
+            created_at: asset.created_at.to_rfc3339(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct ListTablesResponse {
+    pub tables: Vec<TableResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
 }
 
 // ── Handlers ───────────────────────────────────────────────
@@ -144,6 +177,28 @@ pub async fn drop_namespace(
         })?;
 
     Ok(StatusCode::OK)
+}
+
+/// GET /lance/v1/namespace/{id}/table/list
+pub async fn list_tables(
+    State(store): State<Arc<dyn CatalogStore>>,
+    Path(id): Path<String>,
+    Query(query): Query<ListTablesQuery>,
+) -> Result<impl IntoResponse, ProblemDetails> {
+    let instance = format!("/lance/v1/namespace/{}/table/list", id);
+    let _limit = query.limit.unwrap_or(100).clamp(1, 1000);
+
+    let assets = store
+        .list_assets(&id, AssetFormat::Lance)
+        .await
+        .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
+
+    let response = ListTablesResponse {
+        tables: assets.into_iter().map(TableResponse::from).collect(),
+        next_page_token: None,
+    };
+
+    Ok((StatusCode::OK, Json(response)))
 }
 
 /// POST /lance/v1/namespace/{id}/exists
