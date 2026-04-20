@@ -466,3 +466,186 @@ async fn test_declare_namespace_not_found() {
     assert_eq!(json["error"], "TableNotFound");
     assert_eq!(json["code"], 404);
 }
+
+#[tokio::test]
+#[serial]
+async fn test_register_duplicate_returns_409() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    store
+        .create_asset("prod", AssetFormat::Lance, "users", HashMap::new())
+        .await
+        .unwrap();
+
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/lance/v1/table/prod%24users/register")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"location": "s3://bucket/warehouse/prod/users"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let json = body_json(response).await;
+    assert_eq!(json["error"], "TableAlreadyExists");
+    assert_eq!(json["code"], 409);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_rename_to_existing_name_returns_409() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    store
+        .create_asset("prod", AssetFormat::Lance, "users", HashMap::new())
+        .await
+        .unwrap();
+    store
+        .create_asset("prod", AssetFormat::Lance, "customers", HashMap::new())
+        .await
+        .unwrap();
+
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/lance/v1/table/prod%24users/rename")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"new_name": "customers"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let json = body_json(response).await;
+    assert_eq!(json["error"], "TableAlreadyExists");
+    assert_eq!(json["code"], 409);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_drop_table_not_found() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/lance/v1/table/prod%24missing/drop")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let json = body_json(response).await;
+    assert_eq!(json["error"], "TableNotFound");
+    assert_eq!(json["code"], 404);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_rename_table_not_found() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/lance/v1/table/prod%24missing/rename")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"new_name": "newname"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let json = body_json(response).await;
+    assert_eq!(json["error"], "TableNotFound");
+    assert_eq!(json["code"], 404);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_list_tables_empty_namespace() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/lance/v1/namespace/prod/table/list")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let tables = json["tables"].as_array().unwrap();
+    assert!(tables.is_empty());
+    assert!(json["next_page_token"].is_null());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_exists_table_not_found_in_existing_namespace() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/lance/v1/table/prod%24missing/exists")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["exists"], false);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_exists_namespace_not_found_returns_404() {
+    let app = test_app(setup().await);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/lance/v1/table/prod%24users/exists")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let json = body_json(response).await;
+    assert_eq!(json["error"], "TableNotFound");
+    assert_eq!(json["code"], 404);
+}

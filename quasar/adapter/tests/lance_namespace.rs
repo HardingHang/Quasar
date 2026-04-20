@@ -314,3 +314,121 @@ async fn test_describe_not_found() {
     assert_eq!(json["code"], 404);
     assert_eq!(json["instance"], "/lance/v1/namespace/missing/describe");
 }
+
+#[tokio::test]
+#[serial]
+async fn test_list_namespaces_empty() {
+    let app = test_app(setup().await);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/lance/v1/namespace/%24/list")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let namespaces = json["namespaces"].as_array().unwrap();
+    assert!(namespaces.is_empty());
+    assert!(json["next_page_token"].is_null());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_list_namespaces_pagination_offset_beyond_total() {
+    let store = setup().await;
+    store
+        .create_namespace("ns1", AssetFormat::Lance, HashMap::new())
+        .await
+        .unwrap();
+
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/lance/v1/namespace/%24/list?page_token=100")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let namespaces = json["namespaces"].as_array().unwrap();
+    assert!(namespaces.is_empty());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_list_namespaces_pagination_with_limit() {
+    let store = setup().await;
+    for i in 1..=5 {
+        store
+            .create_namespace(
+                &format!("ns{}", i),
+                AssetFormat::Lance,
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/lance/v1/namespace/%24/list?limit=2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let namespaces = json["namespaces"].as_array().unwrap();
+    assert_eq!(namespaces.len(), 2);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_list_namespaces_format_isolation() {
+    let store = setup().await;
+    store
+        .create_namespace("lance_ns", AssetFormat::Lance, HashMap::new())
+        .await
+        .unwrap();
+    store
+        .create_namespace("iceberg_ns", AssetFormat::Iceberg, HashMap::new())
+        .await
+        .unwrap();
+
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/lance/v1/namespace/%24/list")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let namespaces = json["namespaces"].as_array().unwrap();
+    assert_eq!(namespaces.len(), 1);
+    assert_eq!(namespaces[0]["name"], "lance_ns");
+}
