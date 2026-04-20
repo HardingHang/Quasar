@@ -153,7 +153,12 @@ impl CatalogStore for PgCatalogStore {
         row_to_namespace(&row)
     }
 
-    async fn list_namespaces(&self) -> Result<Vec<Namespace>, StoreError> {
+    async fn list_namespaces(
+        &self,
+        format: AssetFormat,
+        offset: i64,
+        limit: i32,
+    ) -> Result<Vec<Namespace>, StoreError> {
         let client = self
             .pool
             .get()
@@ -161,15 +166,20 @@ impl CatalogStore for PgCatalogStore {
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
         let rows = client
-            .query("SELECT * FROM namespaces ORDER BY created_at", &[])
+            .query(
+                "SELECT * FROM namespaces WHERE format = $1 ORDER BY created_at LIMIT $2 OFFSET $3",
+                &[&format.as_str(), &(limit as i64), &offset],
+            )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
         rows.iter().map(row_to_namespace).collect()
     }
 
-    async fn get_namespace(&self,
+    async fn get_namespace(
+        &self,
         name: &str,
+        format: AssetFormat,
     ) -> Result<Namespace, StoreError> {
         let client = self
             .pool
@@ -178,8 +188,10 @@ impl CatalogStore for PgCatalogStore {
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
         let row = client
-            .query_opt("SELECT * FROM namespaces WHERE name = $1", &[&name,
-            ])
+            .query_opt(
+                "SELECT * FROM namespaces WHERE name = $1 AND format = $2",
+                &[&name, &format.as_str()],
+            )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
@@ -192,7 +204,11 @@ impl CatalogStore for PgCatalogStore {
         }
     }
 
-    async fn namespace_exists(&self, name: &str) -> Result<bool, StoreError> {
+    async fn namespace_exists(
+        &self,
+        name: &str,
+        format: AssetFormat,
+    ) -> Result<bool, StoreError> {
         let client = self
             .pool
             .get()
@@ -201,9 +217,8 @@ impl CatalogStore for PgCatalogStore {
 
         let row = client
             .query_one(
-                "SELECT EXISTS(SELECT 1 FROM namespaces WHERE name = $1)",
-                &[&name,
-                ],
+                "SELECT EXISTS(SELECT 1 FROM namespaces WHERE name = $1 AND format = $2)",
+                &[&name, &format.as_str()],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -211,7 +226,11 @@ impl CatalogStore for PgCatalogStore {
         Ok(row.get(0))
     }
 
-    async fn drop_namespace(&self, name: &str) -> Result<(), StoreError> {
+    async fn drop_namespace(
+        &self,
+        name: &str,
+        format: AssetFormat,
+    ) -> Result<(), StoreError> {
         let client = self
             .pool
             .get()
@@ -219,8 +238,10 @@ impl CatalogStore for PgCatalogStore {
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
         let deleted = client
-            .execute("DELETE FROM namespaces WHERE name = $1", &[&name,
-            ])
+            .execute(
+                "DELETE FROM namespaces WHERE name = $1 AND format = $2",
+                &[&name, &format.as_str()],
+            )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
@@ -237,6 +258,7 @@ impl CatalogStore for PgCatalogStore {
     async fn create_asset(
         &self,
         namespace_name: &str,
+        format: AssetFormat,
         name: &str,
         properties: HashMap<String, String>,
     ) -> Result<Asset, StoreError> {
@@ -246,7 +268,7 @@ impl CatalogStore for PgCatalogStore {
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-        let ns = self.get_namespace(namespace_name).await?;
+        let ns = self.get_namespace(namespace_name, format).await?;
         let props_json = props_to_json(&properties)?;
 
         let row = client
@@ -272,6 +294,7 @@ impl CatalogStore for PgCatalogStore {
     async fn list_assets(
         &self,
         namespace_name: &str,
+        format: AssetFormat,
     ) -> Result<Vec<Asset>, StoreError> {
         let client = self
             .pool
@@ -279,7 +302,7 @@ impl CatalogStore for PgCatalogStore {
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-        let ns = self.get_namespace(namespace_name).await?;
+        let ns = self.get_namespace(namespace_name, format).await?;
 
         let rows = client
             .query(
@@ -296,6 +319,7 @@ impl CatalogStore for PgCatalogStore {
     async fn get_asset(
         &self,
         namespace_name: &str,
+        format: AssetFormat,
         name: &str,
     ) -> Result<Asset, StoreError> {
         let client = self
@@ -304,7 +328,7 @@ impl CatalogStore for PgCatalogStore {
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-        let ns = self.get_namespace(namespace_name).await?;
+        let ns = self.get_namespace(namespace_name, format).await?;
 
         let row = client
             .query_opt(
@@ -327,6 +351,7 @@ impl CatalogStore for PgCatalogStore {
     async fn asset_exists(
         &self,
         namespace_name: &str,
+        format: AssetFormat,
         name: &str,
     ) -> Result<bool, StoreError> {
         let client = self
@@ -335,7 +360,7 @@ impl CatalogStore for PgCatalogStore {
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-        let ns = self.get_namespace(namespace_name).await?;
+        let ns = self.get_namespace(namespace_name, format).await?;
 
         let row = client
             .query_one(
@@ -352,6 +377,7 @@ impl CatalogStore for PgCatalogStore {
     async fn drop_asset(
         &self,
         namespace_name: &str,
+        format: AssetFormat,
         name: &str,
     ) -> Result<(), StoreError> {
         let client = self
@@ -360,7 +386,7 @@ impl CatalogStore for PgCatalogStore {
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-        let ns = self.get_namespace(namespace_name).await?;
+        let ns = self.get_namespace(namespace_name, format).await?;
 
         let deleted = client
             .execute(
@@ -384,6 +410,7 @@ impl CatalogStore for PgCatalogStore {
     async fn rename_asset(
         &self,
         namespace_name: &str,
+        format: AssetFormat,
         name: &str,
         new_name: &str,
     ) -> Result<(), StoreError> {
@@ -393,7 +420,7 @@ impl CatalogStore for PgCatalogStore {
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-        let ns = self.get_namespace(namespace_name).await?;
+        let ns = self.get_namespace(namespace_name, format).await?;
 
         let updated = client
             .execute(
@@ -425,6 +452,7 @@ impl CatalogStore for PgCatalogStore {
     async fn commit_version(
         &self,
         namespace_name: &str,
+        format: AssetFormat,
         asset_name: &str,
         update: AssetCommitUpdate,
     ) -> Result<AssetVersion, StoreError> {
@@ -434,7 +462,7 @@ impl CatalogStore for PgCatalogStore {
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-        let asset = self.get_asset(namespace_name, asset_name).await?;
+        let asset = self.get_asset(namespace_name, format, asset_name).await?;
 
         let tx = client
             .transaction()
@@ -487,6 +515,7 @@ impl CatalogStore for PgCatalogStore {
     async fn load_version(
         &self,
         namespace_name: &str,
+        format: AssetFormat,
         asset_name: &str,
         version_id: i64,
     ) -> Result<AssetVersion, StoreError> {
@@ -496,7 +525,7 @@ impl CatalogStore for PgCatalogStore {
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-        let asset = self.get_asset(namespace_name, asset_name).await?;
+        let asset = self.get_asset(namespace_name, format, asset_name).await?;
 
         let row = client
             .query_opt(
@@ -519,6 +548,7 @@ impl CatalogStore for PgCatalogStore {
     async fn load_current_version(
         &self,
         namespace_name: &str,
+        format: AssetFormat,
         asset_name: &str,
     ) -> Result<AssetVersion, StoreError> {
         let client = self
@@ -527,7 +557,7 @@ impl CatalogStore for PgCatalogStore {
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-        let asset = self.get_asset(namespace_name, asset_name).await?;
+        let asset = self.get_asset(namespace_name, format, asset_name).await?;
 
         let row = client
             .query_opt(
@@ -550,6 +580,7 @@ impl CatalogStore for PgCatalogStore {
     async fn list_versions(
         &self,
         namespace_name: &str,
+        format: AssetFormat,
         asset_name: &str,
     ) -> Result<Vec<AssetVersion>, StoreError> {
         let client = self
@@ -558,7 +589,7 @@ impl CatalogStore for PgCatalogStore {
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-        let asset = self.get_asset(namespace_name, asset_name).await?;
+        let asset = self.get_asset(namespace_name, format, asset_name).await?;
 
         let rows = client
             .query(
