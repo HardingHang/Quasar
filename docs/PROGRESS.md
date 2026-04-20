@@ -16,7 +16,7 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 
 | 属性 | 值 |
 |------|---|
-| **阶段** | S4（Lance Table 基础操作） |
+| **阶段** | S5（Lance 版本管理） |
 | **Phase** | Phase 1（Lance REST Namespace） |
 | **状态** | 未开始 |
 
@@ -32,7 +32,7 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 | S1 | Core 层定义 | 已完成 | 所有 trait 和数据结构定义完毕 |
 | S2 | Storage 基础 | 已完成 | PostgreSQL 可连接，DDL 可迁移，基础 CRUD 可运行 |
 | S3 | Lance Namespace 端点 | 已完成 | `curl` 可操作 Lance Namespace |
-| S4 | Lance Table 基础操作 | 未开始 | `curl` 可操作 Lance Table |
+| S4 | Lance Table 基础操作 | 已完成 | `curl` 可操作 Lance Table |
 | S5 | Lance 版本管理 | 未开始 | `curl` 可注册和查询版本 |
 | S6 | 基础设施 | 未开始 | 容器化部署，`/healthz` 和 `/readyz` 正常 |
 | S7 | Lance 集成验证 | 未开始 | Lance Python SDK 端到端跑通 |
@@ -58,6 +58,31 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 ---
 
 ## 已完成的里程碑
+
+- **S4 — Lance Table 基础操作**（2026-04-20）
+  - Lance 错误模块扩展：新增 `TableNotFound`、`TableAlreadyExists`、`TableNotEmpty` 变体
+  - `{id}` 路径参数解析：`{namespace}${table}` 格式（如 `prod$users`）
+  - Lance Table 8 个端点全部实现：
+    - `POST /lance/v1/table/{id}/declare` — 声明表，分配 `location` 存储于 properties
+    - `POST /lance/v1/table/{id}/describe` — 描述表（含 location、current_version）
+    - `POST /lance/v1/table/{id}/register` — 注册已有表（提供 location）
+    - `POST /lance/v1/table/{id}/deregister` — 注销表（保留数据）
+    - `POST /lance/v1/table/{id}/drop` — 删除表
+    - `POST /lance/v1/table/{id}/exists` — 存在检查
+    - `POST /lance/v1/table/{id}/rename` — 重命名表
+    - `GET /lance/v1/namespace/{id}/table/list` — 列出 Namespace 下的表
+  - 测试覆盖（`adapter/tests/lance_table.rs`，10 个）：
+    - 声明/描述表正常流
+    - 重复声明返回 409 + TableAlreadyExists
+    - 列出 Namespace 下的表
+    - 存在检查（true/false）
+    - 注册已有表
+    - 注销表成功 + 重复注销返回 404
+    - 删除表 + 确认不存在
+    - 重命名表 + 新旧名称验证
+    - 描述不存在的表返回 404 + TableNotFound
+    - 在不存在的 Namespace 中声明返回 404
+  - `cargo build` / `cargo clippy` 零警告 / `cargo test` 全通过（21 个测试）
 
 - **S3 — Lance Namespace 端点**（2026-04-20）
   - `namespaces` 表约束修正为 `UNIQUE(name, format)`，修复双协议隔离策略
@@ -104,18 +129,26 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 |------|---------|-------|---------|
 | S2 | `storage/tests/integration.rs` | 5 | Namespace CRUD、Asset CRUD、版本提交/加载/冲突、NotFound |
 | S3 | `adapter/tests/lance_namespace.rs` | 6 | Lance Namespace 创建/描述/列表/存在检查/删除、409 冲突、404 NotFound、格式隔离 |
+| S4 | `adapter/tests/lance_table.rs` | 10 | Lance Table 声明/描述/列表/注册/注销/删除/存在检查/重命名、409 冲突、404 NotFound |
 
 **运行方式：**
 ```bash
 cd quasar
-cargo test                      # 全部 11 个测试
+cargo test                      # 全部 21 个测试
 cargo test -p quasar-storage    # Storage 层 5 个
-cargo test -p quasar-adapter    # Adapter 层 6 个
+cargo test -p quasar-adapter    # Adapter 层 16 个
 ```
 
 ---
 
 ## 修订记录
+
+### V1.5（2026-04-20）
+
+- 更新：S4 状态标记为"已完成"
+- 更新：当前阶段推进至 S5
+- 新增：已完成里程碑记录 S4（含测试覆盖详情）
+- 新增：S4 测试覆盖条目至测试覆盖总览表
 
 ### V1.4（2026-04-20）
 
