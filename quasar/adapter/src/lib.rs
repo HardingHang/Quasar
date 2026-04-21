@@ -6,5 +6,6 @@
 //! - `iceberg` — Iceberg REST Catalog adapter
 //! - `lance` — Lance REST Namespace adapter
 
+pub mod iceberg;
 pub mod lance;
 pub use quasar_core::*;
