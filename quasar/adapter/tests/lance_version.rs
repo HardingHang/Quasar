@@ -1,4 +1,4 @@
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -96,7 +96,7 @@ async fn test_create_and_describe_version() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset("prod", AssetFormat::Lance, "users", HashMap::new())
+        .create_asset("prod", AssetFormat::Lance, "users", "lance://prod/users", None, HashMap::new())
         .await
         .unwrap();
     let app = test_app(store);
@@ -151,7 +151,7 @@ async fn test_create_duplicate_returns_409() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset("prod", AssetFormat::Lance, "users", HashMap::new())
+        .create_asset("prod", AssetFormat::Lance, "users", "lance://prod/users", None, HashMap::new())
         .await
         .unwrap();
     let app = test_app(store);
@@ -198,7 +198,7 @@ async fn test_list_versions() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset("prod", AssetFormat::Lance, "users", HashMap::new())
+        .create_asset("prod", AssetFormat::Lance, "users", "lance://prod/users", None, HashMap::new())
         .await
         .unwrap();
     store
@@ -249,7 +249,7 @@ async fn test_describe_not_found() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset("prod", AssetFormat::Lance, "users", HashMap::new())
+        .create_asset("prod", AssetFormat::Lance, "users", "lance://prod/users", None, HashMap::new())
         .await
         .unwrap();
     let app = test_app(store);
@@ -305,7 +305,7 @@ async fn test_describe_current_version_in_describe_table() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset("prod", AssetFormat::Lance, "users", HashMap::new())
+        .create_asset("prod", AssetFormat::Lance, "users", "lance://prod/users", None, HashMap::new())
         .await
         .unwrap();
     store

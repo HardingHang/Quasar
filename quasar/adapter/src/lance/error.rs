@@ -109,7 +109,98 @@ impl IntoResponse for LanceError {
     }
 }
 
+pub fn store_error_to_lance(err: StoreError, instance: &str) -> LanceError {
+    match err {
+        StoreError::NotFound(msg) => LanceError::NamespaceNotFound {
+            name: msg,
+            instance: instance.to_string(),
+        },
+        StoreError::AlreadyExists(msg) => LanceError::NamespaceAlreadyExists {
+            name: msg,
+            instance: instance.to_string(),
+        },
+        StoreError::Conflict(msg) => LanceError::NamespaceNotEmpty {
+            name: msg,
+            instance: instance.to_string(),
+        },
+        StoreError::InvalidInput(msg) => LanceError::InvalidInput {
+            detail: msg,
+            instance: instance.to_string(),
+        },
+        StoreError::Internal(msg) => LanceError::InternalError {
+            detail: msg,
+            instance: instance.to_string(),
+        },
+    }
+}
+
+pub fn store_error_to_lance_table(err: StoreError, instance: &str) -> LanceError {
+    match err {
+        StoreError::NotFound(msg) => LanceError::TableNotFound {
+            name: msg,
+            instance: instance.to_string(),
+        },
+        StoreError::AlreadyExists(msg) => LanceError::TableAlreadyExists {
+            name: msg,
+            instance: instance.to_string(),
+        },
+        StoreError::Conflict(msg) => LanceError::TableNotEmpty {
+            name: msg,
+            instance: instance.to_string(),
+        },
+        StoreError::InvalidInput(msg) => LanceError::InvalidInput {
+            detail: msg,
+            instance: instance.to_string(),
+        },
+        StoreError::Internal(msg) => LanceError::InternalError {
+            detail: msg,
+            instance: instance.to_string(),
+        },
+    }
+}
+
+pub fn store_error_to_lance_version(err: StoreError, instance: &str) -> LanceError {
+    match err {
+        StoreError::NotFound(msg) => LanceError::TableNotFound {
+            name: msg,
+            instance: instance.to_string(),
+        },
+        StoreError::AlreadyExists(msg) => {
+            if msg.starts_with("version ") {
+                let version_str = msg
+                    .trim_start_matches("version ")
+                    .split(' ')
+                    .next()
+                    .unwrap_or("0");
+                let version = version_str.parse::<i64>().unwrap_or(0);
+                LanceError::TableVersionAlreadyExists {
+                    version,
+                    instance: instance.to_string(),
+                }
+            } else {
+                LanceError::TableAlreadyExists {
+                    name: msg,
+                    instance: instance.to_string(),
+                }
+            }
+        }
+        StoreError::Conflict(msg) => LanceError::TableNotEmpty {
+            name: msg,
+            instance: instance.to_string(),
+        },
+        StoreError::InvalidInput(msg) => LanceError::InvalidInput {
+            detail: msg,
+            instance: instance.to_string(),
+        },
+        StoreError::Internal(msg) => LanceError::InternalError {
+            detail: msg,
+            instance: instance.to_string(),
+        },
+    }
+}
+
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -292,95 +383,5 @@ mod tests {
             store_error_to_lance_version(StoreError::Internal("oops".into()), "/test"),
             LanceError::InternalError { detail, .. } if detail == "oops"
         ));
-    }
-}
-
-pub fn store_error_to_lance(err: StoreError, instance: &str) -> LanceError {
-    match err {
-        StoreError::NotFound(msg) => LanceError::NamespaceNotFound {
-            name: msg,
-            instance: instance.to_string(),
-        },
-        StoreError::AlreadyExists(msg) => LanceError::NamespaceAlreadyExists {
-            name: msg,
-            instance: instance.to_string(),
-        },
-        StoreError::Conflict(msg) => LanceError::NamespaceNotEmpty {
-            name: msg,
-            instance: instance.to_string(),
-        },
-        StoreError::InvalidInput(msg) => LanceError::InvalidInput {
-            detail: msg,
-            instance: instance.to_string(),
-        },
-        StoreError::Internal(msg) => LanceError::InternalError {
-            detail: msg,
-            instance: instance.to_string(),
-        },
-    }
-}
-
-pub fn store_error_to_lance_table(err: StoreError, instance: &str) -> LanceError {
-    match err {
-        StoreError::NotFound(msg) => LanceError::TableNotFound {
-            name: msg,
-            instance: instance.to_string(),
-        },
-        StoreError::AlreadyExists(msg) => LanceError::TableAlreadyExists {
-            name: msg,
-            instance: instance.to_string(),
-        },
-        StoreError::Conflict(msg) => LanceError::TableNotEmpty {
-            name: msg,
-            instance: instance.to_string(),
-        },
-        StoreError::InvalidInput(msg) => LanceError::InvalidInput {
-            detail: msg,
-            instance: instance.to_string(),
-        },
-        StoreError::Internal(msg) => LanceError::InternalError {
-            detail: msg,
-            instance: instance.to_string(),
-        },
-    }
-}
-
-pub fn store_error_to_lance_version(err: StoreError, instance: &str) -> LanceError {
-    match err {
-        StoreError::NotFound(msg) => LanceError::TableNotFound {
-            name: msg,
-            instance: instance.to_string(),
-        },
-        StoreError::AlreadyExists(msg) => {
-            if msg.starts_with("version ") {
-                let version_str = msg
-                    .trim_start_matches("version ")
-                    .split(' ')
-                    .next()
-                    .unwrap_or("0");
-                let version = version_str.parse::<i64>().unwrap_or(0);
-                LanceError::TableVersionAlreadyExists {
-                    version,
-                    instance: instance.to_string(),
-                }
-            } else {
-                LanceError::TableAlreadyExists {
-                    name: msg,
-                    instance: instance.to_string(),
-                }
-            }
-        }
-        StoreError::Conflict(msg) => LanceError::TableNotEmpty {
-            name: msg,
-            instance: instance.to_string(),
-        },
-        StoreError::InvalidInput(msg) => LanceError::InvalidInput {
-            detail: msg,
-            instance: instance.to_string(),
-        },
-        StoreError::Internal(msg) => LanceError::InternalError {
-            detail: msg,
-            instance: instance.to_string(),
-        },
     }
 }

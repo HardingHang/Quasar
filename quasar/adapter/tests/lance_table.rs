@@ -1,4 +1,4 @@
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -178,11 +178,11 @@ async fn test_list_tables() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset("prod", AssetFormat::Lance, "t1", HashMap::new())
+        .create_asset("prod", AssetFormat::Lance, "t1", "lance://prod/t1", None, HashMap::new())
         .await
         .unwrap();
     store
-        .create_asset("prod", AssetFormat::Lance, "t2", HashMap::new())
+        .create_asset("prod", AssetFormat::Lance, "t2", "lance://prod/t2", None, HashMap::new())
         .await
         .unwrap();
 
@@ -215,7 +215,7 @@ async fn test_table_exists() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset("prod", AssetFormat::Lance, "users", HashMap::new())
+        .create_asset("prod", AssetFormat::Lance, "users", "lance://prod/users", None, HashMap::new())
         .await
         .unwrap();
 
@@ -284,7 +284,7 @@ async fn test_deregister_table() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset("prod", AssetFormat::Lance, "users", HashMap::new())
+        .create_asset("prod", AssetFormat::Lance, "users", "lance://prod/users", None, HashMap::new())
         .await
         .unwrap();
 
@@ -327,7 +327,7 @@ async fn test_drop_table() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset("prod", AssetFormat::Lance, "users", HashMap::new())
+        .create_asset("prod", AssetFormat::Lance, "users", "lance://prod/users", None, HashMap::new())
         .await
         .unwrap();
 
@@ -369,7 +369,7 @@ async fn test_rename_table() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset("prod", AssetFormat::Lance, "users", HashMap::new())
+        .create_asset("prod", AssetFormat::Lance, "users", "lance://prod/users", None, HashMap::new())
         .await
         .unwrap();
 
@@ -473,7 +473,7 @@ async fn test_register_duplicate_returns_409() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset("prod", AssetFormat::Lance, "users", HashMap::new())
+        .create_asset("prod", AssetFormat::Lance, "users", "lance://prod/users", None, HashMap::new())
         .await
         .unwrap();
 
@@ -503,11 +503,11 @@ async fn test_rename_to_existing_name_returns_409() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset("prod", AssetFormat::Lance, "users", HashMap::new())
+        .create_asset("prod", AssetFormat::Lance, "users", "lance://prod/users", None, HashMap::new())
         .await
         .unwrap();
     store
-        .create_asset("prod", AssetFormat::Lance, "customers", HashMap::new())
+        .create_asset("prod", AssetFormat::Lance, "customers", "lance://prod/customers", None, HashMap::new())
         .await
         .unwrap();
 

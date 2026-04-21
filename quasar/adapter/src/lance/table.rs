@@ -81,16 +81,14 @@ pub async fn declare_table(
         format!("lance://{}/{}", namespace, table)
     };
 
-    let mut properties = req.options;
-    properties.insert("location".to_string(), location.clone());
-
     // Persist storage options into properties with prefix for later retrieval.
+    let mut properties = req.options;
     for (key, value) in &config.storage_options {
         properties.insert(format!("storage_{}", key), value.clone());
     }
 
     let asset = store
-        .create_asset(namespace, AssetFormat::Lance, table, properties)
+        .create_asset(namespace, AssetFormat::Lance, table, &location, None, properties)
         .await
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
 
@@ -117,11 +115,7 @@ pub async fn describe_table(
         .await
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
 
-    let location = asset
-        .properties
-        .get("location")
-        .cloned()
-        .unwrap_or_default();
+    let location = asset.location;
 
     let current_version = store
         .load_current_version(namespace, AssetFormat::Lance, table)
@@ -149,11 +143,10 @@ pub async fn register_table(
     let instance = format!("/lance/v1/table/{}/register", id);
     let (namespace, table) = parse_table_id(&id)?;
 
-    let mut properties = req.options;
-    properties.insert("location".to_string(), req.location.clone());
+    let properties = req.options;
 
     let asset = store
-        .create_asset(namespace, AssetFormat::Lance, table, properties)
+        .create_asset(namespace, AssetFormat::Lance, table, &req.location, None, properties)
         .await
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
 
