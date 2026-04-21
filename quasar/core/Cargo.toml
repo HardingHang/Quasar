@@ -6,12 +6,10 @@ edition.workspace = true
 [dependencies]
 uuid = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
-
-[dev-dependencies]
-serde_json = { workspace = true }
 
 [lints]
 workspace = true

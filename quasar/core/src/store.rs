@@ -38,11 +38,21 @@ pub trait CatalogStore: Send + Sync {
         format: AssetFormat,
     ) -> Result<(), StoreError>;
 
+    async fn update_namespace_properties(
+        &self,
+        name: &str,
+        format: AssetFormat,
+        removals: &[String],
+        updates: &HashMap<String, String>,
+    ) -> Result<Namespace, StoreError>;
+
     async fn create_asset(
         &self,
         namespace_name: &str,
         format: AssetFormat,
         name: &str,
+        location: &str,
+        metadata_location: Option<&str>,
         properties: HashMap<String, String>,
     ) -> Result<Asset, StoreError>;
 

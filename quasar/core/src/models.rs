@@ -33,6 +33,9 @@ pub struct Asset {
     pub id: Uuid,
     pub namespace_id: Uuid,
     pub name: String,
+    pub location: String,
+    pub metadata_location: Option<String>,
+    pub schema_snapshot: Option<serde_json::Value>,
     pub properties: HashMap<String, String>,
     pub created_at: DateTime<Utc>,
 }
@@ -54,6 +57,7 @@ pub struct AssetCommitUpdate {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use serde_json;
@@ -113,6 +117,9 @@ mod tests {
             id: Uuid::new_v4(),
             namespace_id: ns_id,
             name: "users".to_string(),
+            location: "s3://bucket/warehouse/prod/users".to_string(),
+            metadata_location: Some("s3://bucket/warehouse/prod/users/metadata/00001.metadata.json".to_string()),
+            schema_snapshot: None,
             properties: HashMap::new(),
             created_at: now,
         };
@@ -122,6 +129,11 @@ mod tests {
 
         assert_eq!(decoded.name, "users");
         assert_eq!(decoded.namespace_id, ns_id);
+        assert_eq!(decoded.location, "s3://bucket/warehouse/prod/users");
+        assert_eq!(
+            decoded.metadata_location,
+            Some("s3://bucket/warehouse/prod/users/metadata/00001.metadata.json".to_string())
+        );
     }
 
     #[test]
