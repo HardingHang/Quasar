@@ -16,7 +16,7 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 
 | 属性 | 值 |
 |------|---|
-| **阶段** | S8（Iceberg Namespace + Table CRUD） |
+| **阶段** | S9（Iceberg CAS Commit） |
 | **Phase** | Phase 2（Iceberg REST Catalog） |
 | **状态** | 未开始 |
 
@@ -41,7 +41,7 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 
 | 阶段 | 名称 | 状态 | 验收标准 |
 |------|------|------|---------|
-| S8 | Iceberg Namespace + Table CRUD | 未开始 | `curl` 可操作 Iceberg Namespace 和 Table |
+| S8 | Iceberg Namespace + Table CRUD | 已完成 | `curl` 可操作 Iceberg Namespace 和 Table |
 | S9 | Iceberg CAS Commit | 未开始 | 并发 commit 冲突正确返回 409 |
 | S10 | Spark 集成验证 | 未开始 | Spark 端到端读写 Iceberg 表成功 |
 
@@ -51,13 +51,27 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 
 | 属性 | 值 |
 |------|---|
-| **阶段** | S7（Lance 集成验证） |
-| **Phase** | Phase 1（Lance REST Namespace） |
+| **阶段** | S9（Iceberg CAS Commit） |
+| **Phase** | Phase 2（Iceberg REST Catalog） |
 | **状态** | 未开始 |
 
 ---
 
 ## 已完成的里程碑
+
+- **S8 — Iceberg Namespace + Table CRUD**（2026-04-21）
+  - Core 数据模型扩展：`Asset.location`、`metadata_location`、`schema_snapshot`
+  - `CatalogStore` trait 扩展：`create_asset` 新增 `location`/`metadata_location` 参数，`update_namespace_properties` 新方法
+  - 数据库迁移 V3：添加 `location`、`metadata_location`、`schema_snapshot` 列，回填 Lance `location`
+  - Storage 层实现：`create_asset` INSERT 包含新列，`update_namespace_properties` 原子 JSONB 更新
+  - Iceberg adapter 模块（`adapter/src/iceberg/`）：13 个 REST 端点
+    - Config：`GET /iceberg/v1/config`
+    - Namespace：`GET/POST/DELETE` 列表/创建/删除，`GET` 详情，`POST` 更新 properties
+    - Table：`POST` 创建，`GET` 加载（含 TableMetadata），`DELETE` 删除，`POST` 重命名
+  - Server 集成：Iceberg 路由与 Lance 路由并行挂载，`IcebergConfig` 从环境配置注入
+  - Iceberg 错误格式：严格遵循 Iceberg REST 规范 `{"error": {"message": "...", "type": "...", "code": N}}`
+  - 测试覆盖 18 个 Iceberg 测试（namespace 8 + table 9 + config 1）+ server 路由回归 1 个
+  - `cargo build` / `cargo clippy` 零警告 / `cargo test` 全通过（96 个测试）
 
 - **S7 — Lance 集成验证**（2026-04-20）
   - 扩展 Server Config：新增 `QUASAR_WAREHOUSE_PATH` 和 S3 配置（`S3_ENDPOINT`、`S3_ACCESS_KEY`、`S3_SECRET_KEY`、`S3_REGION`、`S3_ALLOW_HTTP`）
@@ -175,19 +189,31 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 | S4 | `adapter/tests/lance_table.rs` | 10 | Lance Table 声明/描述/列表/注册/注销/删除/存在检查/重命名、409 冲突、404 NotFound |
 | S5 | `adapter/tests/lance_version.rs` | 6 | Lance 版本创建/列表/描述、409 版本冲突、404 NotFound、current_version 联动 |
 | S6 | `server/tests/health.rs` | 3 | /healthz 存活性、/readyz 就绪性（DB 连通性）、Lance 路由集成回归 |
+| S8 | `adapter/tests/iceberg_namespace.rs` | 8 | Iceberg Namespace 创建/描述/列表/删除/409/404/properties/格式隔离 |
+| S8 | `adapter/tests/iceberg_table.rs` | 9 | Iceberg Table 创建/加载/列表/删除/重命名/409/404/HEAD/400 |
+| S8 | `adapter/tests/iceberg_config.rs` | 1 | GET /config 返回 defaults/overrides |
+| S8 | `server/tests/health.rs` | +1 | Iceberg 路由挂载回归 |
 
 **运行方式：**
 ```bash
 cd quasar
-cargo test                      # 全部 30 个测试
-cargo test -p quasar-storage    # Storage 层 5 个
-cargo test -p quasar-adapter    # Adapter 层 22 个
-cargo test -p quasar-server     # Server 层 3 个
+cargo test                      # 全部 96 个测试
+cargo test -p quasar-storage    # Storage 层 6 个
+cargo test -p quasar-adapter    # Adapter 层 66 个
+cargo test -p quasar-server     # Server 层 11 个
 ```
 
 ---
 
 ## 修订记录
+
+### V1.9（2026-04-21）
+
+- 更新：S8 状态标记为"已完成"
+- 更新：当前阶段推进至 S9（Phase 2：Iceberg REST Catalog）
+- 新增：已完成里程碑记录 S8（含 Iceberg 实现详情与测试覆盖）
+- 新增：S8 测试覆盖条目至测试覆盖总览表
+- 更新：测试运行方式中的测试总数与分 crate 数量
 
 ### V1.8（2026-04-20）
 
