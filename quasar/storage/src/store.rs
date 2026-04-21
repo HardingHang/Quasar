@@ -78,12 +78,19 @@ fn row_to_asset(row: &Row) -> Result<Asset, StoreError> {
     let properties: HashMap<String, String> =
         serde_json::from_value(props).map_err(|e| StoreError::Internal(e.to_string()))?;
 
+    let schema_snapshot: Option<serde_json::Value> = row
+        .try_get("schema_snapshot")
+        .ok();
+
     Ok(Asset {
         id: row.try_get("id").map_err(|e| StoreError::Internal(e.to_string()))?,
         namespace_id: row
             .try_get("namespace_id")
             .map_err(|e| StoreError::Internal(e.to_string()))?,
         name: row.try_get("name").map_err(|e| StoreError::Internal(e.to_string()))?,
+        location: row.try_get("location").map_err(|e| StoreError::Internal(e.to_string()))?,
+        metadata_location: row.try_get("metadata_location").ok(),
+        schema_snapshot,
         properties,
         created_at: row
             .try_get("created_at")
@@ -255,11 +262,52 @@ impl CatalogStore for PgCatalogStore {
         Ok(())
     }
 
+    async fn update_namespace_properties(
+        &self,
+        name: &str,
+        format: AssetFormat,
+        removals: &[ String],
+        updates: &HashMap<String, String>,
+    ) -> Result<Namespace, StoreError> {
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+
+        let props_json = props_to_json(updates)?;
+
+        let updated = client
+            .execute(
+                "UPDATE namespaces
+                 SET properties = (properties - $1::text[]) || $2::jsonb
+                 WHERE name = $3 AND format = $4",
+                &[&removals,
+                    &props_json,
+                    &name,
+                    &format.as_str(),
+                ],
+            )
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+
+        if updated == 0 {
+            return Err(StoreError::NotFound(format!(
+                "namespace '{}'",
+                name
+            )));
+        }
+
+        self.get_namespace(name, format).await
+    }
+
     async fn create_asset(
         &self,
         namespace_name: &str,
         format: AssetFormat,
         name: &str,
+        location: &str,
+        metadata_location: Option<&str>,
         properties: HashMap<String, String>,
     ) -> Result<Asset, StoreError> {
         let client = self
@@ -273,9 +321,8 @@ impl CatalogStore for PgCatalogStore {
 
         let row = client
             .query_one(
-                "INSERT INTO assets (namespace_id, name, properties) VALUES ($1, $2, $3) RETURNING *",
-                &[&ns.id,&name,&props_json,
-                ],
+                "INSERT INTO assets (namespace_id, name, location, metadata_location, properties) VALUES ($1, $2, $3, $4, $5) RETURNING *",
+                &[&ns.id, &name, &location, &metadata_location, &props_json],
             )
             .await
             .map_err(|e| match e.code() {

@@ -118,7 +118,7 @@ async fn test_asset_crud() {
         .unwrap();
 
     let asset = store
-        .create_asset("ns1", AssetFormat::Lance, "asset_a", HashMap::new())
+        .create_asset("ns1", AssetFormat::Lance, "asset_a", "lance://ns1/asset_a", None, HashMap::new())
         .await
         .unwrap();
     assert_eq!(asset.name, "asset_a");
@@ -133,7 +133,7 @@ async fn test_asset_crud() {
     assert!(!store.asset_exists("ns1", AssetFormat::Lance, "missing").await.unwrap());
 
     let err = store
-        .create_asset("ns1", AssetFormat::Lance, "asset_a", HashMap::new())
+        .create_asset("ns1", AssetFormat::Lance, "asset_a", "lance://ns1/asset_a", None, HashMap::new())
         .await
         .unwrap_err();
     assert!(matches!(err, StoreError::AlreadyExists(_)));
@@ -143,7 +143,7 @@ async fn test_asset_crud() {
     assert!(!store.asset_exists("ns1", AssetFormat::Lance, "asset_a").await.unwrap());
 
     store
-        .create_asset("ns1", AssetFormat::Lance, "asset_c", HashMap::new())
+        .create_asset("ns1", AssetFormat::Lance, "asset_c", "lance://ns1/asset_c", None, HashMap::new())
         .await
         .unwrap();
     let err = store
@@ -169,7 +169,7 @@ async fn test_version_commit_and_load() {
         .await
         .unwrap();
     store
-        .create_asset("ns1", AssetFormat::Lance, "tbl", HashMap::new())
+        .create_asset("ns1", AssetFormat::Lance, "tbl", "lance://ns1/tbl", None, HashMap::new())
         .await
         .unwrap();
 
@@ -226,7 +226,7 @@ async fn test_version_conflict() {
         .await
         .unwrap();
     store
-        .create_asset("ns1", AssetFormat::Lance, "tbl", HashMap::new())
+        .create_asset("ns1", AssetFormat::Lance, "tbl", "lance://ns1/tbl", None, HashMap::new())
         .await
         .unwrap();
 
@@ -277,5 +277,41 @@ async fn test_not_found_errors() {
     assert!(matches!(err, StoreError::NotFound(_)));
 
     let err = store.load_current_version("ns1", AssetFormat::Lance, "tbl").await.unwrap_err();
+    assert!(matches!(err, StoreError::NotFound(_)));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_update_namespace_properties() {
+    let store = setup().await;
+
+    let mut props = HashMap::new();
+    props.insert("owner".to_string(), "team-a".to_string());
+    props.insert("env".to_string(), "prod".to_string());
+
+    store
+        .create_namespace("ns1", AssetFormat::Iceberg, props)
+        .await
+        .unwrap();
+
+    // Add new property and update existing
+    let mut updates = HashMap::new();
+    updates.insert("owner".to_string(), "team-b".to_string());
+    updates.insert("region".to_string(), "us-west".to_string());
+
+    let updated = store
+        .update_namespace_properties("ns1", AssetFormat::Iceberg, &["env".to_string()], &updates)
+        .await
+        .unwrap();
+
+    assert_eq!(updated.properties.get("owner"), Some(&"team-b".to_string()));
+    assert_eq!(updated.properties.get("region"), Some(&"us-west".to_string()));
+    assert!(!updated.properties.contains_key("env"));
+
+    // Not found
+    let err = store
+        .update_namespace_properties("missing", AssetFormat::Iceberg, &[], &HashMap::new())
+        .await
+        .unwrap_err();
     assert!(matches!(err, StoreError::NotFound(_)));
 }
