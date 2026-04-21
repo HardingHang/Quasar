@@ -37,11 +37,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let lance_config = quasar_adapter::lance::LanceConfig {
-        warehouse_path: cfg.warehouse_path,
+        warehouse_path: cfg.warehouse_path.clone(),
         storage_options,
     };
 
-    let app = quasar_server::create_app_with_config(pool, lance_config);
+    let iceberg_config = quasar_adapter::iceberg::IcebergConfig {
+        warehouse_path: cfg.warehouse_path,
+    };
+
+    let app = quasar_server::create_app_with_config(pool, lance_config, iceberg_config);
 
     let addr = SocketAddr::from((cfg.host.parse::<std::net::IpAddr>()?, cfg.port));
     info!("Quasar server listening on {}", addr);

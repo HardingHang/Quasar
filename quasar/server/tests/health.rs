@@ -1,4 +1,4 @@
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -149,4 +149,26 @@ async fn test_lance_routes_still_work() {
     let json = body_json(response).await;
     let namespaces = json["namespaces"].as_array().unwrap();
     assert!(namespaces.is_empty());
+}
+
+#[tokio::test]
+async fn test_iceberg_routes_are_mounted() {
+    let pool = setup().await;
+    let app = create_app(pool);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert!(json["defaults"].is_object());
+    assert!(json["overrides"].is_object());
 }
