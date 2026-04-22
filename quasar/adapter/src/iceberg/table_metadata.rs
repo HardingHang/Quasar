@@ -387,4 +387,135 @@ mod tests {
         let json = serde_json::to_string(&sref).unwrap();
         assert!(json.contains("\"type\":\"branch\""));
     }
+
+    #[test]
+    fn test_check_requirements_snapshot_id_null_ok() {
+        // When current_snapshot_id is None, asserting snapshot-id=null should pass
+        let meta = sample_metadata(); // current_snapshot_id: None
+        let req = TableRequirement::AssertRefSnapshotId {
+            r#ref: "main".to_string(),
+            snapshot_id: None,
+        };
+        assert!(meta.check_requirements(&[req]).is_ok());
+    }
+
+    #[test]
+    fn test_check_requirements_snapshot_id_null_fail() {
+        // When current_snapshot_id is Some(42), asserting snapshot-id=null should fail
+        let mut meta = sample_metadata();
+        meta.current_snapshot_id = Some(42);
+        let req = TableRequirement::AssertRefSnapshotId {
+            r#ref: "main".to_string(),
+            snapshot_id: None,
+        };
+        let err = meta.check_requirements(&[req]).unwrap_err();
+        assert!(err.contains("snapshot-id mismatch"));
+        // The message shows "expected None, got Some(42)" format
+        assert!(err.contains("42"));
+    }
+
+    #[test]
+    fn test_check_requirements_ref_custom_branch() {
+        // Assert on a custom ref (not "main")
+        let mut meta = sample_metadata();
+        meta.refs.insert(
+            "staging".to_string(),
+            SnapshotRef {
+                snapshot_id: 10,
+                r#type: "branch".to_string(),
+            },
+        );
+        // Correct snapshot-id
+        let req = TableRequirement::AssertRefSnapshotId {
+            r#ref: "staging".to_string(),
+            snapshot_id: Some(10),
+        };
+        assert!(meta.check_requirements(&[req]).is_ok());
+
+        // Wrong snapshot-id
+        let req2 = TableRequirement::AssertRefSnapshotId {
+            r#ref: "staging".to_string(),
+            snapshot_id: Some(99),
+        };
+        let err = meta.check_requirements(&[req2]).unwrap_err();
+        assert!(err.contains("staging"));
+        assert!(err.contains("snapshot-id mismatch"));
+    }
+
+    #[test]
+    fn test_apply_updates_multiple() {
+        // Apply multiple updates in sequence
+        let mut meta = sample_metadata();
+        let updates = vec![
+            TableUpdate::AddSnapshot {
+                snapshot: Snapshot {
+                    snapshot_id: 1,
+                    parent_snapshot_id: None,
+                    sequence_number: 1,
+                    timestamp_ms: 1000,
+                    manifest_list: "s3://b/m1.avro".to_string(),
+                    summary: HashMap::new(),
+                    schema_id: 0,
+                },
+            },
+            TableUpdate::SetSnapshotRef {
+                ref_name: "main".to_string(),
+                snapshot_id: 1,
+                r#type: Some("branch".to_string()),
+            },
+            TableUpdate::SetProperties {
+                updates: HashMap::from([
+                    ("owner".to_string(), "team-a".to_string()),
+                    ("env".to_string(), "prod".to_string()),
+                ]),
+            },
+        ];
+        meta.apply_updates(&updates);
+        assert_eq!(meta.snapshots.len(), 1);
+        assert_eq!(meta.current_snapshot_id, Some(1));
+        assert_eq!(meta.refs.get("main").unwrap().snapshot_id, 1);
+        assert_eq!(meta.properties.get("owner").unwrap(), "team-a");
+        assert_eq!(meta.properties.get("env").unwrap(), "prod");
+        assert_eq!(meta.last_sequence_number, 1);
+    }
+
+    #[test]
+    fn test_check_requirements_multiple() {
+        // Multiple requirements must all pass
+        let mut meta = sample_metadata();
+        meta.refs.insert(
+            "staging".to_string(),
+            SnapshotRef {
+                snapshot_id: 10,
+                r#type: "branch".to_string(),
+            },
+        );
+        let reqs = vec![
+            TableRequirement::AssertTableUuid {
+                uuid: "test-uuid".to_string(),
+            },
+            TableRequirement::AssertRefSnapshotId {
+                r#ref: "main".to_string(),
+                snapshot_id: None, // meta has None for main
+            },
+            TableRequirement::AssertRefSnapshotId {
+                r#ref: "staging".to_string(),
+                snapshot_id: Some(10),
+            },
+        ];
+        assert!(meta.check_requirements(&reqs).is_ok());
+
+        // One requirement fails
+        let reqs_fail = vec![
+            TableRequirement::AssertTableUuid {
+                uuid: "test-uuid".to_string(),
+            },
+            TableRequirement::AssertRefSnapshotId {
+                r#ref: "staging".to_string(),
+                snapshot_id: Some(99), // wrong
+            },
+        ];
+        let err = meta.check_requirements(&reqs_fail).unwrap_err();
+        assert!(err.contains("snapshot-id mismatch"));
+    }
 }

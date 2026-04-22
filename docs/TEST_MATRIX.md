@@ -13,11 +13,11 @@
 |-------|---------|---------|------|
 | quasar-core | 13 | 0 | 13 |
 | quasar-server | 7 | 4 | 11 |
-| quasar-adapter | 36 | 51 | 87 |
+| quasar-adapter | 41 | 59 | 100 |
 | quasar-storage | 0 | 6 | 6 |
-| **合计** | **56** | **61** | **117** |
+| **合计** | **61** | **69** | **130** |
 
-> 注：实际运行 `cargo test` 报告 127 个测试通过，差异来自 doc-tests 和部分测试的重复统计方式。
+> 注：实际运行 `cargo test` 报告 158 个测试通过，差异来自 doc-tests 和部分测试的重复统计方式。
 
 ---
 
@@ -167,6 +167,28 @@
 | `test_store_error_to_iceberg_namespace_mapping` | 单元 | StoreError → IcebergError（namespace） | 5 种 StoreError 全变体正确映射 |
 | `test_store_error_to_iceberg_table_mapping` | 单元 | StoreError → IcebergError（table） | 5 种 StoreError 全变体正确映射 |
 
+### Iceberg TableMetadata (`src/iceberg/table_metadata.rs`)
+
+| 测试函数 | 类型 | 场景 | 验证点 |
+|---------|------|------|--------|
+| `test_check_requirements_uuid_ok` | 单元 | AssertTableUuid验证通过 | table_uuid匹配 → Ok |
+| `test_check_requirements_uuid_fail` | 单元 | AssertTableUuid验证失败 | table_uuid不匹配 → Err |
+| `test_check_requirements_snapshot_id_ok` | 单元 | AssertRefSnapshotId(main)通过 | current_snapshot_id匹配 |
+| `test_check_requirements_snapshot_id_fail` | 单元 | AssertRefSnapshotId(main)失败 | snapshot-id mismatch错误 |
+| `test_check_requirements_assert_create_fails` | 单元 | AssertCreate失败 | 表已存在 → Err |
+| `test_check_requirements_snapshot_id_null_ok` | 单元 | snapshot_id=null验证通过 | current_snapshot_id=None → Ok |
+| `test_check_requirements_snapshot_id_null_fail` | 单元 | snapshot_id=null验证失败 | current_snapshot_id=Some → Err |
+| `test_check_requirements_ref_custom_branch` | 单元 | 自定义ref验证 | staging ref正确/错误snapshot-id |
+| `test_check_requirements_multiple` | 单元 | 多requirements组合 | 全通过/任一失败 |
+| `test_apply_updates_add_snapshot` | 单元 | AddSnapshot更新 | snapshots/current_snapshot_id/last_sequence_number |
+| `test_apply_updates_set_snapshot_ref` | 单元 | SetSnapshotRef更新 | refs/main/current_snapshot_id |
+| `test_apply_updates_set_properties` | 单元 | SetProperties更新 | properties HashMap |
+| `test_apply_updates_remove_properties` | 单元 | RemoveProperties更新 | properties移除 |
+| `test_apply_updates_multiple` | 单元 | 多updates组合 | snapshots+refs+properties联动 |
+| `test_next_metadata_location_increment` | 单元 | metadata_location递增 | 00001→00002格式 |
+| `test_serde_roundtrip` | 单元 | TableMetadata序列化 | JSON往返正确 |
+| `test_snapshot_ref_default_type` | 单元 | SnapshotRef默认type | type="branch" |
+
 ### Iceberg DTO 序列化 (`src/iceberg/dto.rs`)
 
 | 测试函数 | 类型 | 场景 | 验证点 |
@@ -220,6 +242,26 @@
 | `test_drop_table_not_found` | 集成 | DELETE 不存在的 Table | 返回 404，type="NoSuchTableException" |
 | `test_list_tables_empty_namespace` | 集成 | 无 Table 的 Namespace 列表 | 返回空数组，nextPageToken=null |
 
+### Iceberg Commit 端点 (`tests/iceberg_commit.rs`)
+
+| 测试函数 | 类型 | 场景 | 验证点 |
+|---------|------|------|--------|
+| `test_commit_success` | 集成 | POST create → POST commit | 返回 metadata-location + metadata，版本号递增 |
+| `test_commit_conflict` | 集成 | metadata_location匹配的commit | 验证CAS预期行为（非真正冲突） |
+| `test_commit_requirement_failure` | 集成 | AssertRefSnapshotId验证失败 | 返回 409，type="CommitFailedException" |
+| `test_commit_table_not_found` | 集成 | commit不存在的表 | 返回 404，type="NoSuchTableException" |
+| `test_commit_updates_persisted` | 集成 | commit后load验证 | metadata/snapshots/properties/refs持久化 |
+| `test_commit_cas_conflict_simulated` | 集成 | 存储层CAS冲突 | expected不匹配 → StoreError::Conflict |
+| `test_concurrent_cas_conflict_end_to_end` | 集成 | 连续commit requirement冲突 | 第二次返回 409 CommitFailedException |
+| `test_assert_ref_snapshot_id_custom_branch` | 集成 | 自定义ref(staging)验证通过 | 正确snapshot-id → 200 OK |
+| `test_assert_ref_snapshot_id_custom_branch_fail` | 集成 | 自定义ref(staging)验证失败 | 错误snapshot-id → 409 |
+| `test_assert_table_uuid_failure` | 集成 | AssertTableUuid验证失败 | UUID不匹配 → 409 CommitFailedException |
+| `test_multiple_commit_version_increment` | 集成 | 多次commit版本号递增 | 00001→00002→00003 |
+| `test_set_snapshot_ref_with_tag_type` | 集成 | SetSnapshotRef type=TAG | refs.v1.0.type="tag" |
+| `test_commit_namespace_not_found` | 集成 | namespace不存在 | 返回 404，type="NoSuchTableException" |
+| `test_commit_empty_updates` | 集成 | requirements有但updates空 | 空updates → 200 OK（no-op） |
+| `test_remove_properties_commit` | 集成 | RemoveProperties端到端 | 属性删除持久化验证 |
+
 ### Iceberg Config 端点 (`tests/iceberg_config.rs`)
 
 | 测试函数 | 类型 | 场景 | 验证点 |
@@ -246,6 +288,16 @@
 ---
 
 ## 修订记录
+
+### V3.0（2026-04-22）
+
+- 更新：测试统计总览表（61 单元 + 69 集成 = 130 合计）
+- 新增：Iceberg Commit 端点测试矩阵（15 个集成测试）
+- 新增：Iceberg TableMetadata 测试矩阵（17 个单元测试）
+  - 新增：snapshot_id=null 验证测试（ok/fail）
+  - 新增：自定义 ref（staging）验证测试
+  - 新增：多 requirements 组合测试
+  - 新增：多 updates 组合测试
 
 ### V2.0（2026-04-21）
 

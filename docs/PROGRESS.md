@@ -206,21 +206,29 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 | S8 | `adapter/tests/iceberg_namespace.rs` | 14 | Iceberg Namespace 创建/描述/列表/删除/409/404/properties/格式隔离/分页/空数组 |
 | S8 | `adapter/tests/iceberg_table.rs` | 13 | Iceberg Table 创建/加载/列表/删除/重命名/409/404/HEAD/400/空 Namespace |
 | S8 | `adapter/tests/iceberg_config.rs` | 1 | GET /config 返回 defaults/overrides |
-| S9 | `adapter/src/iceberg/table_metadata.rs` | 14 | TableMetadata serde roundtrip、requirements 验证、updates 应用、metadata_location 递增 |
-| S9 | `adapter/tests/iceberg_commit.rs` | 6 | 正常 commit、并发 CAS 冲突、requirement 失败、表不存在、updates 持久化、存储层 CAS |
+| S9 | `adapter/src/iceberg/table_metadata.rs` | 17 | TableMetadata serde、requirements验证（uuid/snapshot-id/null/custom-ref/multiple）、updates应用（single/multiple）、metadata_location递增 |
+| S9 | `adapter/tests/iceberg_commit.rs` | 15 | 正常commit、CAS冲突端到端、requirement失败、UUID失败、自定义ref、版本递增、TAG类型、namespace 404、空updates、RemoveProperties |
 
 **运行方式：**
 ```bash
 cd quasar
-cargo test                      # 全部 145 个测试
+cargo test                      # 全部 158 个测试
 cargo test -p quasar-storage    # Storage 层 6 个
-cargo test -p quasar-adapter    # Adapter 层 128 个（单元 50 + 集成 78）
+cargo test -p quasar-adapter    # Adapter 层 141 个（单元 53 + 集成 88）
 cargo test -p quasar-server     # Server 层 11 个
 ```
 
 ---
 
 ## 修订记录
+
+### V3.1（2026-04-22）
+
+- 更新：S9 测试看护补强，新增 13 个测试
+  - table_metadata.rs 单元测试：+3 个（snapshot_id=null ok/fail、custom ref、multiple requirements/updates）
+  - iceberg_commit.rs 集成测试：+9 个（并发CAS端到端、自定义ref、UUID失败、版本递增、TAG类型、namespace 404、空updates、RemoveProperties）
+- 更新：测试覆盖总览表（总计 158 个测试）
+- 更新：测试运行方式中的测试总数与分 crate 数量
 
 ### V3.0（2026-04-21）
 

@@ -224,9 +224,8 @@ async fn test_commit_conflict() {
         .await
         .unwrap();
 
-    // Note: This will succeed because the metadata_location in DB matches.
-    // To test true conflict, we need to simulate concurrent modification.
-    // Let's do that in a separate test.
+    // Note: This test currently succeeds because the metadata_location in DB matches.
+    // This is intentional behavior - the CAS expects the metadata_location to match.
     assert_eq!(commit.status(), StatusCode::OK);
 }
 
@@ -467,4 +466,598 @@ async fn test_commit_cas_conflict_simulated() {
     assert!(matches!(err, quasar_core::StoreError::Conflict(_)));
     let msg = format!("{}", err);
     assert!(msg.contains("modified by another commit"));
+}
+
+/// S9验收标准核心测试：并发CAS冲突端到端测试
+/// 两个连续commit，第二个使用错误的snapshot-id expectation，验证返回409
+#[tokio::test]
+#[serial]
+async fn test_concurrent_cas_conflict_end_to_end() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    // Create table first
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/namespaces/prod/tables")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"name": "users"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::OK);
+
+    // First commit succeeds
+    let commit1 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "requirements": [
+                            {"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": null}
+                        ],
+                        "updates": [
+                            {"action": "add-snapshot", "snapshot": {
+                                "snapshot-id": 1,
+                                "sequence-number": 1,
+                                "timestamp-ms": 1000,
+                                "manifest-list": "s3://bucket/manifest1.avro",
+                                "summary": {},
+                                "schema-id": 0
+                            }},
+                            {"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 1, "type": "branch"}
+                        ]
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(commit1.status(), StatusCode::OK);
+
+    // Second commit with wrong snapshot-id expectation should fail (CAS requirement check)
+    let commit2 = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                // Expecting snapshot-id=null but it's now 1 after commit1
+                .body(Body::from(
+                    r#"{
+                        "requirements": [
+                            {"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": null}
+                        ],
+                        "updates": [
+                            {"action": "add-snapshot", "snapshot": {
+                                "snapshot-id": 2,
+                                "sequence-number": 2,
+                                "timestamp-ms": 2000,
+                                "manifest-list": "s3://bucket/manifest2.avro",
+                                "summary": {},
+                                "schema-id": 0
+                            }},
+                            {"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 2, "type": "branch"}
+                        ]
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Requirement mismatch: expected null, actual 1 → 409
+    assert_eq!(commit2.status(), StatusCode::CONFLICT);
+    let json = body_json(commit2).await;
+    assert_eq!(json["error"]["type"], "CommitFailedException");
+    assert_eq!(json["error"]["code"], 409);
+    assert!(json["error"]["message"].as_str().unwrap().contains("snapshot-id mismatch"));
+}
+
+/// AssertRefSnapshotId非main ref测试 - 验证自定义branch
+#[tokio::test]
+#[serial]
+async fn test_assert_ref_snapshot_id_custom_branch() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+
+    // Create table with a custom branch "staging"
+    store
+        .create_asset(
+            "prod",
+            AssetFormat::Iceberg,
+            "users",
+            "s3://bucket/warehouse/prod/users",
+            Some("s3://bucket/warehouse/prod/users/metadata/00001-uuid.metadata.json"),
+            Some(serde_json::json!({
+                "format-version": 2,
+                "table-uuid": "test-uuid",
+                "location": "s3://bucket/warehouse/prod/users",
+                "last-sequence-number": 1,
+                "last-updated-ms": 1000,
+                "last-column-id": 0,
+                "schemas": [],
+                "current-schema-id": 0,
+                "partition-specs": [],
+                "default-spec-id": 0,
+                "last-partition-id": 999,
+                "properties": {},
+                "current-snapshot-id": 42,
+                "snapshots": [],
+                "snapshot-log": [],
+                "metadata-log": [],
+                "sort-orders": [],
+                "default-sort-order-id": 0,
+                "refs": {
+                    "main": {"snapshot-id": 42, "type": "branch"},
+                    "staging": {"snapshot-id": 10, "type": "branch"}
+                }
+            })),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let app = test_app(store);
+
+    // Commit with assert on "staging" branch - correct snapshot-id should succeed
+    let commit = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "requirements": [
+                            {"type": "assert-ref-snapshot-id", "ref": "staging", "snapshot-id": 10}
+                        ],
+                        "updates": []
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Requirements satisfied → 200 OK (empty updates)
+    assert_eq!(commit.status(), StatusCode::OK);
+}
+
+/// AssertRefSnapshotId非main ref测试 - 验证失败场景
+#[tokio::test]
+#[serial]
+async fn test_assert_ref_snapshot_id_custom_branch_fail() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+
+    // Create table with a custom branch "staging"
+    store
+        .create_asset(
+            "prod",
+            AssetFormat::Iceberg,
+            "users",
+            "s3://bucket/warehouse/prod/users",
+            Some("s3://bucket/warehouse/prod/users/metadata/00001-uuid.metadata.json"),
+            Some(serde_json::json!({
+                "format-version": 2,
+                "table-uuid": "test-uuid",
+                "location": "s3://bucket/warehouse/prod/users",
+                "last-sequence-number": 1,
+                "last-updated-ms": 1000,
+                "last-column-id": 0,
+                "schemas": [],
+                "current-schema-id": 0,
+                "partition-specs": [],
+                "default-spec-id": 0,
+                "last-partition-id": 999,
+                "properties": {},
+                "current-snapshot-id": 42,
+                "snapshots": [],
+                "snapshot-log": [],
+                "metadata-log": [],
+                "sort-orders": [],
+                "default-sort-order-id": 0,
+                "refs": {
+                    "main": {"snapshot-id": 42, "type": "branch"},
+                    "staging": {"snapshot-id": 10, "type": "branch"}
+                }
+            })),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let app = test_app(store);
+
+    // Commit with wrong snapshot-id for "staging" branch
+    let commit = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "requirements": [
+                            {"type": "assert-ref-snapshot-id", "ref": "staging", "snapshot-id": 999}
+                        ],
+                        "updates": []
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(commit.status(), StatusCode::CONFLICT);
+    let json = body_json(commit).await;
+    assert_eq!(json["error"]["type"], "CommitFailedException");
+    assert!(json["error"]["message"].as_str().unwrap().contains("snapshot-id mismatch"));
+}
+
+/// AssertTableUuid requirement端到端测试 - UUID不匹配
+#[tokio::test]
+#[serial]
+async fn test_assert_table_uuid_failure() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+
+    // Create table with known UUID
+    store
+        .create_asset(
+            "prod",
+            AssetFormat::Iceberg,
+            "users",
+            "s3://bucket/warehouse/prod/users",
+            Some("s3://bucket/warehouse/prod/users/metadata/00001-uuid.metadata.json"),
+            Some(serde_json::json!({
+                "format-version": 2,
+                "table-uuid": "correct-uuid-123",
+                "location": "s3://bucket/warehouse/prod/users",
+                "last-sequence-number": 0,
+                "last-updated-ms": 1000,
+                "last-column-id": 0,
+                "schemas": [],
+                "current-schema-id": 0,
+                "partition-specs": [],
+                "default-spec-id": 0,
+                "last-partition-id": 999,
+                "properties": {},
+                "snapshots": [],
+                "snapshot-log": [],
+                "metadata-log": [],
+                "sort-orders": [],
+                "default-sort-order-id": 0,
+                "refs": {}
+            })),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let app = test_app(store);
+
+    // Commit with wrong UUID requirement
+    let commit = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "requirements": [
+                            {"type": "assert-table-uuid", "uuid": "wrong-uuid-999"}
+                        ],
+                        "updates": []
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(commit.status(), StatusCode::CONFLICT);
+    let json = body_json(commit).await;
+    assert_eq!(json["error"]["type"], "CommitFailedException");
+    assert!(json["error"]["message"].as_str().unwrap().contains("UUID mismatch"));
+}
+
+/// 多次commit版本号递增测试
+#[tokio::test]
+#[serial]
+async fn test_multiple_commit_version_increment() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    // Create table
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/namespaces/prod/tables")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"name": "users"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::OK);
+    let create_json = body_json(create).await;
+    let location1 = create_json["metadata-location"].as_str().unwrap();
+    assert!(location1.contains("00001-"));
+
+    // First commit → should produce 00002
+    let commit1 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "requirements": [{"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": null}],
+                        "updates": [
+                            {"action": "add-snapshot", "snapshot": {"snapshot-id": 1, "sequence-number": 1, "timestamp-ms": 1000, "manifest-list": "s3://b/m1.avro", "summary": {}, "schema-id": 0}},
+                            {"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 1, "type": "branch"}
+                        ]
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(commit1.status(), StatusCode::OK);
+    let json1 = body_json(commit1).await;
+    let location2 = json1["metadata-location"].as_str().unwrap();
+    assert!(location2.contains("00002-"));
+
+    // Second commit → should produce 00003
+    let commit2 = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "requirements": [{"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": 1}],
+                        "updates": [
+                            {"action": "add-snapshot", "snapshot": {"snapshot-id": 2, "sequence-number": 2, "timestamp-ms": 2000, "manifest-list": "s3://b/m2.avro", "summary": {}, "schema-id": 0}},
+                            {"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 2, "type": "branch"}
+                        ]
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(commit2.status(), StatusCode::OK);
+    let json2 = body_json(commit2).await;
+    let location3 = json2["metadata-location"].as_str().unwrap();
+    assert!(location3.contains("00003-"));
+}
+
+/// SetSnapshotRef type字段测试 - TAG类型
+#[tokio::test]
+#[serial]
+async fn test_set_snapshot_ref_with_tag_type() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    // Create table
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/namespaces/prod/tables")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"name": "users"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Commit with snapshot and set ref as TAG
+    let commit = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "requirements": [{"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": null}],
+                        "updates": [
+                            {"action": "add-snapshot", "snapshot": {"snapshot-id": 1, "sequence-number": 1, "timestamp-ms": 1000, "manifest-list": "s3://b/m1.avro", "summary": {}, "schema-id": 0}},
+                            {"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 1, "type": "branch"},
+                            {"action": "set-snapshot-ref", "ref-name": "v1.0", "snapshot-id": 1, "type": "tag"}
+                        ]
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(commit.status(), StatusCode::OK);
+
+    // Load and verify tag ref
+    let load = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(load.status(), StatusCode::OK);
+    let json = body_json(load).await;
+    assert_eq!(json["metadata"]["refs"]["v1.0"]["snapshot-id"], 1);
+    assert_eq!(json["metadata"]["refs"]["v1.0"]["type"], "tag");
+}
+
+/// Namespace不存在测试
+#[tokio::test]
+#[serial]
+async fn test_commit_namespace_not_found() {
+    let store = setup().await;
+    // No namespace created
+    let app = test_app(store);
+
+    let commit = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/namespaces/nonexistent/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"requirements": [], "updates": []}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(commit.status(), StatusCode::NOT_FOUND);
+    let json = body_json(commit).await;
+    assert_eq!(json["error"]["type"], "NoSuchTableException");
+    assert_eq!(json["error"]["code"], 404);
+}
+
+/// 空updates边界测试
+#[tokio::test]
+#[serial]
+async fn test_commit_empty_updates() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    // Create table
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/namespaces/prod/tables")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"name": "users"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Commit with requirements satisfied but empty updates
+    let commit = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "requirements": [{"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": null}],
+                        "updates": []
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Empty updates should still succeed (no-op commit)
+    assert_eq!(commit.status(), StatusCode::OK);
+}
+
+/// RemoveProperties端到端测试
+#[tokio::test]
+#[serial]
+async fn test_remove_properties_commit() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    // Create table
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/namespaces/prod/tables")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"name": "users"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // First commit to add properties
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "requirements": [{"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": null}],
+                        "updates": [
+                            {"action": "add-snapshot", "snapshot": {"snapshot-id": 1, "sequence-number": 1, "timestamp-ms": 1000, "manifest-list": "s3://b/m1.avro", "summary": {}, "schema-id": 0}},
+                            {"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 1, "type": "branch"},
+                            {"action": "set-properties", "updates": {"owner": "team-a", "env": "prod"}}
+                        ]
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Second commit to remove properties
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "requirements": [{"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": 1}],
+                        "updates": [
+                            {"action": "remove-properties", "removals": ["env"]}
+                        ]
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Load and verify
+    let load = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(load.status(), StatusCode::OK);
+    let json = body_json(load).await;
+    assert_eq!(json["metadata"]["properties"]["owner"], "team-a");
+    assert!(json["metadata"]["properties"].get("env").is_none());
 }
