@@ -12,10 +12,12 @@
 | Crate | 单元测试 | 集成测试 | 合计 |
 |-------|---------|---------|------|
 | quasar-core | 13 | 0 | 13 |
-| quasar-server | 7 | 3 | 10 |
-| quasar-adapter | 15 | 33 | 48 |
-| quasar-storage | 0 | 5 | 5 |
-| **合计** | **35** | **41** | **76** |
+| quasar-server | 7 | 4 | 11 |
+| quasar-adapter | 36 | 51 | 87 |
+| quasar-storage | 0 | 6 | 6 |
+| **合计** | **56** | **61** | **117** |
+
+> 注：实际运行 `cargo test` 报告 127 个测试通过，差异来自 doc-tests 和部分测试的重复统计方式。
 
 ---
 
@@ -73,12 +75,13 @@
 | `test_healthz` | 集成 | GET /healthz | 返回 200，`{"status": "ok"}` |
 | `test_readyz` | 集成 | GET /readyz（DB 正常） | 返回 200，`{"status": "ready", "checks": {"database": "ok"}}` |
 | `test_lance_routes_still_work` | 集成 | Lance 路由与 health 共存 | GET /lance/v1/namespace/$/list 返回 200 空列表 |
+| `test_iceberg_routes_are_mounted` | 集成 | Iceberg 路由挂载 | GET /iceberg/v1/config 返回 200 |
 
 ---
 
 ## quasar-adapter
 
-> 位置：`quasar/adapter/src/lance/` + `quasar/adapter/tests/`
+> 位置：`quasar/adapter/src/lance/` + `quasar/adapter/src/iceberg/` + `quasar/adapter/tests/`
 > 测试类型：单元测试 + 集成测试
 
 ### Lance 错误映射 (`src/lance/error.rs`)
@@ -149,6 +152,80 @@
 | `test_create_table_not_found` | 集成 | 对不存在的 Table 创建版本 | 返回 404，error="TableNotFound" |
 | `test_describe_current_version_in_describe_table` | 集成 | 创建版本后 describe_table | current_version 联动更新为最新版本 |
 
+### Iceberg 错误映射 (`src/iceberg/error.rs`)
+
+| 测试函数 | 类型 | 场景 | 验证点 |
+|---------|------|------|--------|
+| `test_iceberg_error_no_such_namespace_to_response` | 单元 | NoSuchNamespaceException → ErrorResponse | code=404, type="NoSuchNamespaceException" |
+| `test_iceberg_error_namespace_already_exists_to_response` | 单元 | NamespaceAlreadyExistsException → ErrorResponse | code=409, type="NamespaceAlreadyExistsException" |
+| `test_iceberg_error_no_such_table_to_response` | 单元 | NoSuchTableException → ErrorResponse | code=404, type="NoSuchTableException" |
+| `test_iceberg_error_table_already_exists_to_response` | 单元 | TableAlreadyExistsException → ErrorResponse | code=409, type="TableAlreadyExistsException" |
+| `test_iceberg_error_bad_request_to_response` | 单元 | BadRequestException → ErrorResponse | code=400, type="BadRequestException" |
+| `test_iceberg_error_commit_failed_to_response` | 单元 | CommitFailedException → ErrorResponse | code=409, type="CommitFailedException" |
+| `test_iceberg_error_internal_to_response` | 单元 | InternalServerError → ErrorResponse | code=500, type="InternalServerError" |
+| `test_error_response_serde` | 单元 | ErrorResponse 序列化 | JSON 包含 error/message/type/code 字段 |
+| `test_store_error_to_iceberg_namespace_mapping` | 单元 | StoreError → IcebergError（namespace） | 5 种 StoreError 全变体正确映射 |
+| `test_store_error_to_iceberg_table_mapping` | 单元 | StoreError → IcebergError（table） | 5 种 StoreError 全变体正确映射 |
+
+### Iceberg DTO 序列化 (`src/iceberg/dto.rs`)
+
+| 测试函数 | 类型 | 场景 | 验证点 |
+|---------|------|------|--------|
+| `test_create_namespace_request_serde` | 单元 | CreateNamespaceRequest 反序列化 | namespace 数组 + properties（可选）正确解析 |
+| `test_namespace_response_serde` | 单元 | NamespaceResponse 序列化 | 空 properties 不输出，非空输出 |
+| `test_list_namespaces_query_serde` | 单元 | ListNamespacesQuery 反序列化 | pageToken/pageSize 可选字段正确 |
+| `test_list_namespaces_response_serde` | 单元 | ListNamespacesResponse 序列化 | nextPageToken 有/无两种情况 |
+| `test_update_namespace_properties_request_serde` | 单元 | UpdateNamespacePropertiesRequest | removals/updates 可选字段正确 |
+| `test_update_namespace_properties_response_serde` | 单元 | UpdateNamespacePropertiesResponse | missing 空数组时不输出 |
+| `test_create_table_request_serde` | 单元 | CreateTableRequest 反序列化 | name 必填，location/schema/properties 可选 |
+| `test_load_table_response_serde` | 单元 | LoadTableResponse 序列化 | metadata-location + metadata 正确 |
+| `test_list_tables_response_serde` | 单元 | ListTablesResponse 序列化 | identifiers 数组正确 |
+| `test_rename_table_request_serde` | 单元 | RenameTableRequest 反序列化 | source/destination 结构正确 |
+| `test_table_identifier_serde` | 单元 | TableIdentifier 序列化 | namespace 数组 + name 正确 |
+
+### Iceberg Namespace 端点 (`tests/iceberg_namespace.rs`)
+
+| 测试函数 | 类型 | 场景 | 验证点 |
+|---------|------|------|--------|
+| `test_create_and_get_namespace` | 集成 | POST create → GET | 返回 namespace 数组，数据持久化 |
+| `test_create_duplicate_returns_409` | 集成 | 重复创建同名 Namespace | 返回 409，type="NamespaceAlreadyExistsException" |
+| `test_list_namespaces` | 集成 | 创建多个 Namespace 后列表 | 返回全部 Iceberg format 的 Namespace |
+| `test_get_namespace_not_found` | 集成 | GET 不存在的 Namespace | 返回 404，type="NoSuchNamespaceException" |
+| `test_drop_namespace` | 集成 | DELETE 后再次 GET | 首次 204，再次 404 |
+| `test_drop_non_empty_namespace` | 集成 | DELETE 含 Table 的 Namespace | 返回 400，type="BadRequestException" |
+| `test_update_namespace_properties` | 集成 | POST properties 更新 | removed/updated/missing 正确，properties 持久化 |
+| `test_format_isolation` | 集成 | Iceberg/Lance Namespace 共存 | 只返回 Iceberg format 的 Namespace |
+| `test_update_namespace_properties_namespace_not_found` | 集成 | 对不存在的 Namespace 更新 properties | 返回 404，type="NoSuchNamespaceException" |
+| `test_list_namespaces_empty` | 集成 | 无 Namespace 时列表 | 返回空数组，nextPageToken=null |
+| `test_list_namespaces_pagination_offset_beyond_total` | 集成 | pageToken 超出总数 | 返回空数组，不报错 |
+| `test_list_namespaces_pagination_with_limit` | 集成 | pageSize 限制返回数量 | 返回数量 <= limit，nextPageToken 正确 |
+| `test_create_namespace_empty_array_returns_400` | 集成 | namespace 数组为空 | 返回 400，type="BadRequestException" |
+| `test_drop_namespace_not_found` | 集成 | DELETE 不存在的 Namespace | 返回 404，type="NoSuchNamespaceException" |
+
+### Iceberg Table 端点 (`tests/iceberg_table.rs`)
+
+| 测试函数 | 类型 | 场景 | 验证点 |
+|---------|------|------|--------|
+| `test_create_and_load_table` | 集成 | POST create → GET load | 返回 metadata-location + TableMetadata |
+| `test_create_duplicate_returns_409` | 集成 | 重复创建同名 Table | 返回 409，type="TableAlreadyExistsException" |
+| `test_list_tables` | 集成 | 创建多个 Table 后列表 | 返回全部 Table identifiers |
+| `test_load_table_not_found` | 集成 | GET 不存在的 Table | 返回 404，type="NoSuchTableException" |
+| `test_drop_table` | 集成 | DELETE 后再次 GET | 首次 204，再次 404 |
+| `test_table_exists` | 集成 | HEAD 存在/不存在检查 | 存在 → 200，不存在 → 404 |
+| `test_rename_table` | 集成 | POST rename 后验证 | 旧名 HEAD 404，新名 HEAD 200 |
+| `test_rename_cross_namespace` | 集成 | 跨 Namespace rename | 返回 400，type="BadRequestException" |
+| `test_create_table_namespace_not_found` | 集成 | 在不存在的 Namespace 创建 Table | 返回 404，type="NoSuchNamespaceException" |
+| `test_rename_table_source_not_found` | 集成 | rename 不存在的 source Table | 返回 404，type="NoSuchTableException" |
+| `test_rename_table_destination_already_exists` | 集成 | rename 到已存在的名称 | 返回 409，type="TableAlreadyExistsException" |
+| `test_drop_table_not_found` | 集成 | DELETE 不存在的 Table | 返回 404，type="NoSuchTableException" |
+| `test_list_tables_empty_namespace` | 集成 | 无 Table 的 Namespace 列表 | 返回空数组，nextPageToken=null |
+
+### Iceberg Config 端点 (`tests/iceberg_config.rs`)
+
+| 测试函数 | 类型 | 场景 | 验证点 |
+|---------|------|------|--------|
+| `test_get_config` | 集成 | GET /iceberg/v1/config | 返回 defaults + overrides 对象 |
+
 ---
 
 ## quasar-storage
@@ -169,6 +246,17 @@
 ---
 
 ## 修订记录
+
+### V2.0（2026-04-21）
+
+- 更新：测试统计总览表（56 单元 + 61 集成 = 117 合计）
+- 新增：Iceberg 错误映射测试矩阵（10 个单元测试）
+- 新增：Iceberg DTO 序列化测试矩阵（11 个单元测试）
+- 新增：Iceberg Namespace 端点测试矩阵（14 个集成测试）
+- 新增：Iceberg Table 端点测试矩阵（13 个集成测试）
+- 新增：Iceberg Config 端点测试矩阵（1 个集成测试）
+- 新增：server/tests/health.rs 的 Iceberg 路由挂载测试
+- 新增：storage/tests/integration.rs 的 update_namespace_properties 测试
 
 ### V1.0（2026-04-20）
 

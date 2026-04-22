@@ -16,7 +16,7 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 
 | 属性 | 值 |
 |------|---|
-| **阶段** | S9（Iceberg CAS Commit） |
+| **阶段** | S10（Spark 集成验证） |
 | **Phase** | Phase 2（Iceberg REST Catalog） |
 | **状态** | 未开始 |
 
@@ -42,7 +42,7 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 | 阶段 | 名称 | 状态 | 验收标准 |
 |------|------|------|---------|
 | S8 | Iceberg Namespace + Table CRUD | 已完成 | `curl` 可操作 Iceberg Namespace 和 Table |
-| S9 | Iceberg CAS Commit | 未开始 | 并发 commit 冲突正确返回 409 |
+| S9 | Iceberg CAS Commit | 已完成 | 并发 commit 冲突正确返回 409 |
 | S10 | Spark 集成验证 | 未开始 | Spark 端到端读写 Iceberg 表成功 |
 
 ---
@@ -51,13 +51,25 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 
 | 属性 | 值 |
 |------|---|
-| **阶段** | S9（Iceberg CAS Commit） |
+| **阶段** | S10（Spark 集成验证） |
 | **Phase** | Phase 2（Iceberg REST Catalog） |
 | **状态** | 未开始 |
 
 ---
 
 ## 已完成的里程碑
+
+- **S9 — Iceberg CAS Commit**（2026-04-21）
+  - Core 层扩展：`CatalogStore` trait 新增 `commit_iceberg_table` 方法，`create_asset` 新增 `schema_snapshot` 参数
+  - Storage 层实现：`commit_iceberg_table` CAS SQL（`metadata_location` 条件 UPDATE，0 行影响 → Conflict）
+  - Adapter 层 `table_metadata.rs`：Iceberg TableMetadata v2 核心结构定义（Snapshot、SnapshotRef、Schema、TableRequirement、TableUpdate）
+  - `check_requirements()`：支持 `assert-create`、`assert-table-uuid`、`assert-ref-snapshot-id`
+  - `apply_updates()`：支持 `add-snapshot`、`set-snapshot-ref`、`set-properties`、`remove-properties`
+  - DTO 扩展：`CommitTableRequest`、`TableIdentifier` 新增 `Deserialize`
+  - `commit_table` handler：`POST /iceberg/v1/namespaces/{ns}/tables/{table}`，完整 CAS 流程（load → check → apply → CAS → return）
+  - `create_table` 修正：初始 metadata 持久化到 `schema_snapshot`
+  - 测试覆盖 6 个 commit 集成测试（成功/冲突/requirement 失败/表不存在/updates 持久化/CAS 模拟）+ `table_metadata` 单元测试 14 个
+  - 全部测试 145 个通过，`cargo clippy` 零警告
 
 - **S8 — Iceberg Namespace + Table CRUD**（2026-04-21）
   - Core 数据模型扩展：`Asset.location`、`metadata_location`、`schema_snapshot`
@@ -184,28 +196,48 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 
 | 阶段 | 测试文件 | 测试数 | 覆盖场景 |
 |------|---------|-------|---------|
-| S2 | `storage/tests/integration.rs` | 5 | Namespace CRUD、Asset CRUD、版本提交/加载/冲突、NotFound |
-| S3 | `adapter/tests/lance_namespace.rs` | 6 | Lance Namespace 创建/描述/列表/存在检查/删除、409 冲突、404 NotFound、格式隔离 |
-| S4 | `adapter/tests/lance_table.rs` | 10 | Lance Table 声明/描述/列表/注册/注销/删除/存在检查/重命名、409 冲突、404 NotFound |
+| S2 | `storage/tests/integration.rs` | 6 | Namespace CRUD、Asset CRUD、版本提交/加载/冲突、NotFound、update_namespace_properties |
+| S3 | `adapter/tests/lance_namespace.rs` | 10 | Lance Namespace 创建/描述/列表/存在检查/删除、409 冲突、404 NotFound、格式隔离、分页 |
+| S4 | `adapter/tests/lance_table.rs` | 17 | Lance Table 声明/描述/列表/注册/注销/删除/存在检查/重命名、409 冲突、404 NotFound |
 | S5 | `adapter/tests/lance_version.rs` | 6 | Lance 版本创建/列表/描述、409 版本冲突、404 NotFound、current_version 联动 |
-| S6 | `server/tests/health.rs` | 3 | /healthz 存活性、/readyz 就绪性（DB 连通性）、Lance 路由集成回归 |
-| S8 | `adapter/tests/iceberg_namespace.rs` | 8 | Iceberg Namespace 创建/描述/列表/删除/409/404/properties/格式隔离 |
-| S8 | `adapter/tests/iceberg_table.rs` | 9 | Iceberg Table 创建/加载/列表/删除/重命名/409/404/HEAD/400 |
+| S6 | `server/tests/health.rs` | 4 | /healthz 存活性、/readyz 就绪性（DB 连通性）、Lance/Iceberg 路由集成回归 |
+| S8 | `adapter/src/iceberg/error.rs` | 10 | Iceberg 错误变体 → ErrorResponse、StoreError → IcebergError 映射 |
+| S8 | `adapter/src/iceberg/dto.rs` | 11 | Iceberg DTO 结构体 serde roundtrip |
+| S8 | `adapter/tests/iceberg_namespace.rs` | 14 | Iceberg Namespace 创建/描述/列表/删除/409/404/properties/格式隔离/分页/空数组 |
+| S8 | `adapter/tests/iceberg_table.rs` | 13 | Iceberg Table 创建/加载/列表/删除/重命名/409/404/HEAD/400/空 Namespace |
 | S8 | `adapter/tests/iceberg_config.rs` | 1 | GET /config 返回 defaults/overrides |
-| S8 | `server/tests/health.rs` | +1 | Iceberg 路由挂载回归 |
+| S9 | `adapter/src/iceberg/table_metadata.rs` | 14 | TableMetadata serde roundtrip、requirements 验证、updates 应用、metadata_location 递增 |
+| S9 | `adapter/tests/iceberg_commit.rs` | 6 | 正常 commit、并发 CAS 冲突、requirement 失败、表不存在、updates 持久化、存储层 CAS |
 
 **运行方式：**
 ```bash
 cd quasar
-cargo test                      # 全部 96 个测试
+cargo test                      # 全部 145 个测试
 cargo test -p quasar-storage    # Storage 层 6 个
-cargo test -p quasar-adapter    # Adapter 层 66 个
+cargo test -p quasar-adapter    # Adapter 层 128 个（单元 50 + 集成 78）
 cargo test -p quasar-server     # Server 层 11 个
 ```
 
 ---
 
 ## 修订记录
+
+### V3.0（2026-04-21）
+
+- 更新：S9 状态标记为"已完成"，当前阶段推进至 S10
+- 新增：已完成里程碑记录 S9（含 Iceberg CAS Commit 实现详情与测试覆盖）
+- 新增：S9 测试覆盖条目至测试覆盖总览表（总计 145 个测试）
+- 更新：测试运行方式中的测试总数与分 crate 数量
+
+### V2.0（2026-04-21）
+
+- 更新：S8 测试看护补强，新增 41 个测试
+  - Iceberg error.rs 单元测试：10 个（错误变体 → ErrorResponse、StoreError 映射）
+  - Iceberg dto.rs 单元测试：11 个（DTO 结构体 serde roundtrip）
+  - Iceberg namespace.rs 集成测试：+6 个（properties 404、分页、空数组、空 namespace、删除 404）
+  - Iceberg table.rs 成测试：+4 个（rename 404/409、drop 404、空 namespace）
+- 更新：测试覆盖总览表（总计 127 个测试）
+- 更新：测试运行方式中的测试数量
 
 ### V1.9（2026-04-21）
 
