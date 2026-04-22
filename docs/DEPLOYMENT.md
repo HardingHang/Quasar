@@ -1,6 +1,6 @@
 # Quasar 部署与验证指南
 
-本文档介绍如何部署 Quasar Catalog Service 以及如何验证其 Lance REST Namespace 功能。
+本文档介绍如何部署 Quasar Catalog Service 以及如何验证其 Lance REST Namespace 和 Iceberg REST Catalog 功能。
 
 ---
 
@@ -74,6 +74,33 @@ docker compose -f docker-compose.lance.yml up -d
 > - **Quasar Server**（端口 8080）
 > - **PostgreSQL**（内部端口 5432）
 > - **MinIO**（对象存储，S3 API 端口 9000，Console 端口 9001）
+
+### 1.3 Spark 集成环境（Server + PostgreSQL + MinIO）
+
+用于 Spark 通过 Iceberg REST Catalog 端到端验证。推荐使用**本地预编译快速构建**（约 15-30 秒），避免容器内重复下载 crates.io 依赖：
+
+```bash
+cd quasar
+
+# 一键编译 + 打包镜像（复用本地 cargo 缓存）
+./scripts/docker-build.sh
+
+# 启动 Spark 集成环境
+docker compose -f docker-compose.spark.yml up -d
+```
+
+快速构建脚本自动化三步：
+1. `cargo build --release -p quasar-server` — 本地编译（复用 cargo 缓存）
+2. `cp target/release/quasar-server quasar-server-bin` — 复制二进制
+3. `docker build -f Dockerfile.fast -t quasar-server:latest .` — 快速打包（只 COPY 二进制，无 Rust 工具链）
+
+> **说明：** `docker-compose.spark.yml` 与 `docker-compose.lance.yml` 共享相同的基础设施（MinIO + PostgreSQL + Quasar Server）。区别在于测试脚本使用 PySpark + Iceberg 而非 Lance Python SDK。
+>
+> 该环境包含：
+> - **Quasar Server**（端口 8080，启用 Iceberg REST Catalog）
+> - **PostgreSQL**（内部端口 5432）
+> - **MinIO**（对象存储，S3 API 端口 9000，Console 端口 9001）
+> - **spark-test**（可选测试容器，通过 `--profile test` 启动）
 
 ---
 
@@ -371,6 +398,120 @@ Lance 格式的设计是将数据文件存储在**对象存储**（S3/GCS/Azure�
 
 MinIO 在本地提供了与生产环境 S3 兼容的 API，是 Lance 端到端验证的必需组件。
 
+### 2.6 Spark 集成部署详解
+
+Spark 集成部署复用与 Lance 集成完全相同的三个服务（MinIO + PostgreSQL + Quasar Server），额外增加一个可选的 **`spark-test`** 测试容器。
+
+#### spark-test 容器
+
+```yaml
+  spark-test:
+    image: python:3.11-slim
+    profiles: ["test"]
+    environment:
+      BASE_URL: http://server:8080
+      MINIO_ENDPOINT: http://minio:9000
+      RUN_MODE: docker
+    depends_on:
+      server:
+        condition: service_started
+    volumes:
+      - ./tests:/tests:ro
+    command: >
+      bash -c "
+        apt-get update -qq &&
+        apt-get install -y -qq default-jre &&
+        pip install -q pyspark==3.5.3 requests boto3 &&
+        python /tests/spark_iceberg_integration.py
+      "
+```
+
+**运行的程序：** Python 测试脚本（通过 PySpark 调用 Spark + Iceberg）
+
+**两种运行方式：**
+
+| 方式 | 命令 | 适用场景 |
+|------|------|---------|
+| **Docker 内运行**（推荐） | `docker compose -f docker-compose.spark.yml --profile test run --rm spark-test` | 宿主机未安装 PySpark/Java |
+| **宿主机运行** | `python tests/spark_iceberg_integration.py` | 宿主机已有 PySpark 环境 |
+
+**Docker 内运行时的网络：**
+- `BASE_URL=http://server:8080` — 通过 Docker 内部 DNS 访问 Quasar Server
+- `MINIO_ENDPOINT=http://minio:9000` — 通过 Docker 内部 DNS 访问 MinIO
+
+**宿主机运行时的网络：**
+- REST API: `http://localhost:8080`（端口映射）
+- MinIO S3: `http://localhost:9000`（端口映射）
+
+#### Iceberg metadata 在对象存储中的位置
+
+与 Lance 不同，Iceberg 的 **metadata.json 文件由 Quasar Server 直接写入 MinIO**：
+
+```
+MinIO (s3://warehouse/)
+└── prod/
+    └── test/
+        └── metadata/
+            ├── 00001-<uuid>.metadata.json   ← 初始 metadata（create_table 写入）
+            ├── 00002-<uuid>.metadata.json   ← 第一次 commit 后的 metadata
+            └── 00003-<uuid>.metadata.json   ← 第二次 commit 后的 metadata
+```
+
+每次 `INSERT INTO` 触发 Spark 的 commit 流程：
+1. Spark 读取当前 metadata（通过 REST `GET /tables/...`）
+2. Spark 写入新的 Parquet 数据文件到 MinIO
+3. Spark 构建新的 snapshot 和 metadata
+4. Spark 发送 `POST /tables/...` commit 请求
+5. Quasar Server 将新的 metadata.json 写入 MinIO
+6. Quasar Server CAS 更新 PostgreSQL 中的 metadata_location 指针
+
+#### 三容器协作关系（Iceberg）
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Docker 内部网络                            │
+│                                                             │
+│   ┌─────────────┐     ┌─────────────┐     ┌─────────────┐  │
+│   │   Quasar    │◄────┤  PostgreSQL │     │    MinIO    │  │
+│   │   Server    │     │   (元数据)   │     │  (对象存储)  │  │
+│   │  :8080      │     │  :5432      │     │  :9000      │  │
+│   └──────┬──────┘     └─────────────┘     └──────▲──────┘  │
+│          │                                        │         │
+│          │ ① REST API: namespace/table CRUD       │         │
+│          │ ② metadata_location 存 PostgreSQL      │         │
+│          │ ③ metadata.json 写入 MinIO             │         │
+│          │                                        │         │
+│          │         ④ Spark 直连 MinIO 读写        │         │
+│          │            Parquet 数据文件            │         │
+│          │                                        │         │
+│          └────────────────────────────────────────┘         │
+│                                                             │
+│   ┌─────────────────────────────────────────────────────┐   │
+│   │              spark-test 容器（可选）                  │   │
+│   │                                                      │   │
+│   │  ⑤ PySpark Session + Iceberg REST Catalog          │   │
+│   │     CREATE TABLE → INSERT → SELECT → DROP           │   │
+│   └─────────────────────────────────────────────────────┘   │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**数据流说明：**
+
+| 步骤 | 谁发起 | 操作 | 存储位置 |
+|------|--------|------|---------|
+| ① | Spark | `POST /iceberg/v1/namespaces` 创建 namespace | PostgreSQL |
+| ② | Spark | `POST /iceberg/v1/namespaces/prod/tables` 创建表 | PostgreSQL + MinIO（metadata.json） |
+| ③ | Spark | `INSERT INTO iceberg.prod.test` | MinIO（Parquet 数据文件） |
+| ④ | Spark | 内部 commit，发送 `POST /tables/...` | MinIO（新 metadata.json）+ PostgreSQL（更新指针） |
+| ⑤ | Spark | `SELECT * FROM iceberg.prod.test` | MinIO（读取 Parquet） |
+
+**关键设计原则：**
+- **Quasar 管理 metadata 指针**（PostgreSQL 存 `metadata_location`）
+- **Quasar 读写 metadata.json**（通过 `object_store` crate 写入 MinIO）
+- **Spark 读写数据文件**（Parquet 直接写入 MinIO，不经过 Quasar）
+- 两者通过 `location`（表的数据基础路径）协作
+
 ---
 
 ## 3. 配置说明
@@ -391,7 +532,7 @@ Quasar 通过环境变量进行配置。
 | `QUASAR_PORT` | 否 | `8080` | HTTP 监听端口 |
 | `QUASAR_LOG_LEVEL` | 否 | `info` | 日志级别（也支持 `RUST_LOG`） |
 
-### 3.3 Warehouse 与对象存储配置（Lance 验证需要）
+### 3.3 Warehouse 与对象存储配置（Lance / Iceberg 验证需要）
 
 | 变量名 | 必填 | 默认值 | 说明 |
 |--------|------|--------|------|
@@ -401,6 +542,8 @@ Quasar 通过环境变量进行配置。
 | `QUASAR_S3_SECRET_KEY` | 否 | - | S3 secret key |
 | `QUASAR_S3_REGION` | 否 | `us-east-1` | S3 region |
 | `QUASAR_S3_ALLOW_HTTP` | 否 | `false` | 是否允许 HTTP（非 HTTPS）S3 连接 |
+
+Iceberg 端点使用相同的 S3 配置，`object_store` crate 在 Server 启动时构建 S3 客户端，用于读写 `metadata.json` 文件。
 
 ### 3.4 配置示例
 
@@ -509,6 +652,9 @@ docker compose up -d
 
 # 或启动 Lance 集成环境
 docker compose -f docker-compose.lance.yml up -d
+
+# 或启动 Spark 集成环境
+docker compose -f docker-compose.spark.yml up -d
 ```
 
 ### 4.3 原生二进制
@@ -669,6 +815,157 @@ print(len(ds.to_table()))  # 3
 
 ---
 
+## 5. Spark 端到端验证
+
+### 5.5 启动环境
+
+按 [1.3 节](#13-spark-集成环境server--postgresql--minio) 启动 Spark 集成环境，确保容器状态正常：
+
+```bash
+docker compose -f docker-compose.spark.yml ps
+```
+
+确认 `quasar-server-1`、`quasar-db-1`、`quasar-minio-1` 均为 `healthy` 状态后即可开始验证。
+
+### 5.6 运行集成测试（方式一：Docker 内运行，推荐）
+
+不需要在宿主机安装 PySpark/Java，所有依赖在容器中自动安装：
+
+```bash
+cd quasar
+docker compose -f docker-compose.spark.yml --profile test run --rm spark-test
+```
+
+预期输出：
+
+```
+==================================================
+Quasar S10: Spark Iceberg Integration Test
+Mode: docker
+==================================================
+
+[Step 0] Waiting for Quasar server...
+[Step 0] Creating MinIO bucket 'warehouse' via http://minio:9000...
+
+[Step 1] Create namespace: prod
+[PASS] Create namespace: prod
+
+[Step 2] Building Spark session with Iceberg REST Catalog...
+[PASS] Spark session created
+
+[Step 3] CREATE TABLE iceberg.prod.test (id INT, name STRING)
+[PASS] CREATE TABLE iceberg.prod.test
+
+[Step 4] INSERT INTO iceberg.prod.test VALUES (1, 'Alice'), (2, 'Bob')
+[PASS] INSERT INTO (2 rows)
+
+[Step 5] SELECT * FROM iceberg.prod.test
+[PASS] SELECT * returned 2 rows
+[PASS] SELECT * columns: ['id', 'name']
+
+[Step 6] INSERT INTO iceberg.prod.test VALUES (3, 'Charlie')
+[PASS] After append: 3 rows
+
+[Step 7] DROP TABLE iceberg.prod.test
+[PASS] DROP TABLE iceberg.prod.test
+
+[Step 8] Cleanup: drop namespace 'prod'
+[PASS] Drop namespace: prod
+
+==================================================
+Results: 9 passed, 0 failed
+==================================================
+```
+
+### 5.7 运行集成测试（方式二：宿主机运行）
+
+如果宿主机已安装 PySpark 3.5+，可直接在宿主机运行测试脚本：
+
+```bash
+pip install pyspark==3.5.3 requests boto3
+
+cd quasar
+python tests/spark_iceberg_integration.py
+```
+
+### 5.8 手动验证（curl + PySpark）
+
+如果不运行脚本，可以手动逐步验证：
+
+**1. 创建 Namespace：**
+
+```bash
+curl -X POST http://localhost:8080/iceberg/v1/namespaces \
+  -H "Content-Type: application/json" \
+  -d '{"namespace": ["prod"]}'
+```
+
+**2. 配置 PySpark：**
+
+```python
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder \
+    .appName("QuasarTest") \
+    .config("spark.sql.extensions",
+            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
+    .config("spark.sql.catalog.iceberg", "org.apache.iceberg.spark.SparkCatalog") \
+    .config("spark.sql.catalog.iceberg.type", "rest") \
+    .config("spark.sql.catalog.iceberg.uri", "http://localhost:8080/iceberg") \
+    .config("spark.sql.catalog.iceberg.warehouse", "s3://warehouse/") \
+    .config("spark.hadoop.fs.s3a.endpoint", "http://localhost:9000") \
+    .config("spark.hadoop.fs.s3a.access.key", "minioadmin") \
+    .config("spark.hadoop.fs.s3a.secret.key", "minioadmin") \
+    .config("spark.hadoop.fs.s3a.path.style.access", "true") \
+    .config("spark.jars.packages",
+            "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1") \
+    .getOrCreate()
+```
+
+**3. 创建表：**
+
+```python
+spark.sql("CREATE TABLE iceberg.prod.test (id INT, name STRING) USING iceberg")
+```
+
+**4. 插入数据：**
+
+```python
+spark.sql("INSERT INTO iceberg.prod.test VALUES (1, 'Alice'), (2, 'Bob')")
+```
+
+**5. 查询数据：**
+
+```python
+df = spark.sql("SELECT * FROM iceberg.prod.test")
+print(df.count())  # 2
+```
+
+**6. 验证 metadata.json 在 MinIO 中：**
+
+```bash
+# 安装 awscli
+pip install awscli
+
+# 列出 metadata 文件
+aws s3 ls s3://warehouse/prod/test/metadata/ \
+  --endpoint-url http://localhost:9000 \
+  --recursive
+```
+
+**7. 清理：**
+
+```python
+spark.sql("DROP TABLE iceberg.prod.test")
+spark.stop()
+```
+
+```bash
+curl -X DELETE http://localhost:8080/iceberg/v1/namespaces/prod
+```
+
+---
+
 ## 6. Lance REST API 快速参考
 
 ### Namespace
@@ -713,6 +1010,47 @@ GET /readyz    # Readiness（检查 DB 连通性）
 
 ---
 
+## 6.5 Iceberg REST API 快速参考
+
+路径前缀：`/iceberg/v1/...`
+
+### Config
+
+```bash
+GET /iceberg/v1/config          # 返回 Catalog 配置
+```
+
+### Namespace
+
+```bash
+GET    /iceberg/v1/namespaces                       # 列出
+POST   /iceberg/v1/namespaces                       # 创建
+GET    /iceberg/v1/namespaces/{ns}                  # 描述
+DELETE /iceberg/v1/namespaces/{ns}                  # 删除（仅限空 Namespace）
+POST   /iceberg/v1/namespaces/{ns}/properties       # 更新 properties
+```
+
+### Table
+
+```bash
+GET    /iceberg/v1/namespaces/{ns}/tables           # 列出
+POST   /iceberg/v1/namespaces/{ns}/tables           # 创建
+GET    /iceberg/v1/namespaces/{ns}/tables/{table}   # 加载（含 metadata）
+POST   /iceberg/v1/namespaces/{ns}/tables/{table}   # 提交（CAS commit）
+DELETE /iceberg/v1/namespaces/{ns}/tables/{table}   # 删除
+HEAD   /iceberg/v1/namespaces/{ns}/tables/{table}   # 存在检查
+POST   /iceberg/v1/tables/rename                    # 重命名
+```
+
+### Health
+
+```bash
+GET /healthz   # Liveness（始终返回 200）
+GET /readyz    # Readiness（检查 DB 连通性）
+```
+
+---
+
 ## 7. 故障排查
 
 | 现象 | 原因 | 解决 |
@@ -723,6 +1061,11 @@ GET /readyz    # Readiness（检查 DB 连通性）
 | Lance Python SDK 无法写入 MinIO | storage_options 不匹配 | 确认 endpoint、access_key、secret_key 正确；测试脚本会自动将 `http://minio:9000` 替换为 `http://localhost:9000` 以适配宿主机执行 |
 | `docker-compose.lance.yml` server 启动报错 | MinIO bucket 不存在 | 测试脚本会自动创建 bucket；手动验证时需先用 `boto3` 或 MinIO Console 创建 |
 | 集成测试失败 "Quasar server did not become ready" | Server 启动慢或端口冲突 | 检查 `docker-compose -f docker-compose.lance.yml logs server`，确认端口 8080 未被占用 |
+| Spark `CREATE TABLE` 失败，提示 "NoSuchNamespaceException" | Namespace 未创建 | Spark 不会自动创建 Namespace，需先用 REST `POST /iceberg/v1/namespaces` 创建 |
+| Spark commit 失败，提示 "CommitFailedException 409" | CAS 冲突，metadata_location 已变更 | 其他客户端同时提交了更新，Spark 会自动重试 |
+| Spark 无法写入 MinIO/S3 | S3A 配置错误 | 确认 `fs.s3a.endpoint`、`access.key`、`secret.key`、`path.style.access` 正确配置 |
+| `metadata.json` 不在 MinIO 中 | Quasar Server 未配置 S3 | 确认 `QUASAR_S3_ENDPOINT`、`ACCESS_KEY`、`SECRET_KEY` 已设置，Server 启动日志中应显示 S3 客户端初始化成功 |
+| Spark 测试脚本提示 "Java not found" | 宿主机未安装 Java | PySpark 依赖 Java 运行时。宿主机安装 `default-jre` 或使用 Docker 内运行方式 |
 
 ---
 
@@ -735,10 +1078,22 @@ GET /readyz    # Readiness（检查 DB 连通性）
 | Python | 3.10+ |
 | Lance (Python) | 0.25+ |
 | PyArrow | 16+ |
+| Spark | 3.4+ |
+| Iceberg Spark Runtime | 1.5+ |
 
 ---
 
 ## 9. 修订记录
+
+### V1.2（2026-04-22）
+
+- 新增：Spark 集成验证章节（1.3、2.6、5.5-5.8、6.5），采用与 Lance 相同的**快速构建**方式（`./scripts/docker-build.sh`）
+- 新增：`docker-compose.spark.yml` 部署说明，含 `spark-test` 容器（`--profile test`）
+- 新增：Iceberg REST API 快速参考（Config / Namespace / Table 端点）
+- 新增：Spark 故障排查条目（6 条）
+- 更新：`scripts/docker-build.sh` 添加 Spark 集成部署启动提示
+- 更新：版本兼容性表，新增 Spark 3.4+ 和 Iceberg Spark Runtime 1.5+
+- 更新：文档标题和范围，涵盖 Lance + Iceberg 双协议
 
 ### V1.1（2026-04-20）
 

@@ -18,7 +18,7 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 |------|---|
 | **阶段** | S10（Spark 集成验证） |
 | **Phase** | Phase 2（Iceberg REST Catalog） |
-| **状态** | 未开始 |
+| **状态** | 已完成 |
 
 ---
 
@@ -43,7 +43,7 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 |------|------|------|---------|
 | S8 | Iceberg Namespace + Table CRUD | 已完成 | `curl` 可操作 Iceberg Namespace 和 Table |
 | S9 | Iceberg CAS Commit | 已完成 | 并发 commit 冲突正确返回 409 |
-| S10 | Spark 集成验证 | 未开始 | Spark 端到端读写 Iceberg 表成功 |
+| S10 | Spark 集成验证 | 已完成 | Spark 端到端读写 Iceberg 表成功 |
 
 ---
 
@@ -53,11 +53,25 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 |------|---|
 | **阶段** | S10（Spark 集成验证） |
 | **Phase** | Phase 2（Iceberg REST Catalog） |
-| **状态** | 未开始 |
+| **状态** | 已完成 |
 
 ---
 
 ## 已完成的里程碑
+
+- **S10 — Spark 集成验证**（2026-04-22）
+  - 引入 `object_store` crate，支持 S3/MinIO 对象存储读写
+  - `IcebergConfig` 扩展：`object_store`（`Arc<dyn ObjectStore>`）+ `s3_bucket`
+  - `build_initial_metadata` 修复：正确计算 `last-column-id`，默认 `partition-specs`/`sort-orders`
+  - `TableUpdate` 扩展：新增 `AddSchema`、`SetCurrentSchema`、`AddPartitionSpec`、`SetDefaultSpec`、`AddSortOrder`、`SetDefaultSortOrder` 6 种 update 类型
+  - `create_table`：生成初始 metadata → 写入对象存储 → 存 DB
+  - `commit_table`：从对象存储加载 metadata → 应用 updates → 写新 metadata 到对象存储 → CAS 更新 DB
+  - `load_table`：优先从对象存储读取 metadata，fallback 到 DB `schema_snapshot`
+  - `server/src/main.rs`：构建 `AmazonS3Builder`（MinIO path-style），解析 bucket 名
+  - `docker-compose.spark.yml`：MinIO + PostgreSQL + Quasar 集成环境
+  - `tests/spark_iceberg_integration.py`：PySpark + Iceberg REST Catalog 端到端测试脚本
+  - `adapter/tests/iceberg_object_store.rs`：3 个对象存储集成测试（create/commit/load）
+  - 全部测试 142 个通过，`cargo clippy` 零警告
 
 - **S9 — Iceberg CAS Commit**（2026-04-21）
   - Core 层扩展：`CatalogStore` trait 新增 `commit_iceberg_table` 方法，`create_asset` 新增 `schema_snapshot` 参数
@@ -207,20 +221,29 @@ MVP（Minimum Viable Product）是 Quasar 的第一个可交付版本，目标�
 | S8 | `adapter/tests/iceberg_table.rs` | 13 | Iceberg Table 创建/加载/列表/删除/重命名/409/404/HEAD/400/空 Namespace |
 | S8 | `adapter/tests/iceberg_config.rs` | 1 | GET /config 返回 defaults/overrides |
 | S9 | `adapter/src/iceberg/table_metadata.rs` | 17 | TableMetadata serde、requirements验证（uuid/snapshot-id/null/custom-ref/multiple）、updates应用（single/multiple）、metadata_location递增 |
+| S10 | `adapter/tests/iceberg_object_store.rs` | 3 | 对象存储读写：create_table写metadata、commit_table写新metadata、load_table从对象存储读取 |
 | S9 | `adapter/tests/iceberg_commit.rs` | 15 | 正常commit、CAS冲突端到端、requirement失败、UUID失败、自定义ref、版本递增、TAG类型、namespace 404、空updates、RemoveProperties |
 
 **运行方式：**
 ```bash
 cd quasar
-cargo test                      # 全部 158 个测试
+cargo test                      # 全部 142 个测试
 cargo test -p quasar-storage    # Storage 层 6 个
-cargo test -p quasar-adapter    # Adapter 层 141 个（单元 53 + 集成 88）
-cargo test -p quasar-server     # Server 层 11 个
+cargo test -p quasar-adapter    # Adapter 层 132 个（单元 53 + 集成 79）
+cargo test -p quasar-server     # Server 层 4 个
 ```
 
 ---
 
 ## 修订记录
+
+### V3.2（2026-04-22）
+
+- 更新：S10 状态标记为"已完成"，MVP 全部阶段完成
+- 新增：S10 里程碑记录（含对象存储集成、Spark 兼容性修复、测试脚本）
+- 新增：`adapter/tests/iceberg_object_store.rs` 对象存储集成测试 3 个
+- 更新：测试覆盖总览表（新增 S10 条目）
+- 更新：测试运行方式中的测试总数（142 个）与分 crate 数量
 
 ### V3.1（2026-04-22）
 
