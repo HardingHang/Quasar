@@ -46,6 +46,7 @@ pub trait CatalogStore: Send + Sync {
         updates: &HashMap<String, String>,
     ) -> Result<Namespace, StoreError>;
 
+    #[allow(clippy::too_many_arguments)]
     async fn create_asset(
         &self,
         namespace_name: &str,
@@ -53,6 +54,7 @@ pub trait CatalogStore: Send + Sync {
         name: &str,
         location: &str,
         metadata_location: Option<&str>,
+        schema_snapshot: Option<serde_json::Value>,
         properties: HashMap<String, String>,
     ) -> Result<Asset, StoreError>;
 
@@ -129,4 +131,13 @@ pub trait CatalogStore: Send + Sync {
         version_id: i64,
         metadata_location: String,
     ) -> Result<AssetVersion, StoreError>;
+
+    async fn commit_iceberg_table(
+        &self,
+        namespace_name: &str,
+        asset_name: &str,
+        expected_metadata_location: &str,
+        new_metadata_location: &str,
+        new_schema_snapshot: Option<serde_json::Value>,
+    ) -> Result<(), StoreError>;
 }

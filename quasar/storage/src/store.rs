@@ -301,6 +301,7 @@ impl CatalogStore for PgCatalogStore {
         self.get_namespace(name, format).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn create_asset(
         &self,
         namespace_name: &str,
@@ -308,6 +309,7 @@ impl CatalogStore for PgCatalogStore {
         name: &str,
         location: &str,
         metadata_location: Option<&str>,
+        schema_snapshot: Option<serde_json::Value>,
         properties: HashMap<String, String>,
     ) -> Result<Asset, StoreError> {
         let client = self
@@ -321,8 +323,8 @@ impl CatalogStore for PgCatalogStore {
 
         let row = client
             .query_one(
-                "INSERT INTO assets (namespace_id, name, location, metadata_location, properties) VALUES ($1, $2, $3, $4, $5) RETURNING *",
-                &[&ns.id, &name, &location, &metadata_location, &props_json],
+                "INSERT INTO assets (namespace_id, name, location, metadata_location, schema_snapshot, properties) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
+                &[&ns.id, &name, &location, &metadata_location, &schema_snapshot, &props_json],
             )
             .await
             .map_err(|e| match e.code() {
@@ -683,5 +685,48 @@ impl CatalogStore for PgCatalogStore {
             })?;
 
         row_to_version(&row)
+    }
+
+    async fn commit_iceberg_table(
+        &self,
+        namespace_name: &str,
+        asset_name: &str,
+        expected_metadata_location: &str,
+        new_metadata_location: &str,
+        new_schema_snapshot: Option<serde_json::Value>,
+    ) -> Result<(), StoreError> {
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+
+        let updated = client
+            .execute(
+                "UPDATE assets
+                 SET metadata_location = $1,
+                     schema_snapshot = COALESCE($2, schema_snapshot)
+                 WHERE namespace_id = (SELECT id FROM namespaces WHERE name = $3 AND format = 'iceberg')
+                   AND name = $4
+                   AND metadata_location = $5",
+                &[
+                    &new_metadata_location,
+                    &new_schema_snapshot,
+                    &namespace_name,
+                    &asset_name,
+                    &expected_metadata_location,
+                ],
+            )
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+
+        if updated == 0 {
+            return Err(StoreError::Conflict(format!(
+                "metadata_location has been modified by another commit for table '{}.{}'",
+                namespace_name, asset_name
+            )));
+        }
+
+        Ok(())
     }
 }

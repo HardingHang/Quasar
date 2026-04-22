@@ -118,7 +118,7 @@ async fn test_asset_crud() {
         .unwrap();
 
     let asset = store
-        .create_asset("ns1", AssetFormat::Lance, "asset_a", "lance://ns1/asset_a", None, HashMap::new())
+        .create_asset("ns1", AssetFormat::Lance, "asset_a", "lance://ns1/asset_a", None, None, HashMap::new())
         .await
         .unwrap();
     assert_eq!(asset.name, "asset_a");
@@ -133,7 +133,7 @@ async fn test_asset_crud() {
     assert!(!store.asset_exists("ns1", AssetFormat::Lance, "missing").await.unwrap());
 
     let err = store
-        .create_asset("ns1", AssetFormat::Lance, "asset_a", "lance://ns1/asset_a", None, HashMap::new())
+        .create_asset("ns1", AssetFormat::Lance, "asset_a", "lance://ns1/asset_a", None, None, HashMap::new())
         .await
         .unwrap_err();
     assert!(matches!(err, StoreError::AlreadyExists(_)));
@@ -143,7 +143,7 @@ async fn test_asset_crud() {
     assert!(!store.asset_exists("ns1", AssetFormat::Lance, "asset_a").await.unwrap());
 
     store
-        .create_asset("ns1", AssetFormat::Lance, "asset_c", "lance://ns1/asset_c", None, HashMap::new())
+        .create_asset("ns1", AssetFormat::Lance, "asset_c", "lance://ns1/asset_c", None, None, HashMap::new())
         .await
         .unwrap();
     let err = store
@@ -169,7 +169,7 @@ async fn test_version_commit_and_load() {
         .await
         .unwrap();
     store
-        .create_asset("ns1", AssetFormat::Lance, "tbl", "lance://ns1/tbl", None, HashMap::new())
+        .create_asset("ns1", AssetFormat::Lance, "tbl", "lance://ns1/tbl", None, None, HashMap::new())
         .await
         .unwrap();
 
@@ -226,7 +226,7 @@ async fn test_version_conflict() {
         .await
         .unwrap();
     store
-        .create_asset("ns1", AssetFormat::Lance, "tbl", "lance://ns1/tbl", None, HashMap::new())
+        .create_asset("ns1", AssetFormat::Lance, "tbl", "lance://ns1/tbl", None, None, HashMap::new())
         .await
         .unwrap();
 
