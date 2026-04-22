@@ -9,13 +9,32 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::dto::{
-    CreateTableRequest, ListTablesQuery, ListTablesResponse, LoadTableResponse,
-    RenameTableRequest, TableIdentifier,
+    CommitTableRequest, CreateTableRequest, ListTablesQuery, ListTablesResponse,
+    LoadTableResponse, RenameTableRequest, TableIdentifier,
 };
 use super::error::{store_error_to_iceberg_table, IcebergError};
 use super::iceberg_config;
+use super::table_metadata::TableMetadata;
 
 // ── Helpers ────────────────────────────────────────────────
+
+/// Generate the next metadata location by incrementing the sequence number.
+/// Expected format: `{...}/metadata/{NNNNN}-{uuid}.metadata.json`
+fn next_metadata_location(current: &str) -> String {
+    if let Some(metadata_idx) = current.rfind("/metadata/") {
+        let prefix = &current[..metadata_idx + 10];
+        let rest = &current[metadata_idx + 10..];
+        if let Some(dash_idx) = rest.find('-') {
+            let seq_str = &rest[..dash_idx];
+            if let Ok(seq) = seq_str.parse::<u32>() {
+                let suffix = &rest[dash_idx..];
+                let new_seq_str = format!("{:0width$}", seq + 1, width = seq_str.len());
+                return format!("{}{}{}", prefix, new_seq_str, suffix);
+            }
+        }
+    }
+    current.to_string()
+}
 
 fn build_initial_metadata(
     table_uuid: Uuid,
@@ -106,6 +125,8 @@ pub async fn create_table(
     let mut properties = req.properties;
     properties.insert("table-uuid".to_string(), table_uuid.to_string());
 
+    let metadata_json = metadata.clone();
+
     let _asset = store
         .create_asset(
             &ns,
@@ -113,6 +134,7 @@ pub async fn create_table(
             &req.name,
             &location,
             Some(&metadata_location),
+            Some(metadata_json),
             properties,
         )
         .await
@@ -217,4 +239,83 @@ pub async fn rename_table(
         .map_err(store_error_to_iceberg_table)?;
 
     Ok(StatusCode::OK)
+}
+
+/// POST /iceberg/v1/namespaces/{ns}/tables/{table}
+/// Commit table updates (CAS).
+pub async fn commit_table(
+    State(store): State<Arc<dyn CatalogStore>>,
+    Path((ns, table)): Path<(String, String)>,
+    Json(req): Json<CommitTableRequest>,
+) -> Result<impl IntoResponse, IcebergError> {
+    // 1. Load the current asset
+    let asset = store
+        .get_asset(&ns, AssetFormat::Iceberg, &table)
+        .await
+        .map_err(store_error_to_iceberg_table)?;
+
+    let metadata_location = asset.metadata_location.ok_or_else(|| {
+        IcebergError::CommitFailedException {
+            message: format!("Table '{}.{}' has no metadata location", ns, table),
+        }
+    })?;
+
+    // 2. Parse current metadata from schema_snapshot
+    let mut table_metadata = if let Some(ref snapshot) = asset.schema_snapshot {
+        serde_json::from_value::<TableMetadata>(snapshot.clone()).map_err(|e| {
+            IcebergError::InternalServerError {
+                message: format!("Failed to parse table metadata: {}", e),
+            }
+        })?
+    } else {
+        return Err(IcebergError::CommitFailedException {
+            message: format!(
+                "Table '{}.{}' has no metadata snapshot to commit against",
+                ns, table
+            ),
+        });
+    };
+
+    // 3. Check requirements
+    if let Err(msg) = table_metadata.check_requirements(&req.requirements) {
+        return Err(IcebergError::CommitFailedException { message: msg });
+    }
+
+    // 4. Apply updates
+    table_metadata.apply_updates(&req.updates);
+
+    // 5. Generate new metadata location
+    let new_metadata_location = next_metadata_location(&metadata_location);
+
+    // 6. Serialize new metadata
+    let new_schema_snapshot = serde_json::to_value(&table_metadata).map_err(|e| {
+        IcebergError::InternalServerError {
+            message: format!("Failed to serialize table metadata: {}", e),
+        }
+    })?;
+
+    // 7. CAS update via storage layer
+    store
+        .commit_iceberg_table(
+            &ns,
+            &table,
+            &metadata_location,
+            &new_metadata_location,
+            Some(new_schema_snapshot.clone()),
+        )
+        .await
+        .map_err(|e| match e {
+            StoreError::Conflict(msg) => IcebergError::CommitFailedException { message: msg },
+            StoreError::NotFound(msg) => IcebergError::NoSuchTableException { message: msg },
+            other => store_error_to_iceberg_table(other),
+        })?;
+
+    // 8. Return updated table
+    Ok((
+        StatusCode::OK,
+        Json(LoadTableResponse {
+            metadata_location: Some(new_metadata_location),
+            metadata: new_schema_snapshot,
+        }),
+    ))
 }

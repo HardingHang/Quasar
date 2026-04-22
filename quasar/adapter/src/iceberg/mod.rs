@@ -2,6 +2,7 @@ pub mod dto;
 pub mod error;
 pub mod namespace;
 pub mod table;
+pub mod table_metadata;
 
 use axum::{
     routing::{get, post},
@@ -47,6 +48,7 @@ pub fn routes(config: IcebergConfig) -> Router<Arc<dyn CatalogStore>> {
         .route(
             "/iceberg/v1/namespaces/{ns}/tables/{table}",
             get(table::load_table)
+                .post(table::commit_table)
                 .delete(table::drop_table)
                 .head(table::table_exists),
         )
