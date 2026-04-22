@@ -41,8 +41,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         storage_options,
     };
 
+    // Build S3 object store client for Iceberg
+    let (object_store, s3_bucket) =
+        if let (Some(endpoint), Some(access_key), Some(secret_key)) =
+            (&cfg.s3_endpoint, &cfg.s3_access_key, &cfg.s3_secret_key)
+        {
+            let bucket = cfg
+                .warehouse_path
+                .as_ref()
+                .map(|wp| parse_s3_bucket(wp))
+                .unwrap_or_else(|| "warehouse".to_string());
+            let store = object_store::aws::AmazonS3Builder::new()
+                .with_endpoint(endpoint)
+                .with_access_key_id(access_key)
+                .with_secret_access_key(secret_key)
+                .with_region(&cfg.s3_region)
+                .with_bucket_name(&bucket)
+                .with_virtual_hosted_style_request(false)
+                .with_allow_http(cfg.s3_allow_http)
+                .build()?;
+            (
+                Some(std::sync::Arc::new(store) as std::sync::Arc<dyn object_store::ObjectStore>),
+                Some(bucket),
+            )
+        } else {
+            (None, None)
+        };
+
     let iceberg_config = quasar_adapter::iceberg::IcebergConfig {
         warehouse_path: cfg.warehouse_path,
+        object_store,
+        s3_bucket,
     };
 
     let app = quasar_server::create_app_with_config(pool, lance_config, iceberg_config);
@@ -55,6 +84,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+fn parse_s3_bucket(warehouse_path: &str) -> String {
+    if let Some(rest) = warehouse_path.strip_prefix("s3://") {
+        let parts: Vec<&str> = rest.splitn(2, '/').collect();
+        if !parts[0].is_empty() {
+            return parts[0].to_string();
+        }
+    }
+    "warehouse".to_string()
 }
 
 async fn shutdown_signal() {
