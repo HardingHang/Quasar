@@ -248,6 +248,7 @@ async fn test_drop_non_empty_namespace() {
             "users",
             "s3://bucket/warehouse/prod/users",
             None,
+            None,
             HashMap::new(),
         )
         .await
@@ -342,4 +343,149 @@ async fn test_format_isolation() {
     let namespaces = json["namespaces"].as_array().unwrap();
     assert_eq!(namespaces.len(), 1);
     assert_eq!(namespaces[0], serde_json::json!(["prod"]));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_update_namespace_properties_namespace_not_found() {
+    let app = test_app(setup().await);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/namespaces/prod/properties")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"removals": [], "updates": {"owner": "team-a"}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["type"], "NoSuchNamespaceException");
+    assert_eq!(json["error"]["code"], 404);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_list_namespaces_empty() {
+    let app = test_app(setup().await);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/namespaces")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let namespaces = json["namespaces"].as_array().unwrap();
+    assert!(namespaces.is_empty());
+    assert!(json["nextPageToken"].is_null());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_list_namespaces_pagination_offset_beyond_total() {
+    let store = setup().await;
+    create_namespace(&store, "ns1").await;
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/namespaces?pageToken=999")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let namespaces = json["namespaces"].as_array().unwrap();
+    assert!(namespaces.is_empty());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_list_namespaces_pagination_with_limit() {
+    let store = setup().await;
+    create_namespace(&store, "ns1").await;
+    create_namespace(&store, "ns2").await;
+    create_namespace(&store, "ns3").await;
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/namespaces?pageSize=2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let namespaces = json["namespaces"].as_array().unwrap();
+    assert!(namespaces.len() <= 2);
+    // When limit is reached, next_page_token should be set
+    if namespaces.len() == 2 {
+        assert!(json["nextPageToken"].is_string());
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_create_namespace_empty_array_returns_400() {
+    let app = test_app(setup().await);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/namespaces")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"namespace": []}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["type"], "BadRequestException");
+    assert_eq!(json["error"]["code"], 400);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_drop_namespace_not_found() {
+    let app = test_app(setup().await);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/iceberg/v1/namespaces/nonexistent")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["type"], "NoSuchNamespaceException");
+    assert_eq!(json["error"]["code"], 404);
 }

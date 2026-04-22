@@ -146,6 +146,7 @@ async fn test_create_duplicate_returns_409() {
             "users",
             "s3://bucket/warehouse/prod/users",
             None,
+            None,
             HashMap::new(),
         )
         .await
@@ -182,6 +183,7 @@ async fn test_list_tables() {
             "users",
             "s3://bucket/warehouse/prod/users",
             None,
+            None,
             HashMap::new(),
         )
         .await
@@ -192,6 +194,7 @@ async fn test_list_tables() {
             AssetFormat::Iceberg,
             "orders",
             "s3://bucket/warehouse/prod/orders",
+            None,
             None,
             HashMap::new(),
         )
@@ -258,6 +261,7 @@ async fn test_drop_table() {
             "users",
             "s3://bucket/warehouse/prod/users",
             None,
+            None,
             HashMap::new(),
         )
         .await
@@ -304,6 +308,7 @@ async fn test_table_exists() {
             "users",
             "s3://bucket/warehouse/prod/users",
             None,
+            None,
             HashMap::new(),
         )
         .await
@@ -349,6 +354,7 @@ async fn test_rename_table() {
             AssetFormat::Iceberg,
             "users",
             "s3://bucket/warehouse/prod/users",
+            None,
             None,
             HashMap::new(),
         )
@@ -412,6 +418,7 @@ async fn test_rename_cross_namespace() {
             "users",
             "s3://bucket/warehouse/prod/users",
             None,
+            None,
             HashMap::new(),
         )
         .await
@@ -457,4 +464,131 @@ async fn test_create_table_namespace_not_found() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let json = body_json(response).await;
     assert_eq!(json["error"]["type"], "NoSuchNamespaceException");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_rename_table_source_not_found() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/tables/rename")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"source": {"namespace": ["prod"], "name": "users"}, "destination": {"namespace": ["prod"], "name": "customers"}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["type"], "NoSuchTableException");
+    assert_eq!(json["error"]["code"], 404);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_rename_table_destination_already_exists() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    store
+        .create_asset(
+            "prod",
+            AssetFormat::Iceberg,
+            "users",
+            "s3://bucket/warehouse/prod/users",
+            None,
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    store
+        .create_asset(
+            "prod",
+            AssetFormat::Iceberg,
+            "customers",
+            "s3://bucket/warehouse/prod/customers",
+            None,
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/tables/rename")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"source": {"namespace": ["prod"], "name": "users"}, "destination": {"namespace": ["prod"], "name": "customers"}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["type"], "TableAlreadyExistsException");
+    assert_eq!(json["error"]["code"], 409);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_drop_table_not_found() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/iceberg/v1/namespaces/prod/tables/nonexistent")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["type"], "NoSuchTableException");
+    assert_eq!(json["error"]["code"], 404);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_list_tables_empty_namespace() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/namespaces/prod/tables")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let identifiers = json["identifiers"].as_array().unwrap();
+    assert!(identifiers.is_empty());
+    assert!(json["nextPageToken"].is_null());
 }

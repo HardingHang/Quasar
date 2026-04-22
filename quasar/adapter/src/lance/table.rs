@@ -88,7 +88,7 @@ pub async fn declare_table(
     }
 
     let asset = store
-        .create_asset(namespace, AssetFormat::Lance, table, &location, None, properties)
+        .create_asset(namespace, AssetFormat::Lance, table, &location, None, None, properties)
         .await
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
 
@@ -146,7 +146,7 @@ pub async fn register_table(
     let properties = req.options;
 
     let asset = store
-        .create_asset(namespace, AssetFormat::Lance, table, &req.location, None, properties)
+        .create_asset(namespace, AssetFormat::Lance, table, &req.location, None, None, properties)
         .await
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
 
