@@ -76,6 +76,30 @@ pub struct Schema {
     pub schema_id: i32,
     #[serde(default)]
     pub fields: Vec<serde_json::Value>,
+    #[serde(rename = "type", default = "default_schema_type")]
+    pub schema_type: String,
+}
+
+fn default_schema_type() -> String {
+    "struct".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct PartitionSpec {
+    #[serde(rename = "spec-id")]
+    pub spec_id: i32,
+    #[serde(default)]
+    pub fields: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct SortOrder {
+    #[serde(rename = "order-id")]
+    pub order_id: i32,
+    #[serde(default)]
+    pub fields: Vec<serde_json::Value>,
 }
 
 // ── Requirements ───────────────────────────────────────────
@@ -108,6 +132,21 @@ pub enum TableUpdate {
     },
     SetProperties { updates: HashMap<String, String> },
     RemoveProperties { removals: Vec<String> },
+    AddSchema { schema: Schema },
+    SetCurrentSchema {
+        #[serde(rename = "schema-id")]
+        schema_id: i32,
+    },
+    AddPartitionSpec { spec: PartitionSpec },
+    SetDefaultSpec {
+        #[serde(rename = "spec-id")]
+        spec_id: i32,
+    },
+    AddSortOrder { order: SortOrder },
+    SetDefaultSortOrder {
+        #[serde(rename = "order-id")]
+        order_id: i32,
+    },
 }
 
 // ── Methods ────────────────────────────────────────────────
@@ -187,6 +226,34 @@ impl TableMetadata {
                     for k in removals {
                         self.properties.remove(k);
                     }
+                    self.last_updated_ms = chrono::Utc::now().timestamp_millis();
+                }
+                TableUpdate::AddSchema { schema } => {
+                    self.schemas.push(schema.clone());
+                    self.last_updated_ms = chrono::Utc::now().timestamp_millis();
+                }
+                TableUpdate::SetCurrentSchema { schema_id } => {
+                    self.current_schema_id = *schema_id;
+                    self.last_updated_ms = chrono::Utc::now().timestamp_millis();
+                }
+                TableUpdate::AddPartitionSpec { spec } => {
+                    self.partition_specs.push(serde_json::to_value(spec).unwrap_or_else(|_| {
+                        serde_json::json!({"spec-id": spec.spec_id, "fields": spec.fields})
+                    }));
+                    self.last_updated_ms = chrono::Utc::now().timestamp_millis();
+                }
+                TableUpdate::SetDefaultSpec { spec_id } => {
+                    self.default_spec_id = *spec_id;
+                    self.last_updated_ms = chrono::Utc::now().timestamp_millis();
+                }
+                TableUpdate::AddSortOrder { order } => {
+                    self.sort_orders.push(serde_json::to_value(order).unwrap_or_else(|_| {
+                        serde_json::json!({"order-id": order.order_id, "fields": order.fields})
+                    }));
+                    self.last_updated_ms = chrono::Utc::now().timestamp_millis();
+                }
+                TableUpdate::SetDefaultSortOrder { order_id } => {
+                    self.default_sort_order_id = *order_id;
                     self.last_updated_ms = chrono::Utc::now().timestamp_millis();
                 }
             }

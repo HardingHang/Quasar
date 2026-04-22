@@ -14,19 +14,22 @@ use std::sync::Arc;
 #[derive(Clone, Default)]
 pub struct IcebergConfig {
     pub warehouse_path: Option<String>,
+    pub object_store: Option<std::sync::Arc<dyn object_store::ObjectStore>>,
+    pub s3_bucket: Option<String>,
 }
 
-static ICEBERG_CONFIG: std::sync::OnceLock<IcebergConfig> = std::sync::OnceLock::new();
+static ICEBERG_CONFIG: std::sync::Mutex<Option<IcebergConfig>> = std::sync::Mutex::new(None);
 
-pub(crate) fn iceberg_config() -> &'static IcebergConfig {
-    ICEBERG_CONFIG.get().unwrap_or_else(|| {
-        static DEFAULT: std::sync::OnceLock<IcebergConfig> = std::sync::OnceLock::new();
-        DEFAULT.get_or_init(IcebergConfig::default)
-    })
+pub(crate) fn iceberg_config() -> IcebergConfig {
+    ICEBERG_CONFIG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_default()
 }
 
 pub fn routes(config: IcebergConfig) -> Router<Arc<dyn CatalogStore>> {
-    let _ = ICEBERG_CONFIG.set(config);
+    *ICEBERG_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = Some(config);
     Router::new()
         .route("/iceberg/v1/config", get(config::get_config))
         .route(

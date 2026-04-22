@@ -16,6 +16,74 @@ use super::error::{store_error_to_iceberg_table, IcebergError};
 use super::iceberg_config;
 use super::table_metadata::TableMetadata;
 
+// ── Object Store Helpers ───────────────────────────────────
+
+/// Convert an S3 URL to an object store relative Path.
+fn s3_url_to_object_path(location: &str, bucket: &str) -> Option<object_store::path::Path> {
+    let prefix = format!("s3://{}/", bucket);
+    location
+        .strip_prefix(&prefix)
+        .map(object_store::path::Path::from)
+}
+
+/// Write metadata JSON to object store if configured.
+async fn write_metadata_to_store(
+    location: &str,
+    content: &serde_json::Value,
+) -> Result<(), IcebergError> {
+    let config = iceberg_config();
+    if let (Some(ref store), Some(ref bucket)) = (&config.object_store, &config.s3_bucket) {
+        let path = s3_url_to_object_path(location, bucket).ok_or_else(|| {
+            IcebergError::InternalServerError {
+                message: format!("invalid metadata location: {}", location),
+            }
+        })?;
+        let payload = object_store::PutPayload::from(content.to_string());
+        store.put(&path, payload).await.map_err(|e| {
+            IcebergError::InternalServerError {
+                message: format!("failed to write metadata to object store: {}", e),
+            }
+        })?;
+    }
+    Ok(())
+}
+
+/// Read metadata JSON from object store if configured, otherwise fallback.
+async fn read_metadata_from_store(
+    location: &str,
+    fallback: Option<serde_json::Value>,
+) -> Result<serde_json::Value, IcebergError> {
+    let config = iceberg_config();
+    if let (Some(ref store), Some(ref bucket)) = (&config.object_store, &config.s3_bucket) {
+        let path = s3_url_to_object_path(location, bucket).ok_or_else(|| {
+            IcebergError::InternalServerError {
+                message: format!("invalid metadata location: {}", location),
+            }
+        })?;
+        let result = store.get(&path).await.map_err(|e| {
+            IcebergError::InternalServerError {
+                message: format!("failed to read metadata from object store: {}", e),
+            }
+        })?;
+        let bytes = result.bytes().await.map_err(|e| {
+            IcebergError::InternalServerError {
+                message: format!("failed to read metadata bytes: {}", e),
+            }
+        })?;
+        serde_json::from_slice(&bytes).map_err(|e| {
+            IcebergError::InternalServerError {
+                message: format!("failed to parse metadata JSON: {}", e),
+            }
+        })
+    } else if let Some(fb) = fallback {
+        Ok(fb)
+    } else {
+        Err(IcebergError::InternalServerError {
+            message: "no metadata available".to_string(),
+        })
+    }
+}
+
 // ── Helpers ────────────────────────────────────────────────
 
 /// Generate the next metadata location by incrementing the sequence number.
@@ -50,23 +118,36 @@ fn build_initial_metadata(
         })
     });
 
+    // Compute last-column-id from schema fields
+    let last_column_id = schema
+        .get("fields")
+        .and_then(|f| f.as_array())
+        .map(|fields| {
+            fields
+                .iter()
+                .filter_map(|f| f.get("id").and_then(|id| id.as_i64()))
+                .max()
+                .unwrap_or(0) as i32
+        })
+        .unwrap_or(0);
+
     json!({
         "format-version": 2,
         "table-uuid": table_uuid.to_string(),
         "location": location,
         "last-sequence-number": 0,
         "last-updated-ms": chrono::Utc::now().timestamp_millis(),
-        "last-column-id": 0,
+        "last-column-id": last_column_id,
         "schemas": [schema],
         "current-schema-id": 0,
-        "partition-specs": [],
+        "partition-specs": [{"spec-id": 0, "fields": []}],
         "default-spec-id": 0,
         "last-partition-id": 999,
         "properties": {},
         "snapshots": [],
         "snapshot-log": [],
         "metadata-log": [],
-        "sort-orders": [],
+        "sort-orders": [{"order-id": 0, "fields": []}],
         "default-sort-order-id": 0,
         "refs": {}
     })
@@ -127,6 +208,9 @@ pub async fn create_table(
 
     let metadata_json = metadata.clone();
 
+    // Write initial metadata.json to object store
+    write_metadata_to_store(&metadata_location, &metadata_json).await?;
+
     let _asset = store
         .create_asset(
             &ns,
@@ -166,9 +250,13 @@ pub async fn load_table(
         .await
         .map_err(store_error_to_iceberg_table)?;
 
-    let metadata = asset.schema_snapshot.unwrap_or_else(|| {
-        build_initial_metadata(asset.id, &asset.name, &asset.location, None)
-    });
+    let metadata = if let Some(ref ml) = asset.metadata_location {
+        read_metadata_from_store(ml, asset.schema_snapshot.clone()).await?
+    } else {
+        asset.schema_snapshot.unwrap_or_else(|| {
+            build_initial_metadata(asset.id, &asset.name, &asset.location, None)
+        })
+    };
 
     Ok((
         StatusCode::OK,
@@ -260,21 +348,18 @@ pub async fn commit_table(
         }
     })?;
 
-    // 2. Parse current metadata from schema_snapshot
-    let mut table_metadata = if let Some(ref snapshot) = asset.schema_snapshot {
-        serde_json::from_value::<TableMetadata>(snapshot.clone()).map_err(|e| {
+    // 2. Load current metadata from object store (or fallback to schema_snapshot)
+    let current_metadata_json = read_metadata_from_store(
+        &metadata_location,
+        asset.schema_snapshot.clone(),
+    )
+    .await?;
+    let mut table_metadata =
+        serde_json::from_value::<TableMetadata>(current_metadata_json).map_err(|e| {
             IcebergError::InternalServerError {
                 message: format!("Failed to parse table metadata: {}", e),
             }
-        })?
-    } else {
-        return Err(IcebergError::CommitFailedException {
-            message: format!(
-                "Table '{}.{}' has no metadata snapshot to commit against",
-                ns, table
-            ),
-        });
-    };
+        })?;
 
     // 3. Check requirements
     if let Err(msg) = table_metadata.check_requirements(&req.requirements) {
@@ -294,7 +379,10 @@ pub async fn commit_table(
         }
     })?;
 
-    // 7. CAS update via storage layer
+    // 7. Write new metadata.json to object store
+    write_metadata_to_store(&new_metadata_location, &new_schema_snapshot).await?;
+
+    // 8. CAS update via storage layer
     store
         .commit_iceberg_table(
             &ns,
