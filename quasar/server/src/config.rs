@@ -9,6 +9,7 @@ pub struct Config {
     pub s3_secret_key: Option<String>,
     pub s3_region: String,
     pub s3_allow_http: bool,
+    pub db_max_connections: usize,
 }
 
 impl Config {
@@ -33,6 +34,10 @@ impl Config {
             s3_allow_http: std::env::var("QUASAR_S3_ALLOW_HTTP")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false),
+            db_max_connections: std::env::var("QUASAR_DB_MAX_CONNECTIONS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10),
         }
     }
 }
@@ -55,6 +60,7 @@ mod tests {
             "QUASAR_S3_SECRET_KEY",
             "QUASAR_S3_REGION",
             "QUASAR_S3_ALLOW_HTTP",
+            "QUASAR_DB_MAX_CONNECTIONS",
         ] {
             std::env::remove_var(key);
         }
@@ -72,6 +78,7 @@ mod tests {
         assert_eq!(cfg.log_level, "info");
         assert_eq!(cfg.s3_region, "us-east-1");
         assert!(!cfg.s3_allow_http);
+        assert_eq!(cfg.db_max_connections, 10);
         assert!(cfg.warehouse_path.is_none());
         assert!(cfg.s3_endpoint.is_none());
         assert!(cfg.s3_access_key.is_none());
@@ -166,6 +173,26 @@ mod tests {
 
         let cfg = Config::from_env();
         assert!(!cfg.s3_allow_http);
+
+        clear_quasar_env();
+    }
+
+    #[test]
+    #[serial]
+    fn test_config_db_max_connections_default() {
+        clear_quasar_env();
+        let cfg = Config::from_env();
+        assert_eq!(cfg.db_max_connections, 10);
+    }
+
+    #[test]
+    #[serial]
+    fn test_config_db_max_connections_custom() {
+        clear_quasar_env();
+        std::env::set_var("QUASAR_DB_MAX_CONNECTIONS", "50");
+
+        let cfg = Config::from_env();
+        assert_eq!(cfg.db_max_connections, 50);
 
         clear_quasar_env();
     }
