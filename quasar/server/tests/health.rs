@@ -130,6 +130,7 @@ async fn test_readyz() {
 }
 
 #[tokio::test]
+#[cfg(feature = "lance")]
 async fn test_lance_routes_still_work() {
     let pool = setup().await;
     let app = create_app(pool);
@@ -152,6 +153,7 @@ async fn test_lance_routes_still_work() {
 }
 
 #[tokio::test]
+#[cfg(feature = "iceberg")]
 async fn test_iceberg_routes_are_mounted() {
     let pool = setup().await;
     let app = create_app(pool);

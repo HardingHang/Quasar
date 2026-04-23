@@ -7,6 +7,11 @@ edition.workspace = true
 name = "quasar-server"
 path = "src/main.rs"
 
+[features]
+default = ["lance", "iceberg"]
+lance = ["quasar-adapter/lance"]
+iceberg = ["quasar-adapter/iceberg", "dep:object_store"]
+
 [dependencies]
 quasar-core = { workspace = true }
 quasar-storage = { workspace = true }
@@ -21,7 +26,7 @@ tokio-postgres = { workspace = true }
 tower-http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-object_store = { workspace = true }
+object_store = { workspace = true, optional = true }
 
 [dev-dependencies]
 quasar-storage = { workspace = true }

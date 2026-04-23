@@ -107,3 +107,66 @@ quasar/
                          # - Health / Readiness 端点
                          # - main 函数与优雅关机
 ```
+
+## 条件编译（Feature Flags）
+
+Quasar 使用 Cargo feature flags 实现**编译时协议选择**，允许部署方根据需要只编译所需的协议适配器，从而减小二进制体积并避免引入不必要的依赖。
+
+### Feature 定义
+
+| Feature | 默认 | 说明 | 控制的依赖 |
+|---------|------|------|-----------|
+| `lance` | ✅ 启用 | 编译 Lance REST Namespace 适配器 | — |
+| `iceberg` | ✅ 启用 | 编译 Iceberg REST Catalog 适配器 | `object_store` |
+
+### 使用方式
+
+```bash
+# 编译全部协议（默认）
+cargo build
+
+# 仅编译 Lance（不含 Iceberg 和对象存储依赖）
+cargo build --no-default-features --features lance
+
+# 仅编译 Iceberg（不含 Lance）
+cargo build --no-default-features --features iceberg
+
+# 仅编译基础设施端点（/healthz、/readyz），无任何协议适配器
+cargo build --no-default-features
+```
+
+### 实现机制
+
+Feature flag 在三个层面生效：
+
+1. **Crate 依赖层**（`Cargo.toml`）：
+   - `adapter/Cargo.toml`：`object_store` 标记为 `optional = true`，仅在 `iceberg` feature 启用时引入
+   - `server/Cargo.toml`：通过 `quasar-adapter/lance` 和 `quasar-adapter/iceberg` 转发 feature
+
+2. **模块层**（`adapter/src/lib.rs`）：
+   ```rust
+   #[cfg(feature = "iceberg")]
+   pub mod iceberg;
+   #[cfg(feature = "lance")]
+   pub mod lance;
+   ```
+
+3. **路由层**（`server/src/lib.rs`）：
+   ```rust
+   #[cfg(feature = "lance")]
+   {
+       router = router.merge(quasar_adapter::lance::routes(config.lance));
+   }
+   #[cfg(feature = "iceberg")]
+   {
+       router = router.merge(quasar_adapter::iceberg::routes(config.iceberg));
+   }
+   ```
+
+4. **测试层**：每个协议对应的集成测试文件顶部添加 `#![cfg(feature = "...")]`，确保 feature 关闭时测试不参与编译。
+
+### 设计理由
+
+- **减小体积**：只部署 Lance 的场景无需引入 `object_store` crate 及其 AWS SDK 依赖
+- **安全面最小化**：不使用的协议不会编译进二进制，减少攻击面
+- **部署灵活**：同一套代码库通过编译选项即可生成不同用途的 binary，无需维护多个代码分支

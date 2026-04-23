@@ -3,6 +3,11 @@ name = "quasar-adapter"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = ["lance", "iceberg"]
+lance = []
+iceberg = ["dep:object_store"]
+
 [dependencies]
 quasar-core = { workspace = true }
 axum = { workspace = true }
@@ -13,7 +18,7 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-object_store = { workspace = true }
+object_store = { workspace = true, optional = true }
 
 [dev-dependencies]
 quasar-storage = { workspace = true }

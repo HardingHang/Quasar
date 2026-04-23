@@ -372,14 +372,14 @@ quasar/
 │                        # - 数据库 schema 迁移（refinery）
 │
 ├── adapter/             # 协议适配层
-│   ├── iceberg/         # Iceberg REST Catalog 适配
+│   ├── iceberg/         # Iceberg REST Catalog 适配（需启用 `iceberg` feature）
 │   │                    # - /iceberg/v1/... 路由与 handler
 │   │                    # - 请求/响应 DTO（严格遵循 Iceberg REST Spec）
 │   │                    # - TableMetadata 解析、updates 应用、序列化
 │   │                    # - CAS commit 协调
 │   │                    # - 查询时自动注入 format=iceberg 过滤条件
 │   │
-│   └── lance/           # Lance REST Namespace 适配
+│   └── lance/           # Lance REST Namespace 适配（需启用 `lance` feature）
 │                        # - /lance/v1/... 路由与 handler
 │                        # - 请求/响应 DTO（严格遵循 Lance REST Namespace Spec）
 │                        # - DeclareTable / Register / Version 等特有语义
@@ -405,6 +405,35 @@ server ──► adapter ──► core
 - `storage` 依赖 `core`，实现 `CatalogStore` trait。
 - `adapter` **只依赖 `core`**，通过 `CatalogStore` trait 操作存储，不感知具体实现是 PostgreSQL 还是其他后端。
 - `server` 依赖 `adapter`、`storage` 和 `core`，负责创建 `PgCatalogStore`（来自 storage）并将其作为 `Arc<dyn CatalogStore>` 注入到 adapter 的 handler 中。
+
+### 6.2 条件编译（Cargo Features）
+
+`adapter` 和 `server` crate 均定义 `lance` 和 `iceberg` 两个 Cargo feature（默认全部启用）：
+
+| Feature | 默认 | 控制内容 | 附加依赖 |
+|---------|------|---------|---------|
+| `lance` | ✅ | `adapter/src/lance/` 模块及路由 | 无 |
+| `iceberg` | ✅ | `adapter/src/iceberg/` 模块及路由 | `object_store` |
+
+**编译命令示例：**
+
+```bash
+# 全部协议（默认）
+cargo build
+
+# 仅 Lance
+cargo build --no-default-features --features lance
+
+# 仅 Iceberg
+cargo build --no-default-features --features iceberg
+```
+
+**实现机制：**
+
+1. `adapter/src/lib.rs` 使用 `#[cfg(feature = "...")]` 条件编译模块
+2. `server/src/lib.rs` 使用 `#[cfg(feature = "...")]` 条件合并路由
+3. `adapter/tests/` 和 `server/tests/` 中的协议相关测试使用 `#![cfg(feature = "...")]` 条件编译
+4. `object_store` 在 `Cargo.toml` 中标记为 `optional = true`，仅在 `iceberg` feature 启用时引入
 
 ---
 
@@ -658,7 +687,29 @@ StoreError::Internal      → 500
 - 容器化：提供 Dockerfile，暴露 8080 端口
 - 健康检查：`/healthz`（存活）、`/readyz`（就绪，含 DB 连通性）
 
-### 10.3 优雅关机
+### 10.3 条件编译部署
+
+通过 Cargo feature flags 可以编译只包含特定协议的 binary：
+
+```bash
+# 仅 Lance（最小 binary，无对象存储依赖）
+cargo build --release --no-default-features --features lance
+
+# 仅 Iceberg（包含 object_store + AWS SDK）
+cargo build --release --no-default-features --features iceberg
+
+# 全部协议（默认）
+cargo build --release
+```
+
+Docker 构建时可通过 `--build-arg` 传递 feature 选择：
+
+```dockerfile
+ARG FEATURES="lance,iceberg"
+RUN cargo build --release --no-default-features --features ${FEATURES}
+```
+
+### 10.4 优雅关机
 
 1. 收到 SIGTERM 信号
 2. 停止接受新的 HTTP 连接
@@ -1180,6 +1231,7 @@ cd tests && python spark_iceberg_integration.py
 | 14 | Namespace 隔离 | Iceberg 和 Lance 各自独立的 Namespace 空间，允许同名 | 消除跨格式命名冲突，每种协议在其独立空间内自由操作 |
 | 15 | 交付顺序 | Lance 优先（Phase 1），Iceberg 后做（Phase 2） | Lance 对 Catalog 的要求更轻（只存指针），可更快验证核心架构 |
 | 16 | Namespace 删除策略 | ON DELETE RESTRICT，仅允许删除空 Namespace | 两套协议规范均要求非空 Namespace 不可删除 |
+| 17 | 条件编译 | Cargo feature flags（`lance` / `iceberg`），`object_store` 为可选依赖 | 部署方可按需裁剪 binary，只部署 Lance 时不引入对象存储依赖，减小体积并降低攻击面 |
 
 ---
 
@@ -1199,7 +1251,15 @@ cd tests && python spark_iceberg_integration.py
 - 新增：配置与部署（5 个环境变量、部署形态、优雅关机流程）
 - 新增：10 阶段开发划分（S0~S10，每个阶段含前置依赖、工作内容、验收标准）
 - 新增：模块视角分工参考（Phase 1 / Phase 2 按 crate 组织的工作项）
-- 新增：16 条关键决策清单
+- 新增：16 条关键决策清单（V1.1 增至 17 条）
+
+### V1.1
+
+- 新增：6.2 节「条件编译（Cargo Features）」—— feature flags 定义、编译命令、实现机制
+- 新增：10.3 节「条件编译部署」—— Docker 构建参数传递 feature 选择
+- 更新：6.1 节 Crate 分层注释——adapter 子模块标注 feature 依赖
+- 更新：附录关键决策清单——新增第 17 条「条件编译」决策
+- 更新：修订记录 V1.0 中「16 条关键决策」→「17 条关键决策」
 
 ---
 

@@ -162,7 +162,8 @@ Table 版本管理（客户端写入数据后注册新版本的必要路径）�
 | NF5 | 可观测性 | 集成 `tracing` 打印结构化日志，便于调试 |
 | NF6 | 数据库迁移 | 使用 refinery 管理 DDL 版本，迁移脚本纳入版本控制 |
 | NF7 | 配置管理 | 通过环境变量加载配置（数据库连接串、监听端口、warehouse 默认路径等），支持 `.env` 文件 |
-| NF8 | 优雅关机 | 收到 SIGTERM 后停止接受新请求，等待存量请求处理完毕后退出 |
+| NF8 | 条件编译 | 支持 Cargo feature flags 编译时选择包含的协议适配器（`lance` / `iceberg`），默认全部启用 |
+| NF9 | 优雅关机 | 收到 SIGTERM 后停止接受新请求，等待存量请求处理完毕后退出 |
 
 ## 关键约束与决策
 
@@ -176,6 +177,7 @@ Table 版本管理（客户端写入数据后注册新版本的必要路径）�
 8. **分页**：Iceberg 端点使用 `pageToken` + `pageSize`，Lance 端点使用 `page_token` + `limit`，分别遵循各自上游规范。MVP 阶段可先实现基于 offset 的简单分页。
 9. **错误响应**：Iceberg 端点使用 Iceberg REST 规范定义的 ErrorResponse 格式（含 `error.message`、`error.type`、`error.code`）；Lance 端点使用 Lance 规范定义的 RFC-7807 格式（含 `error`、`code`、`detail`、`instance`）。各协议保持各自的错误格式，不混用。
 10. **Lance 版本管理**：Catalog 不扫描 Lance 数据文件，也不推断版本数量。它仅维护精确的 `(table_id, version, manifest_path)` 映射。客户端在写入数据后显式调用 `CreateTableVersion` 注册版本，并发冲突通过版本号唯一性约束（`409 Conflict`）协调。这与 Iceberg 的 `metadata-location` 指针设计本质一致，只是 Lance 使用显式数字版本号。
+11. **条件编译**：使用 Cargo feature flags（`lance` / `iceberg`）实现编译时协议选择。`object_store` 标记为可选依赖，仅在 `iceberg` feature 启用时编译。允许部署方按需裁剪 binary，减小体积并降低攻击面。
 
 ---
 
@@ -191,6 +193,12 @@ Table 版本管理（客户端写入数据后注册新版本的必要路径）�
 - 新增：F4 端点清单（Lance REST Namespace）—— 16 个必须实现端点 + 12 个明确不实现端点
 - 新增：Namespace 隔离策略 —— Iceberg 和 Lance 各自独立空间，允许同名，核心约束 `(namespace_name, table_name, format)`
 - 新增：9 条关键约束与决策（存储、Namespace 层级、隔离策略、双协议适配、对象存储、Schema 变更、并发控制、分页、错误响应）
+
+### V1.1
+
+- 新增：NF8（条件编译）—— 支持 Cargo feature flags 编译时选择协议适配器
+- 新增：关键约束与决策 #11 —— 条件编译设计（`lance` / `iceberg` feature flags，`object_store` 可选依赖）
+- 更新：非功能需求编号 NF8 → NF9（优雅关机）
 
 ---
 

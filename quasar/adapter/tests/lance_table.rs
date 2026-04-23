@@ -1,3 +1,4 @@
+#![cfg(feature = "lance")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use axum::body::Body;
