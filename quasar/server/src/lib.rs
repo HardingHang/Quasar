@@ -1,7 +1,8 @@
 pub mod config;
 pub mod health;
+pub mod metrics;
 
-use axum::Router;
+use axum::{middleware, Extension, Router};
 use deadpool_postgres::Pool;
 use quasar_storage::PgCatalogStore;
 use std::sync::Arc;
@@ -30,8 +31,13 @@ pub fn create_app(pool: Pool) -> Router {
 
 pub fn create_app_with_config(pool: Pool, #[allow(unused_variables)] config: AppConfig) -> Router {
     let store = Arc::new(PgCatalogStore::new(pool.clone()));
+    let metrics_state = quasar_core::MetricsState::default();
+    metrics::init_app_metrics();
+
     #[allow(unused_mut)]
-    let mut router = Router::new().merge(health::routes(pool));
+    let mut router = Router::new()
+        .merge(health::routes(pool))
+        .merge(metrics::routes());
 
     #[cfg(feature = "lance")]
     {
@@ -43,5 +49,10 @@ pub fn create_app_with_config(pool: Pool, #[allow(unused_variables)] config: App
         router = router.merge(quasar_adapter::iceberg::routes(config.iceberg));
     }
 
-    router.layer(TraceLayer::new_for_http()).with_state(store)
+    router
+        .layer(middleware::from_fn(metrics::request_id))
+        .layer(middleware::from_fn(metrics::track_requests))
+        .layer(TraceLayer::new_for_http())
+        .layer(Extension(metrics_state))
+        .with_state(store)
 }
