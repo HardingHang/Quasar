@@ -5,9 +5,13 @@
 //! persistence layer.
 
 pub mod error;
+pub mod metrics;
 pub mod models;
 pub mod store;
+pub mod validation;
 
 pub use error::StoreError;
+pub use metrics::{Counter, MetricsRegistry, MetricsState};
 pub use models::{Asset, AssetCommitUpdate, AssetFormat, AssetVersion, Namespace};
 pub use store::CatalogStore;
+pub use validation::validate_name;
