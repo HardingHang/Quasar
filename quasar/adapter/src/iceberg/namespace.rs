@@ -12,6 +12,7 @@ use super::dto::{
     NamespaceResponse, UpdateNamespacePropertiesRequest, UpdateNamespacePropertiesResponse,
 };
 use super::error::{store_error_to_iceberg_namespace, IcebergError};
+use quasar_core::validate_name;
 
 /// GET /iceberg/v1/namespaces
 pub async fn list_namespaces(
@@ -55,6 +56,8 @@ pub async fn create_namespace(
             message: "namespace array must not be empty".to_string(),
         }
     })?;
+
+    validate_name(name).map_err(store_error_to_iceberg_namespace)?;
 
     let ns = store
         .create_namespace(name, AssetFormat::Iceberg, req.properties)
