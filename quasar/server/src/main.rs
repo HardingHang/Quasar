@@ -15,7 +15,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pg_config: tokio_postgres::Config = cfg.database_url.parse()?;
     let mgr = deadpool_postgres::Manager::new(pg_config, tokio_postgres::NoTls);
-    let pool = deadpool_postgres::Pool::builder(mgr).build()?;
+    let pool = deadpool_postgres::Pool::builder(mgr)
+        .max_size(cfg.db_max_connections)
+        .build()?;
 
     let store = std::sync::Arc::new(quasar_storage::PgCatalogStore::new(pool.clone()));
     store.migrate().await?;
