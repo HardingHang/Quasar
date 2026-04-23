@@ -24,14 +24,8 @@ impl PgInstance {
         PG_INSTANCE
             .get_or_init(|| async {
                 let mut postgresql = PostgreSQL::default();
-                postgresql
-                    .setup()
-                    .await
-                    .expect("PostgreSQL setup failed");
-                postgresql
-                    .start()
-                    .await
-                    .expect("PostgreSQL start failed");
+                postgresql.setup().await.expect("PostgreSQL setup failed");
+                postgresql.start().await.expect("PostgreSQL start failed");
                 postgresql
                     .create_database("quasar_test")
                     .await
@@ -44,10 +38,7 @@ impl PgInstance {
 
                 let client = pool.get().await.expect("failed to get client");
                 client
-                    .execute(
-                        "TRUNCATE asset_versions, assets, namespaces CASCADE",
-                        &[],
-                    )
+                    .execute("TRUNCATE asset_versions, assets, namespaces CASCADE", &[])
                     .await
                     .expect("failed to truncate tables");
 

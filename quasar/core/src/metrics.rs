@@ -69,12 +69,17 @@ impl MetricsRegistry {
             for ((method, path, status), counter) in map.iter() {
                 output.push_str(&format!(
                     "http_requests_total{{method=\"{}\",path=\"{}\",status=\"{}\"}} {}\n",
-                    method, path, status, counter.get()
+                    method,
+                    path,
+                    status,
+                    counter.get()
                 ));
             }
         }
 
-        output.push_str("\n# HELP iceberg_commit_conflicts_total Total Iceberg commit CAS conflicts\n");
+        output.push_str(
+            "\n# HELP iceberg_commit_conflicts_total Total Iceberg commit CAS conflicts\n",
+        );
         output.push_str("# TYPE iceberg_commit_conflicts_total counter\n");
         output.push_str(&format!(
             "iceberg_commit_conflicts_total {}\n",

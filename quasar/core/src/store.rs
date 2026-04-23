@@ -20,23 +20,12 @@ pub trait CatalogStore: Send + Sync {
         limit: i32,
     ) -> Result<Vec<Namespace>, StoreError>;
 
-    async fn get_namespace(
-        &self,
-        name: &str,
-        format: AssetFormat,
-    ) -> Result<Namespace, StoreError>;
+    async fn get_namespace(&self, name: &str, format: AssetFormat)
+        -> Result<Namespace, StoreError>;
 
-    async fn namespace_exists(
-        &self,
-        name: &str,
-        format: AssetFormat,
-    ) -> Result<bool, StoreError>;
+    async fn namespace_exists(&self, name: &str, format: AssetFormat) -> Result<bool, StoreError>;
 
-    async fn drop_namespace(
-        &self,
-        name: &str,
-        format: AssetFormat,
-    ) -> Result<(), StoreError>;
+    async fn drop_namespace(&self, name: &str, format: AssetFormat) -> Result<(), StoreError>;
 
     async fn update_namespace_properties(
         &self,

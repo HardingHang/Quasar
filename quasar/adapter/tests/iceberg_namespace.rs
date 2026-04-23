@@ -29,14 +29,8 @@ impl PgInstance {
         PG_INSTANCE
             .get_or_init(|| async {
                 let mut postgresql = PostgreSQL::default();
-                postgresql
-                    .setup()
-                    .await
-                    .expect("PostgreSQL setup failed");
-                postgresql
-                    .start()
-                    .await
-                    .expect("PostgreSQL start failed");
+                postgresql.setup().await.expect("PostgreSQL setup failed");
+                postgresql.start().await.expect("PostgreSQL start failed");
                 postgresql
                     .create_database("quasar_test")
                     .await
@@ -279,7 +273,10 @@ async fn test_update_namespace_properties() {
     let mut props = HashMap::new();
     props.insert("owner".to_string(), "team-a".to_string());
     props.insert("env".to_string(), "prod".to_string());
-    store.create_namespace("prod", AssetFormat::Iceberg, props).await.unwrap();
+    store
+        .create_namespace("prod", AssetFormat::Iceberg, props)
+        .await
+        .unwrap();
 
     let app = test_app(store);
 
@@ -290,7 +287,9 @@ async fn test_update_namespace_properties() {
                 .method("POST")
                 .uri("/iceberg/v1/namespaces/prod/properties")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"removals": ["env"], "updates": {"owner": "team-b", "region": "us-west"}}"#))
+                .body(Body::from(
+                    r#"{"removals": ["env"], "updates": {"owner": "team-b", "region": "us-west"}}"#,
+                ))
                 .unwrap(),
         )
         .await
@@ -299,8 +298,14 @@ async fn test_update_namespace_properties() {
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response).await;
     assert!(json["removed"].as_array().unwrap().contains(&"env".into()));
-    assert!(json["updated"].as_array().unwrap().contains(&"owner".into()));
-    assert!(json["updated"].as_array().unwrap().contains(&"region".into()));
+    assert!(json["updated"]
+        .as_array()
+        .unwrap()
+        .contains(&"owner".into()));
+    assert!(json["updated"]
+        .as_array()
+        .unwrap()
+        .contains(&"region".into()));
 
     let get = app
         .oneshot(
@@ -324,8 +329,14 @@ async fn test_update_namespace_properties() {
 #[serial]
 async fn test_format_isolation() {
     let store = setup().await;
-    store.create_namespace("prod", AssetFormat::Lance, HashMap::new()).await.unwrap();
-    store.create_namespace("prod", AssetFormat::Iceberg, HashMap::new()).await.unwrap();
+    store
+        .create_namespace("prod", AssetFormat::Lance, HashMap::new())
+        .await
+        .unwrap();
+    store
+        .create_namespace("prod", AssetFormat::Iceberg, HashMap::new())
+        .await
+        .unwrap();
     let app = test_app(store);
 
     let response = app
@@ -357,7 +368,9 @@ async fn test_update_namespace_properties_namespace_not_found() {
                 .method("POST")
                 .uri("/iceberg/v1/namespaces/prod/properties")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"removals": [], "updates": {"owner": "team-a"}}"#))
+                .body(Body::from(
+                    r#"{"removals": [], "updates": {"owner": "team-a"}}"#,
+                ))
                 .unwrap(),
         )
         .await

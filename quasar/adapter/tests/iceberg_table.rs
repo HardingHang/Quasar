@@ -29,14 +29,8 @@ impl PgInstance {
         PG_INSTANCE
             .get_or_init(|| async {
                 let mut postgresql = PostgreSQL::default();
-                postgresql
-                    .setup()
-                    .await
-                    .expect("PostgreSQL setup failed");
-                postgresql
-                    .start()
-                    .await
-                    .expect("PostgreSQL start failed");
+                postgresql.setup().await.expect("PostgreSQL setup failed");
+                postgresql.start().await.expect("PostgreSQL start failed");
                 postgresql
                     .create_database("quasar_test")
                     .await
@@ -105,7 +99,9 @@ async fn test_create_and_load_table() {
                 .method("POST")
                 .uri("/iceberg/v1/namespaces/prod/tables")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"name": "users", "location": "s3://bucket/warehouse/prod/users"}"#))
+                .body(Body::from(
+                    r#"{"name": "users", "location": "s3://bucket/warehouse/prod/users"}"#,
+                ))
                 .unwrap(),
         )
         .await
@@ -113,10 +109,19 @@ async fn test_create_and_load_table() {
 
     assert_eq!(create.status(), StatusCode::OK);
     let json = body_json(create).await;
-    assert!(json["metadata-location"].as_str().unwrap().contains("00001-"));
-    assert!(json["metadata-location"].as_str().unwrap().ends_with(".metadata.json"));
+    assert!(json["metadata-location"]
+        .as_str()
+        .unwrap()
+        .contains("00001-"));
+    assert!(json["metadata-location"]
+        .as_str()
+        .unwrap()
+        .ends_with(".metadata.json"));
     assert_eq!(json["metadata"]["format-version"], 2);
-    assert_eq!(json["metadata"]["location"], "s3://bucket/warehouse/prod/users");
+    assert_eq!(
+        json["metadata"]["location"],
+        "s3://bucket/warehouse/prod/users"
+    );
 
     let load = app
         .oneshot(

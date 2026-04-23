@@ -108,7 +108,9 @@ pub struct SortOrder {
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum TableRequirement {
     AssertCreate,
-    AssertTableUuid { uuid: String },
+    AssertTableUuid {
+        uuid: String,
+    },
     AssertRefSnapshotId {
         r#ref: String,
         #[serde(rename = "snapshot-id")]
@@ -121,7 +123,9 @@ pub enum TableRequirement {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "action", rename_all = "kebab-case")]
 pub enum TableUpdate {
-    AddSnapshot { snapshot: Snapshot },
+    AddSnapshot {
+        snapshot: Snapshot,
+    },
     SetSnapshotRef {
         #[serde(rename = "ref-name")]
         ref_name: String,
@@ -130,19 +134,29 @@ pub enum TableUpdate {
         #[serde(rename = "type")]
         r#type: Option<String>,
     },
-    SetProperties { updates: HashMap<String, String> },
-    RemoveProperties { removals: Vec<String> },
-    AddSchema { schema: Schema },
+    SetProperties {
+        updates: HashMap<String, String>,
+    },
+    RemoveProperties {
+        removals: Vec<String>,
+    },
+    AddSchema {
+        schema: Schema,
+    },
     SetCurrentSchema {
         #[serde(rename = "schema-id")]
         schema_id: i32,
     },
-    AddPartitionSpec { spec: PartitionSpec },
+    AddPartitionSpec {
+        spec: PartitionSpec,
+    },
     SetDefaultSpec {
         #[serde(rename = "spec-id")]
         spec_id: i32,
     },
-    AddSortOrder { order: SortOrder },
+    AddSortOrder {
+        order: SortOrder,
+    },
     SetDefaultSortOrder {
         #[serde(rename = "order-id")]
         order_id: i32,
@@ -159,9 +173,7 @@ impl TableMetadata {
             match req {
                 TableRequirement::AssertCreate => {
                     // Table already exists → fail
-                    return Err(
-                        "Table already exists, cannot assert-create".to_string()
-                    );
+                    return Err("Table already exists, cannot assert-create".to_string());
                 }
                 TableRequirement::AssertTableUuid { uuid } => {
                     if self.table_uuid != *uuid {
@@ -237,9 +249,10 @@ impl TableMetadata {
                     self.last_updated_ms = chrono::Utc::now().timestamp_millis();
                 }
                 TableUpdate::AddPartitionSpec { spec } => {
-                    self.partition_specs.push(serde_json::to_value(spec).unwrap_or_else(|_| {
-                        serde_json::json!({"spec-id": spec.spec_id, "fields": spec.fields})
-                    }));
+                    self.partition_specs
+                        .push(serde_json::to_value(spec).unwrap_or_else(
+                            |_| serde_json::json!({"spec-id": spec.spec_id, "fields": spec.fields}),
+                        ));
                     self.last_updated_ms = chrono::Utc::now().timestamp_millis();
                 }
                 TableUpdate::SetDefaultSpec { spec_id } => {
@@ -247,9 +260,10 @@ impl TableMetadata {
                     self.last_updated_ms = chrono::Utc::now().timestamp_millis();
                 }
                 TableUpdate::AddSortOrder { order } => {
-                    self.sort_orders.push(serde_json::to_value(order).unwrap_or_else(|_| {
-                        serde_json::json!({"order-id": order.order_id, "fields": order.fields})
-                    }));
+                    self.sort_orders
+                        .push(serde_json::to_value(order).unwrap_or_else(
+                        |_| serde_json::json!({"order-id": order.order_id, "fields": order.fields}),
+                    ));
                     self.last_updated_ms = chrono::Utc::now().timestamp_millis();
                 }
                 TableUpdate::SetDefaultSortOrder { order_id } => {
@@ -269,7 +283,11 @@ impl TableMetadata {
         // Extract the sequence number from current metadata_location
         let current = self
             .metadata_location_from_properties()
-            .or_else(|| self.refs.get("metadata-location").map(|_| self.location.clone()))
+            .or_else(|| {
+                self.refs
+                    .get("metadata-location")
+                    .map(|_| self.location.clone())
+            })
             .unwrap_or_else(|| self.location.clone());
 
         // Try to find the pattern /metadata/NNNNN-uuid.metadata.json
@@ -287,7 +305,10 @@ impl TableMetadata {
         }
 
         // Fallback: append a simple increment
-        format!("{}/metadata/00002-{}.metadata.json", self.location, self.table_uuid)
+        format!(
+            "{}/metadata/00002-{}.metadata.json",
+            self.location, self.table_uuid
+        )
     }
 
     fn metadata_location_from_properties(&self) -> Option<String> {

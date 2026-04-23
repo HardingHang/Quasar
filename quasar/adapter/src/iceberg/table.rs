@@ -9,8 +9,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::dto::{
-    CommitTableRequest, CreateTableRequest, ListTablesQuery, ListTablesResponse,
-    LoadTableResponse, RenameTableRequest, TableIdentifier,
+    CommitTableRequest, CreateTableRequest, ListTablesQuery, ListTablesResponse, LoadTableResponse,
+    RenameTableRequest, TableIdentifier,
 };
 use super::error::{store_error_to_iceberg_table, IcebergError};
 use super::iceberg_config;
@@ -40,11 +40,12 @@ async fn write_metadata_to_store(
             }
         })?;
         let payload = object_store::PutPayload::from(content.to_string());
-        store.put(&path, payload).await.map_err(|e| {
-            IcebergError::InternalServerError {
+        store
+            .put(&path, payload)
+            .await
+            .map_err(|e| IcebergError::InternalServerError {
                 message: format!("failed to write metadata to object store: {}", e),
-            }
-        })?;
+            })?;
     }
     Ok(())
 }
@@ -61,20 +62,20 @@ async fn read_metadata_from_store(
                 message: format!("invalid metadata location: {}", location),
             }
         })?;
-        let result = store.get(&path).await.map_err(|e| {
-            IcebergError::InternalServerError {
+        let result = store
+            .get(&path)
+            .await
+            .map_err(|e| IcebergError::InternalServerError {
                 message: format!("failed to read metadata from object store: {}", e),
-            }
-        })?;
-        let bytes = result.bytes().await.map_err(|e| {
-            IcebergError::InternalServerError {
+            })?;
+        let bytes = result
+            .bytes()
+            .await
+            .map_err(|e| IcebergError::InternalServerError {
                 message: format!("failed to read metadata bytes: {}", e),
-            }
-        })?;
-        serde_json::from_slice(&bytes).map_err(|e| {
-            IcebergError::InternalServerError {
-                message: format!("failed to parse metadata JSON: {}", e),
-            }
+            })?;
+        serde_json::from_slice(&bytes).map_err(|e| IcebergError::InternalServerError {
+            message: format!("failed to parse metadata JSON: {}", e),
         })
     } else if let Some(fb) = fallback {
         Ok(fb)
@@ -257,9 +258,9 @@ pub async fn load_table(
     let metadata = if let Some(ref ml) = asset.metadata_location {
         read_metadata_from_store(ml, asset.schema_snapshot.clone()).await?
     } else {
-        asset.schema_snapshot.unwrap_or_else(|| {
-            build_initial_metadata(asset.id, &asset.name, &asset.location, None)
-        })
+        asset
+            .schema_snapshot
+            .unwrap_or_else(|| build_initial_metadata(asset.id, &asset.name, &asset.location, None))
     };
 
     Ok((
@@ -311,16 +312,20 @@ pub async fn rename_table(
     validate_name(&req.source.name).map_err(store_error_to_iceberg_table)?;
     validate_name(&req.destination.name).map_err(store_error_to_iceberg_table)?;
 
-    let src_ns = req.source.namespace.first().ok_or_else(|| {
-        IcebergError::BadRequestException {
+    let src_ns = req
+        .source
+        .namespace
+        .first()
+        .ok_or_else(|| IcebergError::BadRequestException {
             message: "source namespace must not be empty".to_string(),
-        }
-    })?;
-    let dst_ns = req.destination.namespace.first().ok_or_else(|| {
-        IcebergError::BadRequestException {
-            message: "destination namespace must not be empty".to_string(),
-        }
-    })?;
+        })?;
+    let dst_ns =
+        req.destination
+            .namespace
+            .first()
+            .ok_or_else(|| IcebergError::BadRequestException {
+                message: "destination namespace must not be empty".to_string(),
+            })?;
 
     if src_ns != dst_ns {
         return Err(IcebergError::BadRequestException {
@@ -329,7 +334,12 @@ pub async fn rename_table(
     }
 
     store
-        .rename_asset(src_ns, AssetFormat::Iceberg, &req.source.name, &req.destination.name)
+        .rename_asset(
+            src_ns,
+            AssetFormat::Iceberg,
+            &req.source.name,
+            &req.destination.name,
+        )
         .await
         .map_err(store_error_to_iceberg_table)?;
 
@@ -351,23 +361,19 @@ pub async fn commit_table(
         .await
         .map_err(store_error_to_iceberg_table)?;
 
-    let metadata_location = asset.metadata_location.ok_or_else(|| {
-        IcebergError::CommitFailedException {
-            message: format!("Table '{}.{}' has no metadata location", ns, table),
-        }
-    })?;
+    let metadata_location =
+        asset
+            .metadata_location
+            .ok_or_else(|| IcebergError::CommitFailedException {
+                message: format!("Table '{}.{}' has no metadata location", ns, table),
+            })?;
 
     // 2. Load current metadata from object store (or fallback to schema_snapshot)
-    let current_metadata_json = read_metadata_from_store(
-        &metadata_location,
-        asset.schema_snapshot.clone(),
-    )
-    .await?;
-    let mut table_metadata =
-        serde_json::from_value::<TableMetadata>(current_metadata_json).map_err(|e| {
-            IcebergError::InternalServerError {
-                message: format!("Failed to parse table metadata: {}", e),
-            }
+    let current_metadata_json =
+        read_metadata_from_store(&metadata_location, asset.schema_snapshot.clone()).await?;
+    let mut table_metadata = serde_json::from_value::<TableMetadata>(current_metadata_json)
+        .map_err(|e| IcebergError::InternalServerError {
+            message: format!("Failed to parse table metadata: {}", e),
         })?;
 
     // 3. Check requirements
@@ -382,11 +388,10 @@ pub async fn commit_table(
     let new_metadata_location = next_metadata_location(&metadata_location);
 
     // 6. Serialize new metadata
-    let new_schema_snapshot = serde_json::to_value(&table_metadata).map_err(|e| {
-        IcebergError::InternalServerError {
+    let new_schema_snapshot =
+        serde_json::to_value(&table_metadata).map_err(|e| IcebergError::InternalServerError {
             message: format!("Failed to serialize table metadata: {}", e),
-        }
-    })?;
+        })?;
 
     // 7. Write new metadata.json to object store
     write_metadata_to_store(&new_metadata_location, &new_schema_snapshot).await?;

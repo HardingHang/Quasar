@@ -20,14 +20,8 @@ impl PgInstance {
         PG_INSTANCE
             .get_or_init(|| async {
                 let mut postgresql = PostgreSQL::default();
-                postgresql
-                    .setup()
-                    .await
-                    .expect("PostgreSQL setup failed");
-                postgresql
-                    .start()
-                    .await
-                    .expect("PostgreSQL start failed");
+                postgresql.setup().await.expect("PostgreSQL setup failed");
+                postgresql.start().await.expect("PostgreSQL start failed");
 
                 postgresql
                     .create_database("quasar_test")
@@ -62,10 +56,7 @@ async fn setup() -> PgCatalogStore {
 
     let client = pool.get().await.expect("failed to get client");
     client
-        .execute(
-            "TRUNCATE asset_versions, assets, namespaces CASCADE",
-            &[],
-        )
+        .execute("TRUNCATE asset_versions, assets, namespaces CASCADE", &[])
         .await
         .expect("failed to truncate tables");
 
@@ -84,15 +75,27 @@ async fn test_namespace_crud() {
     assert_eq!(ns.name, "test_ns");
     assert!(matches!(ns.format, AssetFormat::Lance));
 
-    let list = store.list_namespaces(AssetFormat::Lance, 0, 100).await.unwrap();
+    let list = store
+        .list_namespaces(AssetFormat::Lance, 0, 100)
+        .await
+        .unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].name, "test_ns");
 
-    let got = store.get_namespace("test_ns", AssetFormat::Lance).await.unwrap();
+    let got = store
+        .get_namespace("test_ns", AssetFormat::Lance)
+        .await
+        .unwrap();
     assert_eq!(got.id, ns.id);
 
-    assert!(store.namespace_exists("test_ns", AssetFormat::Lance).await.unwrap());
-    assert!(!store.namespace_exists("missing", AssetFormat::Lance).await.unwrap());
+    assert!(store
+        .namespace_exists("test_ns", AssetFormat::Lance)
+        .await
+        .unwrap());
+    assert!(!store
+        .namespace_exists("missing", AssetFormat::Lance)
+        .await
+        .unwrap());
 
     let err = store
         .create_namespace("test_ns", AssetFormat::Lance, HashMap::new())
@@ -100,10 +103,19 @@ async fn test_namespace_crud() {
         .unwrap_err();
     assert!(matches!(err, StoreError::AlreadyExists(_)));
 
-    store.drop_namespace("test_ns", AssetFormat::Lance).await.unwrap();
-    assert!(!store.namespace_exists("test_ns", AssetFormat::Lance).await.unwrap());
+    store
+        .drop_namespace("test_ns", AssetFormat::Lance)
+        .await
+        .unwrap();
+    assert!(!store
+        .namespace_exists("test_ns", AssetFormat::Lance)
+        .await
+        .unwrap());
 
-    let err = store.drop_namespace("test_ns", AssetFormat::Lance).await.unwrap_err();
+    let err = store
+        .drop_namespace("test_ns", AssetFormat::Lance)
+        .await
+        .unwrap_err();
     assert!(matches!(err, StoreError::NotFound(_)));
 }
 
@@ -118,7 +130,15 @@ async fn test_asset_crud() {
         .unwrap();
 
     let asset = store
-        .create_asset("ns1", AssetFormat::Lance, "asset_a", "lance://ns1/asset_a", None, None, HashMap::new())
+        .create_asset(
+            "ns1",
+            AssetFormat::Lance,
+            "asset_a",
+            "lance://ns1/asset_a",
+            None,
+            None,
+            HashMap::new(),
+        )
         .await
         .unwrap();
     assert_eq!(asset.name, "asset_a");
@@ -126,24 +146,58 @@ async fn test_asset_crud() {
     let list = store.list_assets("ns1", AssetFormat::Lance).await.unwrap();
     assert_eq!(list.len(), 1);
 
-    let got = store.get_asset("ns1", AssetFormat::Lance, "asset_a").await.unwrap();
+    let got = store
+        .get_asset("ns1", AssetFormat::Lance, "asset_a")
+        .await
+        .unwrap();
     assert_eq!(got.id, asset.id);
 
-    assert!(store.asset_exists("ns1", AssetFormat::Lance, "asset_a").await.unwrap());
-    assert!(!store.asset_exists("ns1", AssetFormat::Lance, "missing").await.unwrap());
+    assert!(store
+        .asset_exists("ns1", AssetFormat::Lance, "asset_a")
+        .await
+        .unwrap());
+    assert!(!store
+        .asset_exists("ns1", AssetFormat::Lance, "missing")
+        .await
+        .unwrap());
 
     let err = store
-        .create_asset("ns1", AssetFormat::Lance, "asset_a", "lance://ns1/asset_a", None, None, HashMap::new())
+        .create_asset(
+            "ns1",
+            AssetFormat::Lance,
+            "asset_a",
+            "lance://ns1/asset_a",
+            None,
+            None,
+            HashMap::new(),
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, StoreError::AlreadyExists(_)));
 
-    store.rename_asset("ns1", AssetFormat::Lance, "asset_a", "asset_b").await.unwrap();
-    assert!(store.asset_exists("ns1", AssetFormat::Lance, "asset_b").await.unwrap());
-    assert!(!store.asset_exists("ns1", AssetFormat::Lance, "asset_a").await.unwrap());
+    store
+        .rename_asset("ns1", AssetFormat::Lance, "asset_a", "asset_b")
+        .await
+        .unwrap();
+    assert!(store
+        .asset_exists("ns1", AssetFormat::Lance, "asset_b")
+        .await
+        .unwrap());
+    assert!(!store
+        .asset_exists("ns1", AssetFormat::Lance, "asset_a")
+        .await
+        .unwrap());
 
     store
-        .create_asset("ns1", AssetFormat::Lance, "asset_c", "lance://ns1/asset_c", None, None, HashMap::new())
+        .create_asset(
+            "ns1",
+            AssetFormat::Lance,
+            "asset_c",
+            "lance://ns1/asset_c",
+            None,
+            None,
+            HashMap::new(),
+        )
         .await
         .unwrap();
     let err = store
@@ -152,8 +206,14 @@ async fn test_asset_crud() {
         .unwrap_err();
     assert!(matches!(err, StoreError::AlreadyExists(_)));
 
-    store.drop_asset("ns1", AssetFormat::Lance, "asset_b").await.unwrap();
-    store.drop_asset("ns1", AssetFormat::Lance, "asset_c").await.unwrap();
+    store
+        .drop_asset("ns1", AssetFormat::Lance, "asset_b")
+        .await
+        .unwrap();
+    store
+        .drop_asset("ns1", AssetFormat::Lance, "asset_c")
+        .await
+        .unwrap();
 
     let list = store.list_assets("ns1", AssetFormat::Lance).await.unwrap();
     assert!(list.is_empty());
@@ -169,7 +229,15 @@ async fn test_version_commit_and_load() {
         .await
         .unwrap();
     store
-        .create_asset("ns1", AssetFormat::Lance, "tbl", "lance://ns1/tbl", None, None, HashMap::new())
+        .create_asset(
+            "ns1",
+            AssetFormat::Lance,
+            "tbl",
+            "lance://ns1/tbl",
+            None,
+            None,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -203,14 +271,23 @@ async fn test_version_commit_and_load() {
     assert_eq!(v2.version_id, 2);
     assert_eq!(v2.previous_version_id, Some(1));
 
-    let current = store.load_current_version("ns1", AssetFormat::Lance, "tbl").await.unwrap();
+    let current = store
+        .load_current_version("ns1", AssetFormat::Lance, "tbl")
+        .await
+        .unwrap();
     assert_eq!(current.version_id, 2);
 
-    let loaded = store.load_version("ns1", AssetFormat::Lance, "tbl", 1).await.unwrap();
+    let loaded = store
+        .load_version("ns1", AssetFormat::Lance, "tbl", 1)
+        .await
+        .unwrap();
     assert_eq!(loaded.version_id, 1);
     assert_eq!(loaded.metadata_location, "s3://bucket/v1");
 
-    let versions = store.list_versions("ns1", AssetFormat::Lance, "tbl").await.unwrap();
+    let versions = store
+        .list_versions("ns1", AssetFormat::Lance, "tbl")
+        .await
+        .unwrap();
     assert_eq!(versions.len(), 2);
     assert_eq!(versions[0].version_id, 1);
     assert_eq!(versions[1].version_id, 2);
@@ -226,7 +303,15 @@ async fn test_version_conflict() {
         .await
         .unwrap();
     store
-        .create_asset("ns1", AssetFormat::Lance, "tbl", "lance://ns1/tbl", None, None, HashMap::new())
+        .create_asset(
+            "ns1",
+            AssetFormat::Lance,
+            "tbl",
+            "lance://ns1/tbl",
+            None,
+            None,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -263,20 +348,32 @@ async fn test_version_conflict() {
 async fn test_not_found_errors() {
     let store = setup().await;
 
-    let err = store.get_namespace("missing", AssetFormat::Lance).await.unwrap_err();
+    let err = store
+        .get_namespace("missing", AssetFormat::Lance)
+        .await
+        .unwrap_err();
     assert!(matches!(err, StoreError::NotFound(_)));
 
-    let err = store.get_asset("missing", AssetFormat::Lance, "tbl").await.unwrap_err();
+    let err = store
+        .get_asset("missing", AssetFormat::Lance, "tbl")
+        .await
+        .unwrap_err();
     assert!(matches!(err, StoreError::NotFound(_)));
 
     store
         .create_namespace("ns1", AssetFormat::Lance, HashMap::new())
         .await
         .unwrap();
-    let err = store.get_asset("ns1", AssetFormat::Lance, "tbl").await.unwrap_err();
+    let err = store
+        .get_asset("ns1", AssetFormat::Lance, "tbl")
+        .await
+        .unwrap_err();
     assert!(matches!(err, StoreError::NotFound(_)));
 
-    let err = store.load_current_version("ns1", AssetFormat::Lance, "tbl").await.unwrap_err();
+    let err = store
+        .load_current_version("ns1", AssetFormat::Lance, "tbl")
+        .await
+        .unwrap_err();
     assert!(matches!(err, StoreError::NotFound(_)));
 }
 
@@ -305,7 +402,10 @@ async fn test_update_namespace_properties() {
         .unwrap();
 
     assert_eq!(updated.properties.get("owner"), Some(&"team-b".to_string()));
-    assert_eq!(updated.properties.get("region"), Some(&"us-west".to_string()));
+    assert_eq!(
+        updated.properties.get("region"),
+        Some(&"us-west".to_string())
+    );
     assert!(!updated.properties.contains_key("env"));
 
     // Not found

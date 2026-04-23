@@ -9,9 +9,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&cfg.log_level));
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .init();
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
     let pg_config: tokio_postgres::Config = cfg.database_url.parse()?;
     let mgr = deadpool_postgres::Manager::new(pg_config, tokio_postgres::NoTls);
@@ -55,9 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Build S3 object store client for Iceberg
         let (object_store, s3_bucket) =
             if let (Some(endpoint), Some(access_key), Some(secret_key)) =
-                (&cfg.s3_endpoint,
-                 &cfg.s3_access_key,
-                 &cfg.s3_secret_key)
+                (&cfg.s3_endpoint, &cfg.s3_access_key, &cfg.s3_secret_key)
             {
                 let bucket = cfg
                     .warehouse_path
@@ -74,7 +70,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .with_allow_http(cfg.s3_allow_http)
                     .build()?;
                 (
-                    Some(std::sync::Arc::new(store) as std::sync::Arc<dyn object_store::ObjectStore>),
+                    Some(
+                        std::sync::Arc::new(store) as std::sync::Arc<dyn object_store::ObjectStore>
+                    ),
                     Some(bucket),
                 )
             } else {

@@ -30,7 +30,8 @@ impl Config {
             s3_endpoint: std::env::var("QUASAR_S3_ENDPOINT").ok(),
             s3_access_key: std::env::var("QUASAR_S3_ACCESS_KEY").ok(),
             s3_secret_key: std::env::var("QUASAR_S3_SECRET_KEY").ok(),
-            s3_region: std::env::var("QUASAR_S3_REGION").unwrap_or_else(|_| "us-east-1".to_string()),
+            s3_region: std::env::var("QUASAR_S3_REGION")
+                .unwrap_or_else(|_| "us-east-1".to_string()),
             s3_allow_http: std::env::var("QUASAR_S3_ALLOW_HTTP")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false),
@@ -74,7 +75,10 @@ mod tests {
 
         assert_eq!(cfg.host, "0.0.0.0");
         assert_eq!(cfg.port, 8080);
-        assert_eq!(cfg.database_url, "postgres://postgres:postgres@localhost:5432/quasar");
+        assert_eq!(
+            cfg.database_url,
+            "postgres://postgres:postgres@localhost:5432/quasar"
+        );
         assert_eq!(cfg.log_level, "info");
         assert_eq!(cfg.s3_region, "us-east-1");
         assert!(!cfg.s3_allow_http);
@@ -106,7 +110,10 @@ mod tests {
         assert_eq!(cfg.port, 9090);
         assert_eq!(cfg.database_url, "postgres://user:pass@db:5432/test");
         assert_eq!(cfg.log_level, "debug");
-        assert_eq!(cfg.warehouse_path, Some("s3://bucket/warehouse".to_string()));
+        assert_eq!(
+            cfg.warehouse_path,
+            Some("s3://bucket/warehouse".to_string())
+        );
         assert_eq!(cfg.s3_endpoint, Some("http://localhost:9000".to_string()));
         assert_eq!(cfg.s3_access_key, Some("minioadmin".to_string()));
         assert_eq!(cfg.s3_secret_key, Some("minioadmin".to_string()));

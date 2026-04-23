@@ -20,8 +20,8 @@ pub struct ErrorBody {
 
 impl IntoResponse for ErrorResponse {
     fn into_response(self) -> Response {
-        let status = StatusCode::from_u16(self.error.code)
-            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let status =
+            StatusCode::from_u16(self.error.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         (status, axum::Json(self)).into_response()
     }
 }
@@ -43,15 +43,19 @@ impl IcebergError {
             IcebergError::NoSuchNamespaceException { message } => {
                 (message.clone(), "NoSuchNamespaceException".to_string(), 404)
             }
-            IcebergError::NamespaceAlreadyExistsException { message } => {
-                (message.clone(), "NamespaceAlreadyExistsException".to_string(), 409)
-            }
+            IcebergError::NamespaceAlreadyExistsException { message } => (
+                message.clone(),
+                "NamespaceAlreadyExistsException".to_string(),
+                409,
+            ),
             IcebergError::NoSuchTableException { message } => {
                 (message.clone(), "NoSuchTableException".to_string(), 404)
             }
-            IcebergError::TableAlreadyExistsException { message } => {
-                (message.clone(), "TableAlreadyExistsException".to_string(), 409)
-            }
+            IcebergError::TableAlreadyExistsException { message } => (
+                message.clone(),
+                "TableAlreadyExistsException".to_string(),
+                409,
+            ),
             IcebergError::BadRequestException { message } => {
                 (message.clone(), "BadRequestException".to_string(), 400)
             }
@@ -85,9 +89,7 @@ pub fn store_error_to_iceberg_namespace(err: StoreError) -> IcebergError {
         StoreError::AlreadyExists(msg) => {
             IcebergError::NamespaceAlreadyExistsException { message: msg }
         }
-        StoreError::Conflict(msg) => {
-            IcebergError::NamespaceAlreadyExistsException { message: msg }
-        }
+        StoreError::Conflict(msg) => IcebergError::NamespaceAlreadyExistsException { message: msg },
         StoreError::InvalidInput(msg) => IcebergError::BadRequestException { message: msg },
         StoreError::Internal(msg) => IcebergError::InternalServerError { message: msg },
     }

@@ -8,8 +8,8 @@ use quasar_core::{AssetFormat, CatalogStore};
 use std::sync::Arc;
 
 use super::dto::{
-    CreateNamespaceRequest, ListNamespacesQuery, ListNamespacesResponse,
-    NamespaceResponse, UpdateNamespacePropertiesRequest, UpdateNamespacePropertiesResponse,
+    CreateNamespaceRequest, ListNamespacesQuery, ListNamespacesResponse, NamespaceResponse,
+    UpdateNamespacePropertiesRequest, UpdateNamespacePropertiesResponse,
 };
 use super::error::{store_error_to_iceberg_namespace, IcebergError};
 use quasar_core::validate_name;
@@ -51,11 +51,12 @@ pub async fn create_namespace(
     State(store): State<Arc<dyn CatalogStore>>,
     Json(req): Json<CreateNamespaceRequest>,
 ) -> Result<impl IntoResponse, IcebergError> {
-    let name = req.namespace.first().ok_or_else(|| {
-        IcebergError::BadRequestException {
+    let name = req
+        .namespace
+        .first()
+        .ok_or_else(|| IcebergError::BadRequestException {
             message: "namespace array must not be empty".to_string(),
-        }
-    })?;
+        })?;
 
     validate_name(name).map_err(store_error_to_iceberg_namespace)?;
 
@@ -143,7 +144,9 @@ pub async fn update_namespace_properties(
     let removed: Vec<String> = req
         .removals
         .into_iter()
-        .filter(|key| before.properties.contains_key(key) && !updated_ns.properties.contains_key(key))
+        .filter(|key| {
+            before.properties.contains_key(key) && !updated_ns.properties.contains_key(key)
+        })
         .collect();
 
     Ok((

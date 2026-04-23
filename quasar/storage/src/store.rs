@@ -42,7 +42,9 @@ impl PgCatalogStore {
 }
 
 fn row_to_namespace(row: &Row) -> Result<Namespace, StoreError> {
-    let format_str: String = row.try_get("format").map_err(|e| StoreError::Internal(e.to_string()))?;
+    let format_str: String = row
+        .try_get("format")
+        .map_err(|e| StoreError::Internal(e.to_string()))?;
     let format = match format_str.as_str() {
         "iceberg" => AssetFormat::Iceberg,
         "lance" => AssetFormat::Lance,
@@ -61,8 +63,12 @@ fn row_to_namespace(row: &Row) -> Result<Namespace, StoreError> {
         serde_json::from_value(props).map_err(|e| StoreError::Internal(e.to_string()))?;
 
     Ok(Namespace {
-        id: row.try_get("id").map_err(|e| StoreError::Internal(e.to_string()))?,
-        name: row.try_get("name").map_err(|e| StoreError::Internal(e.to_string()))?,
+        id: row
+            .try_get("id")
+            .map_err(|e| StoreError::Internal(e.to_string()))?,
+        name: row
+            .try_get("name")
+            .map_err(|e| StoreError::Internal(e.to_string()))?,
         format,
         properties,
         created_at: row
@@ -78,17 +84,21 @@ fn row_to_asset(row: &Row) -> Result<Asset, StoreError> {
     let properties: HashMap<String, String> =
         serde_json::from_value(props).map_err(|e| StoreError::Internal(e.to_string()))?;
 
-    let schema_snapshot: Option<serde_json::Value> = row
-        .try_get("schema_snapshot")
-        .ok();
+    let schema_snapshot: Option<serde_json::Value> = row.try_get("schema_snapshot").ok();
 
     Ok(Asset {
-        id: row.try_get("id").map_err(|e| StoreError::Internal(e.to_string()))?,
+        id: row
+            .try_get("id")
+            .map_err(|e| StoreError::Internal(e.to_string()))?,
         namespace_id: row
             .try_get("namespace_id")
             .map_err(|e| StoreError::Internal(e.to_string()))?,
-        name: row.try_get("name").map_err(|e| StoreError::Internal(e.to_string()))?,
-        location: row.try_get("location").map_err(|e| StoreError::Internal(e.to_string()))?,
+        name: row
+            .try_get("name")
+            .map_err(|e| StoreError::Internal(e.to_string()))?,
+        location: row
+            .try_get("location")
+            .map_err(|e| StoreError::Internal(e.to_string()))?,
         metadata_location: row.try_get("metadata_location").ok(),
         schema_snapshot,
         properties,
@@ -100,7 +110,9 @@ fn row_to_asset(row: &Row) -> Result<Asset, StoreError> {
 
 fn row_to_version(row: &Row) -> Result<AssetVersion, StoreError> {
     Ok(AssetVersion {
-        id: row.try_get("id").map_err(|e| StoreError::Internal(e.to_string()))?,
+        id: row
+            .try_get("id")
+            .map_err(|e| StoreError::Internal(e.to_string()))?,
         asset_id: row
             .try_get("asset_id")
             .map_err(|e| StoreError::Internal(e.to_string()))?,
@@ -119,9 +131,7 @@ fn row_to_version(row: &Row) -> Result<AssetVersion, StoreError> {
     })
 }
 
-fn props_to_json(
-    props: &HashMap<String, String>,
-) -> Result<serde_json::Value, StoreError> {
+fn props_to_json(props: &HashMap<String, String>) -> Result<serde_json::Value, StoreError> {
     serde_json::to_value(props).map_err(|e| StoreError::Internal(e.to_string()))
 }
 
@@ -143,11 +153,7 @@ impl CatalogStore for PgCatalogStore {
         let row = client
             .query_one(
                 "INSERT INTO namespaces (name, format, properties) VALUES ($1, $2, $3) RETURNING *",
-                &[
-                    &name,
-                    &format.as_str(),
-                    &props_json,
-                ],
+                &[&name, &format.as_str(), &props_json],
             )
             .await
             .map_err(|e| match e.code() {
@@ -204,18 +210,11 @@ impl CatalogStore for PgCatalogStore {
 
         match row {
             Some(r) => row_to_namespace(&r),
-            None => Err(StoreError::NotFound(format!(
-                "namespace '{}'",
-                name
-            ))),
+            None => Err(StoreError::NotFound(format!("namespace '{}'", name))),
         }
     }
 
-    async fn namespace_exists(
-        &self,
-        name: &str,
-        format: AssetFormat,
-    ) -> Result<bool, StoreError> {
+    async fn namespace_exists(&self, name: &str, format: AssetFormat) -> Result<bool, StoreError> {
         let client = self
             .pool
             .get()
@@ -233,11 +232,7 @@ impl CatalogStore for PgCatalogStore {
         Ok(row.get(0))
     }
 
-    async fn drop_namespace(
-        &self,
-        name: &str,
-        format: AssetFormat,
-    ) -> Result<(), StoreError> {
+    async fn drop_namespace(&self, name: &str, format: AssetFormat) -> Result<(), StoreError> {
         let client = self
             .pool
             .get()
@@ -253,10 +248,7 @@ impl CatalogStore for PgCatalogStore {
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
         if deleted == 0 {
-            return Err(StoreError::NotFound(format!(
-                "namespace '{}'",
-                name
-            )));
+            return Err(StoreError::NotFound(format!("namespace '{}'", name)));
         }
 
         Ok(())
@@ -266,7 +258,7 @@ impl CatalogStore for PgCatalogStore {
         &self,
         name: &str,
         format: AssetFormat,
-        removals: &[ String],
+        removals: &[String],
         updates: &HashMap<String, String>,
     ) -> Result<Namespace, StoreError> {
         let client = self
@@ -282,20 +274,13 @@ impl CatalogStore for PgCatalogStore {
                 "UPDATE namespaces
                  SET properties = (properties - $1::text[]) || $2::jsonb
                  WHERE name = $3 AND format = $4",
-                &[&removals,
-                    &props_json,
-                    &name,
-                    &format.as_str(),
-                ],
+                &[&removals, &props_json, &name, &format.as_str()],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
         if updated == 0 {
-            return Err(StoreError::NotFound(format!(
-                "namespace '{}'",
-                name
-            )));
+            return Err(StoreError::NotFound(format!("namespace '{}'", name)));
         }
 
         self.get_namespace(name, format).await
@@ -356,8 +341,7 @@ impl CatalogStore for PgCatalogStore {
         let rows = client
             .query(
                 "SELECT * FROM assets WHERE namespace_id = $1 ORDER BY created_at",
-                &[&ns.id,
-                ],
+                &[&ns.id],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -382,8 +366,7 @@ impl CatalogStore for PgCatalogStore {
         let row = client
             .query_opt(
                 "SELECT * FROM assets WHERE namespace_id = $1 AND name = $2",
-                &[&ns.id,&name,
-                ],
+                &[&ns.id, &name],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -414,8 +397,7 @@ impl CatalogStore for PgCatalogStore {
         let row = client
             .query_one(
                 "SELECT EXISTS(SELECT 1 FROM assets WHERE namespace_id = $1 AND name = $2)",
-                &[&ns.id,&name,
-                ],
+                &[&ns.id, &name],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -440,8 +422,7 @@ impl CatalogStore for PgCatalogStore {
         let deleted = client
             .execute(
                 "DELETE FROM assets WHERE namespace_id = $1 AND name = $2",
-                &[&ns.id,&name,
-                ],
+                &[&ns.id, &name],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -474,8 +455,7 @@ impl CatalogStore for PgCatalogStore {
         let updated = client
             .execute(
                 "UPDATE assets SET name = $1 WHERE namespace_id = $2 AND name = $3",
-                &[&new_name,&ns.id,&name,
-                ],
+                &[&new_name, &ns.id, &name],
             )
             .await
             .map_err(|e| match e.code() {
@@ -579,8 +559,7 @@ impl CatalogStore for PgCatalogStore {
         let row = client
             .query_opt(
                 "SELECT * FROM asset_versions WHERE asset_id = $1 AND version_id = $2",
-                &[&asset.id,&version_id,
-                ],
+                &[&asset.id, &version_id],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -611,8 +590,7 @@ impl CatalogStore for PgCatalogStore {
         let row = client
             .query_opt(
                 "SELECT * FROM asset_versions WHERE asset_id = $1 ORDER BY version_id DESC LIMIT 1",
-                &[&asset.id,
-                ],
+                &[&asset.id],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -643,8 +621,7 @@ impl CatalogStore for PgCatalogStore {
         let rows = client
             .query(
                 "SELECT * FROM asset_versions WHERE asset_id = $1 ORDER BY version_id ASC",
-                &[&asset.id,
-                ],
+                &[&asset.id],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;

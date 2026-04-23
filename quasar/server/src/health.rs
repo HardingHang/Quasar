@@ -1,9 +1,5 @@
 use axum::{
-    extract::Extension,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::get,
-    Json, Router,
+    extract::Extension, http::StatusCode, response::IntoResponse, routing::get, Json, Router,
 };
 use deadpool_postgres::Pool;
 use serde::Serialize;

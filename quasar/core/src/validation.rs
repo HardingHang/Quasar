@@ -14,7 +14,9 @@ const VALID_NAME_CHARS: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUV
 /// - Must not be empty
 pub fn validate_name(name: &str) -> Result<(), StoreError> {
     if name.is_empty() {
-        return Err(StoreError::InvalidInput("name must not be empty".to_string()));
+        return Err(StoreError::InvalidInput(
+            "name must not be empty".to_string(),
+        ));
     }
     if name.len() > MAX_NAME_LENGTH {
         return Err(StoreError::InvalidInput(format!(
@@ -79,12 +81,18 @@ mod tests {
     #[test]
     fn test_invalid_characters_fails() {
         let err = validate_name("hello world").unwrap_err();
-        assert!(matches!(err, StoreError::InvalidInput(ref msg) if msg.contains("invalid character")));
+        assert!(
+            matches!(err, StoreError::InvalidInput(ref msg) if msg.contains("invalid character"))
+        );
 
         let err = validate_name("hello\nworld").unwrap_err();
-        assert!(matches!(err, StoreError::InvalidInput(ref msg) if msg.contains("invalid character")));
+        assert!(
+            matches!(err, StoreError::InvalidInput(ref msg) if msg.contains("invalid character"))
+        );
 
         let err = validate_name("hello$world").unwrap_err();
-        assert!(matches!(err, StoreError::InvalidInput(ref msg) if msg.contains("invalid character")));
+        assert!(
+            matches!(err, StoreError::InvalidInput(ref msg) if msg.contains("invalid character"))
+        );
     }
 }

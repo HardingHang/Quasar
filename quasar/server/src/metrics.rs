@@ -1,12 +1,8 @@
 //! Metrics endpoint and HTTP request tracking middleware.
 
 use axum::{
-    extract::Request,
-    http::StatusCode,
-    middleware::Next,
-    response::Response,
-    routing::get,
-    Json, Router,
+    extract::Request, http::StatusCode, middleware::Next, response::Response, routing::get, Json,
+    Router,
 };
 use quasar_core::MetricsState;
 use serde::Serialize;

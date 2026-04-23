@@ -29,14 +29,8 @@ impl PgInstance {
         PG_INSTANCE
             .get_or_init(|| async {
                 let mut postgresql = PostgreSQL::default();
-                postgresql
-                    .setup()
-                    .await
-                    .expect("PostgreSQL setup failed");
-                postgresql
-                    .start()
-                    .await
-                    .expect("PostgreSQL start failed");
+                postgresql.setup().await.expect("PostgreSQL setup failed");
+                postgresql.start().await.expect("PostgreSQL start failed");
                 postgresql
                     .create_database("quasar_test")
                     .await
@@ -179,11 +173,27 @@ async fn test_list_tables() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset("prod", AssetFormat::Lance, "t1", "lance://prod/t1", None, None, HashMap::new())
+        .create_asset(
+            "prod",
+            AssetFormat::Lance,
+            "t1",
+            "lance://prod/t1",
+            None,
+            None,
+            HashMap::new(),
+        )
         .await
         .unwrap();
     store
-        .create_asset("prod", AssetFormat::Lance, "t2", "lance://prod/t2", None, None, HashMap::new())
+        .create_asset(
+            "prod",
+            AssetFormat::Lance,
+            "t2",
+            "lance://prod/t2",
+            None,
+            None,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -216,7 +226,15 @@ async fn test_table_exists() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset("prod", AssetFormat::Lance, "users", "lance://prod/users", None, None, HashMap::new())
+        .create_asset(
+            "prod",
+            AssetFormat::Lance,
+            "users",
+            "lance://prod/users",
+            None,
+            None,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -267,7 +285,9 @@ async fn test_register_table() {
                 .method("POST")
                 .uri("/lance/v1/table/prod%24users/register")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"location": "s3://bucket/warehouse/prod/users"}"#))
+                .body(Body::from(
+                    r#"{"location": "s3://bucket/warehouse/prod/users"}"#,
+                ))
                 .unwrap(),
         )
         .await
@@ -285,7 +305,15 @@ async fn test_deregister_table() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset("prod", AssetFormat::Lance, "users", "lance://prod/users", None, None, HashMap::new())
+        .create_asset(
+            "prod",
+            AssetFormat::Lance,
+            "users",
+            "lance://prod/users",
+            None,
+            None,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -328,7 +356,15 @@ async fn test_drop_table() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset("prod", AssetFormat::Lance, "users", "lance://prod/users", None, None, HashMap::new())
+        .create_asset(
+            "prod",
+            AssetFormat::Lance,
+            "users",
+            "lance://prod/users",
+            None,
+            None,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -370,7 +406,15 @@ async fn test_rename_table() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset("prod", AssetFormat::Lance, "users", "lance://prod/users", None, None, HashMap::new())
+        .create_asset(
+            "prod",
+            AssetFormat::Lance,
+            "users",
+            "lance://prod/users",
+            None,
+            None,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -474,7 +518,15 @@ async fn test_register_duplicate_returns_409() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset("prod", AssetFormat::Lance, "users", "lance://prod/users", None, None, HashMap::new())
+        .create_asset(
+            "prod",
+            AssetFormat::Lance,
+            "users",
+            "lance://prod/users",
+            None,
+            None,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -486,7 +538,9 @@ async fn test_register_duplicate_returns_409() {
                 .method("POST")
                 .uri("/lance/v1/table/prod%24users/register")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"location": "s3://bucket/warehouse/prod/users"}"#))
+                .body(Body::from(
+                    r#"{"location": "s3://bucket/warehouse/prod/users"}"#,
+                ))
                 .unwrap(),
         )
         .await
@@ -504,11 +558,27 @@ async fn test_rename_to_existing_name_returns_409() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset("prod", AssetFormat::Lance, "users", "lance://prod/users", None, None, HashMap::new())
+        .create_asset(
+            "prod",
+            AssetFormat::Lance,
+            "users",
+            "lance://prod/users",
+            None,
+            None,
+            HashMap::new(),
+        )
         .await
         .unwrap();
     store
-        .create_asset("prod", AssetFormat::Lance, "customers", "lance://prod/customers", None, None, HashMap::new())
+        .create_asset(
+            "prod",
+            AssetFormat::Lance,
+            "customers",
+            "lance://prod/customers",
+            None,
+            None,
+            HashMap::new(),
+        )
         .await
         .unwrap();
 

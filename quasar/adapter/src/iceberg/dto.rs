@@ -168,7 +168,10 @@ mod tests {
         };
         let json = serde_json::to_string(&resp).unwrap();
         let decoded: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded["namespaces"], serde_json::json!([["prod"], ["staging"]]));
+        assert_eq!(
+            decoded["namespaces"],
+            serde_json::json!([["prod"], ["staging"]])
+        );
         assert_eq!(decoded["nextPageToken"], "100");
 
         let resp_no_token = ListNamespacesResponse {
@@ -177,7 +180,10 @@ mod tests {
         };
         let json_no_token = serde_json::to_string(&resp_no_token).unwrap();
         let decoded_no_token: serde_json::Value = serde_json::from_str(&json_no_token).unwrap();
-        assert!(!decoded_no_token.as_object().unwrap().contains_key("nextPageToken"));
+        assert!(!decoded_no_token
+            .as_object()
+            .unwrap()
+            .contains_key("nextPageToken"));
     }
 
     #[test]
@@ -213,7 +219,10 @@ mod tests {
         };
         let json_no_missing = serde_json::to_string(&resp_no_missing).unwrap();
         let decoded_no_missing: serde_json::Value = serde_json::from_str(&json_no_missing).unwrap();
-        assert!(!decoded_no_missing.as_object().unwrap().contains_key("missing"));
+        assert!(!decoded_no_missing
+            .as_object()
+            .unwrap()
+            .contains_key("missing"));
     }
 
     #[test]
@@ -247,17 +256,18 @@ mod tests {
     #[test]
     fn test_list_tables_response_serde() {
         let resp = ListTablesResponse {
-            identifiers: vec![
-                TableIdentifier {
-                    namespace: vec!["prod".to_string()],
-                    name: "users".to_string(),
-                },
-            ],
+            identifiers: vec![TableIdentifier {
+                namespace: vec!["prod".to_string()],
+                name: "users".to_string(),
+            }],
             next_page_token: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let decoded: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded["identifiers"][0]["namespace"], serde_json::json!(["prod"]));
+        assert_eq!(
+            decoded["identifiers"][0]["namespace"],
+            serde_json::json!(["prod"])
+        );
         assert_eq!(decoded["identifiers"][0]["name"], "users");
     }
 

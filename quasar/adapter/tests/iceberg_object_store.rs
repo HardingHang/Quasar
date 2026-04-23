@@ -95,7 +95,10 @@ async fn create_namespace(store: &PgCatalogStore, name: &str) {
 
 /// Convert an S3 URL to a relative path for InMemory store.
 fn s3_to_relative(location: &str) -> String {
-    location.strip_prefix("s3://warehouse/").unwrap_or(location).to_string()
+    location
+        .strip_prefix("s3://warehouse/")
+        .unwrap_or(location)
+        .to_string()
 }
 
 #[tokio::test]

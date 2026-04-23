@@ -29,14 +29,8 @@ impl PgInstance {
         PG_INSTANCE
             .get_or_init(|| async {
                 let mut postgresql = PostgreSQL::default();
-                postgresql
-                    .setup()
-                    .await
-                    .expect("PostgreSQL setup failed");
-                postgresql
-                    .start()
-                    .await
-                    .expect("PostgreSQL start failed");
+                postgresql.setup().await.expect("PostgreSQL setup failed");
+                postgresql.start().await.expect("PostgreSQL start failed");
                 postgresql
                     .create_database("quasar_test")
                     .await
@@ -315,9 +309,7 @@ async fn test_commit_table_not_found() {
                 .method("POST")
                 .uri("/iceberg/v1/namespaces/prod/tables/nonexistent")
                 .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"requirements": [], "updates": []}"#,
-                ))
+                .body(Body::from(r#"{"requirements": [], "updates": []}"#))
                 .unwrap(),
         )
         .await
@@ -398,7 +390,10 @@ async fn test_commit_updates_persisted() {
     assert_eq!(json["metadata"]["snapshots"][0]["snapshot-id"], 1);
     assert_eq!(json["metadata"]["properties"]["owner"], "team-a");
     assert_eq!(json["metadata"]["refs"]["main"]["snapshot-id"], 1);
-    assert!(json["metadata-location"].as_str().unwrap().contains("00002-"));
+    assert!(json["metadata-location"]
+        .as_str()
+        .unwrap()
+        .contains("00002-"));
 }
 
 #[tokio::test]
@@ -561,7 +556,10 @@ async fn test_concurrent_cas_conflict_end_to_end() {
     let json = body_json(commit2).await;
     assert_eq!(json["error"]["type"], "CommitFailedException");
     assert_eq!(json["error"]["code"], 409);
-    assert!(json["error"]["message"].as_str().unwrap().contains("snapshot-id mismatch"));
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("snapshot-id mismatch"));
 }
 
 /// AssertRefSnapshotId非main ref测试 - 验证自定义branch
@@ -703,7 +701,10 @@ async fn test_assert_ref_snapshot_id_custom_branch_fail() {
     assert_eq!(commit.status(), StatusCode::CONFLICT);
     let json = body_json(commit).await;
     assert_eq!(json["error"]["type"], "CommitFailedException");
-    assert!(json["error"]["message"].as_str().unwrap().contains("snapshot-id mismatch"));
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("snapshot-id mismatch"));
 }
 
 /// AssertTableUuid requirement端到端测试 - UUID不匹配
@@ -771,7 +772,10 @@ async fn test_assert_table_uuid_failure() {
     assert_eq!(commit.status(), StatusCode::CONFLICT);
     let json = body_json(commit).await;
     assert_eq!(json["error"]["type"], "CommitFailedException");
-    assert!(json["error"]["message"].as_str().unwrap().contains("UUID mismatch"));
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("UUID mismatch"));
 }
 
 /// 多次commit版本号递增测试

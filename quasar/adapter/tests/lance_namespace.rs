@@ -29,14 +29,8 @@ impl PgInstance {
         PG_INSTANCE
             .get_or_init(|| async {
                 let mut postgresql = PostgreSQL::default();
-                postgresql
-                    .setup()
-                    .await
-                    .expect("PostgreSQL setup failed");
-                postgresql
-                    .start()
-                    .await
-                    .expect("PostgreSQL start failed");
+                postgresql.setup().await.expect("PostgreSQL setup failed");
+                postgresql.start().await.expect("PostgreSQL start failed");
                 postgresql
                     .create_database("quasar_test")
                     .await
@@ -373,11 +367,7 @@ async fn test_list_namespaces_pagination_with_limit() {
     let store = setup().await;
     for i in 1..=5 {
         store
-            .create_namespace(
-                &format!("ns{}", i),
-                AssetFormat::Lance,
-                HashMap::new(),
-            )
+            .create_namespace(&format!("ns{}", i), AssetFormat::Lance, HashMap::new())
             .await
             .unwrap();
     }

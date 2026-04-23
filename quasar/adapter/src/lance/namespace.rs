@@ -143,7 +143,10 @@ pub async fn list_namespaces(
     };
 
     let response = ListNamespacesResponse {
-        namespaces: namespaces.into_iter().map(NamespaceResponse::from).collect(),
+        namespaces: namespaces
+            .into_iter()
+            .map(NamespaceResponse::from)
+            .collect(),
         next_page_token,
     };
 

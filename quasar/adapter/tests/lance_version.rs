@@ -29,14 +29,8 @@ impl PgInstance {
         PG_INSTANCE
             .get_or_init(|| async {
                 let mut postgresql = PostgreSQL::default();
-                postgresql
-                    .setup()
-                    .await
-                    .expect("PostgreSQL setup failed");
-                postgresql
-                    .start()
-                    .await
-                    .expect("PostgreSQL start failed");
+                postgresql.setup().await.expect("PostgreSQL setup failed");
+                postgresql.start().await.expect("PostgreSQL start failed");
                 postgresql
                     .create_database("quasar_test")
                     .await
@@ -97,7 +91,15 @@ async fn test_create_and_describe_version() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset("prod", AssetFormat::Lance, "users", "lance://prod/users", None, None, HashMap::new())
+        .create_asset(
+            "prod",
+            AssetFormat::Lance,
+            "users",
+            "lance://prod/users",
+            None,
+            None,
+            HashMap::new(),
+        )
         .await
         .unwrap();
     let app = test_app(store);
@@ -152,7 +154,15 @@ async fn test_create_duplicate_returns_409() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset("prod", AssetFormat::Lance, "users", "lance://prod/users", None, None, HashMap::new())
+        .create_asset(
+            "prod",
+            AssetFormat::Lance,
+            "users",
+            "lance://prod/users",
+            None,
+            None,
+            HashMap::new(),
+        )
         .await
         .unwrap();
     let app = test_app(store);
@@ -199,7 +209,15 @@ async fn test_list_versions() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset("prod", AssetFormat::Lance, "users", "lance://prod/users", None, None, HashMap::new())
+        .create_asset(
+            "prod",
+            AssetFormat::Lance,
+            "users",
+            "lance://prod/users",
+            None,
+            None,
+            HashMap::new(),
+        )
         .await
         .unwrap();
     store
@@ -250,7 +268,15 @@ async fn test_describe_not_found() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset("prod", AssetFormat::Lance, "users", "lance://prod/users", None, None, HashMap::new())
+        .create_asset(
+            "prod",
+            AssetFormat::Lance,
+            "users",
+            "lance://prod/users",
+            None,
+            None,
+            HashMap::new(),
+        )
         .await
         .unwrap();
     let app = test_app(store);
@@ -306,7 +332,15 @@ async fn test_describe_current_version_in_describe_table() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset("prod", AssetFormat::Lance, "users", "lance://prod/users", None, None, HashMap::new())
+        .create_asset(
+            "prod",
+            AssetFormat::Lance,
+            "users",
+            "lance://prod/users",
+            None,
+            None,
+            HashMap::new(),
+        )
         .await
         .unwrap();
     store

@@ -81,6 +81,12 @@ pub mod config {
             defaults.insert("warehouse".to_string(), warehouse.clone());
         }
 
-        Ok((StatusCode::OK, Json(ConfigResponse { defaults, overrides })))
+        Ok((
+            StatusCode::OK,
+            Json(ConfigResponse {
+                defaults,
+                overrides,
+            }),
+        ))
     }
 }

@@ -118,7 +118,9 @@ mod tests {
             namespace_id: ns_id,
             name: "users".to_string(),
             location: "s3://bucket/warehouse/prod/users".to_string(),
-            metadata_location: Some("s3://bucket/warehouse/prod/users/metadata/00001.metadata.json".to_string()),
+            metadata_location: Some(
+                "s3://bucket/warehouse/prod/users/metadata/00001.metadata.json".to_string(),
+            ),
             schema_snapshot: None,
             properties: HashMap::new(),
             created_at: now,
