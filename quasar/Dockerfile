@@ -3,7 +3,8 @@ FROM rust:1.94-slim-bookworm AS builder
 WORKDIR /app
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 COPY . .
-RUN cargo build --release -p quasar-server
+ARG FEATURES="lance,iceberg"
+RUN cargo build --release -p quasar-server --no-default-features --features ${FEATURES}
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim

@@ -679,6 +679,77 @@ export QUASAR_DATABASE_URL="postgres://postgres:postgres@localhost:5432/quasar"
   - `readinessProbe`: `GET /readyz`
 - **优雅关闭**：Server 响应 SIGTERM/SIGINT 信号，等待存量请求处理完毕后退出。
 
+### 4.5 条件编译部署（Cargo Feature Flags）
+
+Quasar 支持通过 Cargo feature flags 在**编译时**选择包含的协议适配器，默认启用 `lance` 和 `iceberg`。
+
+| Feature | 默认 | 说明 | 附加依赖 |
+|---------|------|------|---------|
+| `lance` | ✅ | 编译 Lance REST Namespace 适配器 | 无 |
+| `iceberg` | ✅ | 编译 Iceberg REST Catalog 适配器 | `object_store` |
+
+#### 编译命令
+
+```bash
+cd quasar
+
+# 编译全部协议（默认）
+cargo build --release -p quasar-server
+
+# 仅 Lance（不含 Iceberg 和对象存储依赖，binary 更小）
+cargo build --release -p quasar-server --no-default-features --features lance
+
+# 仅 Iceberg（不含 Lance）
+cargo build --release -p quasar-server --no-default-features --features iceberg
+
+# 仅基础设施端点（/healthz、/readyz），无任何协议适配器
+cargo build --release -p quasar-server --no-default-features
+```
+
+#### Docker 构建传递 Feature
+
+使用标准 `Dockerfile`（多阶段构建）时，可通过 `--build-arg` 传递 feature 选择：
+
+```dockerfile
+# Dockerfile
+ARG FEATURES="lance,iceberg"
+RUN cargo build --release -p quasar-server --no-default-features --features ${FEATURES}
+```
+
+构建命令：
+
+```bash
+# 仅 Lance
+docker build -t quasar-server:lance-only --build-arg FEATURES="lance" .
+
+# 仅 Iceberg
+docker build -t quasar-server:iceberg-only --build-arg FEATURES="iceberg" .
+```
+
+使用本地预编译快速构建（`Dockerfile.fast`）时，feature 选择在**本地编译阶段**指定：
+
+```bash
+cd quasar
+
+# 1. 本地编译时指定 feature
+cargo build --release -p quasar-server --no-default-features --features lance
+
+# 2. 复制二进制
+cp target/release/quasar-server quasar-server-bin
+
+# 3. 快速打包（Dockerfile.fast 不涉及 Rust 编译，只 COPY 二进制）
+docker build -f Dockerfile.fast -t quasar-server:lance-only .
+```
+
+#### 场景建议
+
+| 部署场景 | 推荐 Feature | 理由 |
+|---------|-------------|------|
+| **Lance 专用集群** | `lance` | 去掉 Iceberg 和 `object_store` 依赖，binary 更小，无 AWS SDK |
+| **Iceberg 专用集群** | `iceberg` | 去掉 Lance 适配器代码 |
+| **双协议集群** | 默认（`lance,iceberg`） | 同一 binary 同时服务两种协议 |
+| **Gateway/代理模式** | `iceberg` | 只做 Iceberg REST Catalog 转发，无需 Lance |
+
 ---
 
 ## 5. Lance 端到端验证
@@ -1084,6 +1155,11 @@ GET /readyz    # Readiness（检查 DB 连通性）
 ---
 
 ## 9. 修订记录
+
+### V1.3（2026-04-23）
+
+- 新增：4.5 节「条件编译部署（Cargo Feature Flags）」—— feature 定义、编译命令、Docker 构建参数传递、场景建议
+- 更新：修订记录格式统一
 
 ### V1.2（2026-04-22）
 
