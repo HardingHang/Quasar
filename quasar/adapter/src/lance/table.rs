@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::error::{store_error_to_lance_table, LanceError, ProblemDetails};
+use quasar_core::validate_name;
 
 // ── Path Parsing ───────────────────────────────────────────
 
@@ -73,6 +74,8 @@ pub async fn declare_table(
 ) -> Result<impl IntoResponse, ProblemDetails> {
     let instance = format!("/lance/v1/table/{}/declare", id);
     let (namespace, table) = parse_table_id(&id)?;
+    validate_name(namespace).map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+    validate_name(table).map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
 
     let config = super::lance_config();
     let location = if let Some(ref wp) = config.warehouse_path {
@@ -142,6 +145,8 @@ pub async fn register_table(
 ) -> Result<impl IntoResponse, ProblemDetails> {
     let instance = format!("/lance/v1/table/{}/register", id);
     let (namespace, table) = parse_table_id(&id)?;
+    validate_name(namespace).map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+    validate_name(table).map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
 
     let properties = req.options;
 
@@ -216,6 +221,9 @@ pub async fn rename_table(
 ) -> Result<impl IntoResponse, ProblemDetails> {
     let instance = format!("/lance/v1/table/{}/rename", id);
     let (namespace, table) = parse_table_id(&id)?;
+    validate_name(namespace).map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+    validate_name(table).map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+    validate_name(&req.new_name).map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
 
     store
         .rename_asset(namespace, AssetFormat::Lance, table, &req.new_name)

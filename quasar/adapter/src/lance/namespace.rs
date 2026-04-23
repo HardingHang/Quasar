@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::error::{store_error_to_lance, ProblemDetails};
+use quasar_core::validate_name;
 
 // ── Request DTOs ───────────────────────────────────────────
 
@@ -107,6 +108,7 @@ pub async fn create_namespace(
     Json(req): Json<CreateNamespaceRequest>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
     let instance = format!("/lance/v1/namespace/{}/create", id);
+    validate_name(&id).map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
     let ns = store
         .create_namespace(&id, AssetFormat::Lance, req.properties)
         .await

@@ -1,9 +1,9 @@
 use axum::{
-    extract::{Json, Path, Query, State},
+    extract::{Extension, Json, Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
-use quasar_core::{AssetFormat, CatalogStore, StoreError};
+use quasar_core::{AssetFormat, CatalogStore, MetricsState, StoreError};
 use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -15,6 +15,7 @@ use super::dto::{
 use super::error::{store_error_to_iceberg_table, IcebergError};
 use super::iceberg_config;
 use super::table_metadata::TableMetadata;
+use quasar_core::validate_name;
 
 // ── Object Store Helpers ───────────────────────────────────
 
@@ -189,6 +190,9 @@ pub async fn create_table(
     Path(ns): Path<String>,
     Json(req): Json<CreateTableRequest>,
 ) -> Result<impl IntoResponse, IcebergError> {
+    validate_name(&ns).map_err(store_error_to_iceberg_table)?;
+    validate_name(&req.name).map_err(store_error_to_iceberg_table)?;
+
     let location = req.location.unwrap_or_else(|| {
         let config = iceberg_config();
         if let Some(ref wp) = config.warehouse_path {
@@ -304,6 +308,9 @@ pub async fn rename_table(
     State(store): State<Arc<dyn CatalogStore>>,
     Json(req): Json<RenameTableRequest>,
 ) -> Result<impl IntoResponse, IcebergError> {
+    validate_name(&req.source.name).map_err(store_error_to_iceberg_table)?;
+    validate_name(&req.destination.name).map_err(store_error_to_iceberg_table)?;
+
     let src_ns = req.source.namespace.first().ok_or_else(|| {
         IcebergError::BadRequestException {
             message: "source namespace must not be empty".to_string(),
@@ -333,9 +340,11 @@ pub async fn rename_table(
 /// Commit table updates (CAS).
 pub async fn commit_table(
     State(store): State<Arc<dyn CatalogStore>>,
+    metrics: Option<Extension<MetricsState>>,
     Path((ns, table)): Path<(String, String)>,
     Json(req): Json<CommitTableRequest>,
 ) -> Result<impl IntoResponse, IcebergError> {
+    let metrics = metrics.map(|e| e.0);
     // 1. Load the current asset
     let asset = store
         .get_asset(&ns, AssetFormat::Iceberg, &table)
@@ -393,12 +402,21 @@ pub async fn commit_table(
         )
         .await
         .map_err(|e| match e {
-            StoreError::Conflict(msg) => IcebergError::CommitFailedException { message: msg },
+            StoreError::Conflict(msg) => {
+                if let Some(ref m) = metrics {
+                    m.registry.record_iceberg_commit_conflict();
+                }
+                IcebergError::CommitFailedException { message: msg }
+            }
             StoreError::NotFound(msg) => IcebergError::NoSuchTableException { message: msg },
             other => store_error_to_iceberg_table(other),
         })?;
 
-    // 8. Return updated table
+    if let Some(ref m) = metrics {
+        m.registry.record_iceberg_commit_success();
+    }
+
+    // 9. Return updated table
     Ok((
         StatusCode::OK,
         Json(LoadTableResponse {
