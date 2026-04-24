@@ -372,7 +372,8 @@ pub async fn commit_table(
 
     // 2. Load current metadata from object store (or fallback to schema_snapshot)
     let current_metadata_json =
-        read_metadata_from_store(&metadata_location, asset.schema_snapshot.clone(), &config).await?;
+        read_metadata_from_store(&metadata_location, asset.schema_snapshot.clone(), &config)
+            .await?;
     let mut table_metadata = serde_json::from_value::<TableMetadata>(current_metadata_json)
         .map_err(|e| IcebergError::InternalServerError {
             message: format!("Failed to parse table metadata: {}", e),

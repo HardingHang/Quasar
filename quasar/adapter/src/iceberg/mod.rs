@@ -51,7 +51,7 @@ pub fn routes() -> Router<Arc<dyn CatalogStore>> {
 }
 
 pub mod config {
-    use axum::{Extension, http::StatusCode, response::IntoResponse, Json};
+    use axum::{http::StatusCode, response::IntoResponse, Extension, Json};
     use serde::Serialize;
     use std::collections::HashMap;
 

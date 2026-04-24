@@ -65,9 +65,8 @@ fn row_to_namespace(row: &Row) -> Result<Namespace, StoreError> {
     };
 
     let props: serde_json::Value = try_get!(row, "properties");
-    let properties: HashMap<String, String> =
-        serde_json::from_value(props)
-            .map_err(|e| StoreError::Internal(format!("properties JSON: {}", e)))?;
+    let properties: HashMap<String, String> = serde_json::from_value(props)
+        .map_err(|e| StoreError::Internal(format!("properties JSON: {}", e)))?;
 
     Ok(Namespace {
         id: try_get!(row, "id"),
@@ -80,9 +79,8 @@ fn row_to_namespace(row: &Row) -> Result<Namespace, StoreError> {
 
 fn row_to_asset(row: &Row) -> Result<Asset, StoreError> {
     let props: serde_json::Value = try_get!(row, "properties");
-    let properties: HashMap<String, String> =
-        serde_json::from_value(props)
-            .map_err(|e| StoreError::Internal(format!("properties JSON: {}", e)))?;
+    let properties: HashMap<String, String> = serde_json::from_value(props)
+        .map_err(|e| StoreError::Internal(format!("properties JSON: {}", e)))?;
 
     let schema_snapshot: Option<serde_json::Value> = row.try_get("schema_snapshot").ok();
 

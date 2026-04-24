@@ -79,9 +79,7 @@ fn test_app_with_store(
         object_store: Some(object_store),
         s3_bucket: Some("warehouse".to_string()),
     };
-    iceberg::routes()
-        .layer(Extension(config))
-        .with_state(store)
+    iceberg::routes().layer(Extension(config)).with_state(store)
 }
 
 async fn body_json(response: axum::response::Response) -> Value {
