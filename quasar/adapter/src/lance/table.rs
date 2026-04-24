@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Json, Path, State},
+    extract::{Extension, Json, Path, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::error::{store_error_to_lance_table, LanceError, ProblemDetails};
+use super::LanceConfig;
 use quasar_core::validate_name;
 
 // ── Path Parsing ───────────────────────────────────────────
@@ -72,6 +73,7 @@ pub struct TableExistsResponse {
 /// POST /lance/v1/table/{id}/declare
 pub async fn declare_table(
     State(store): State<Arc<dyn CatalogStore>>,
+    Extension(config): Extension<LanceConfig>,
     Path(id): Path<String>,
     Json(req): Json<DeclareTableRequest>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
@@ -82,7 +84,6 @@ pub async fn declare_table(
     validate_name(table)
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
 
-    let config = super::lance_config();
     let location = if let Some(ref wp) = config.warehouse_path {
         format!("{}/{}/{}/", wp.trim_end_matches('/'), namespace, table)
     } else {

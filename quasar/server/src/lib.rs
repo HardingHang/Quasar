@@ -41,12 +41,16 @@ pub fn create_app_with_config(pool: Pool, #[allow(unused_variables)] config: App
 
     #[cfg(feature = "lance")]
     {
-        router = router.merge(quasar_adapter::lance::routes(config.lance));
+        router = router
+            .merge(quasar_adapter::lance::routes())
+            .layer(Extension(config.lance));
     }
 
     #[cfg(feature = "iceberg")]
     {
-        router = router.merge(quasar_adapter::iceberg::routes(config.iceberg));
+        router = router
+            .merge(quasar_adapter::iceberg::routes())
+            .layer(Extension(config.iceberg));
     }
 
     router

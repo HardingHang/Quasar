@@ -11,6 +11,7 @@ use axum::{
 use quasar_core::CatalogStore;
 use std::sync::Arc;
 
+/// Configuration for Iceberg REST Catalog endpoints.
 #[derive(Clone, Default)]
 pub struct IcebergConfig {
     pub warehouse_path: Option<String>,
@@ -18,18 +19,9 @@ pub struct IcebergConfig {
     pub s3_bucket: Option<String>,
 }
 
-static ICEBERG_CONFIG: std::sync::Mutex<Option<IcebergConfig>> = std::sync::Mutex::new(None);
-
-pub(crate) fn iceberg_config() -> IcebergConfig {
-    ICEBERG_CONFIG
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-        .unwrap_or_default()
-}
-
-pub fn routes(config: IcebergConfig) -> Router<Arc<dyn CatalogStore>> {
-    *ICEBERG_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = Some(config);
+/// Create Iceberg REST Catalog routes mounted at `/iceberg/v1/...`.
+/// Configuration is passed via Extension layer.
+pub fn routes() -> Router<Arc<dyn CatalogStore>> {
     Router::new()
         .route("/iceberg/v1/config", get(config::get_config))
         .route(
@@ -59,12 +51,12 @@ pub fn routes(config: IcebergConfig) -> Router<Arc<dyn CatalogStore>> {
 }
 
 pub mod config {
-    use axum::{http::StatusCode, response::IntoResponse, Json};
+    use axum::{Extension, http::StatusCode, response::IntoResponse, Json};
     use serde::Serialize;
     use std::collections::HashMap;
 
     use super::error::IcebergError;
-    use super::iceberg_config;
+    use super::IcebergConfig;
 
     #[derive(Serialize)]
     pub struct ConfigResponse {
@@ -72,8 +64,9 @@ pub mod config {
         pub overrides: HashMap<String, String>,
     }
 
-    pub async fn get_config() -> Result<impl IntoResponse, IcebergError> {
-        let config = iceberg_config();
+    pub async fn get_config(
+        Extension(config): Extension<IcebergConfig>,
+    ) -> Result<impl IntoResponse, IcebergError> {
         let mut defaults = HashMap::new();
         let overrides = HashMap::new();
 

@@ -21,18 +21,9 @@ pub struct LanceConfig {
     pub storage_options: HashMap<String, String>,
 }
 
-static LANCE_CONFIG: std::sync::OnceLock<LanceConfig> = std::sync::OnceLock::new();
-
-pub(crate) fn lance_config() -> &'static LanceConfig {
-    LANCE_CONFIG.get().unwrap_or_else(|| {
-        static DEFAULT: std::sync::OnceLock<LanceConfig> = std::sync::OnceLock::new();
-        DEFAULT.get_or_init(LanceConfig::default)
-    })
-}
-
 /// Create Lance REST Namespace routes mounted at `/lance/v1/...`.
-pub fn routes(config: LanceConfig) -> Router<Arc<dyn CatalogStore>> {
-    let _ = LANCE_CONFIG.set(config);
+/// Configuration is passed via Extension layer.
+pub fn routes() -> Router<Arc<dyn CatalogStore>> {
     Router::new()
         // Namespace routes
         .route(

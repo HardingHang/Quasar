@@ -65,8 +65,11 @@ async fn setup() -> PgCatalogStore {
 }
 
 fn test_app(store: PgCatalogStore) -> axum::Router {
+    use axum::Extension;
     let store: std::sync::Arc<dyn quasar_core::CatalogStore> = std::sync::Arc::new(store);
-    iceberg::routes(iceberg::IcebergConfig::default()).with_state(store)
+    iceberg::routes()
+        .layer(Extension(iceberg::IcebergConfig::default()))
+        .with_state(store)
 }
 
 async fn body_json(response: axum::response::Response) -> Value {

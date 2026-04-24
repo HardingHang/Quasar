@@ -13,8 +13,8 @@ use super::dto::{
     RenameTableRequest, TableIdentifier,
 };
 use super::error::{store_error_to_iceberg_table, IcebergError};
-use super::iceberg_config;
 use super::table_metadata::TableMetadata;
+use super::IcebergConfig;
 use quasar_core::validate_name;
 
 // ── Object Store Helpers ───────────────────────────────────
@@ -31,8 +31,8 @@ fn s3_url_to_object_path(location: &str, bucket: &str) -> Option<object_store::p
 async fn write_metadata_to_store(
     location: &str,
     content: &serde_json::Value,
+    config: &IcebergConfig,
 ) -> Result<(), IcebergError> {
-    let config = iceberg_config();
     if let (Some(ref store), Some(ref bucket)) = (&config.object_store, &config.s3_bucket) {
         let path = s3_url_to_object_path(location, bucket).ok_or_else(|| {
             IcebergError::InternalServerError {
@@ -54,8 +54,8 @@ async fn write_metadata_to_store(
 async fn read_metadata_from_store(
     location: &str,
     fallback: Option<serde_json::Value>,
+    config: &IcebergConfig,
 ) -> Result<serde_json::Value, IcebergError> {
-    let config = iceberg_config();
     if let (Some(ref store), Some(ref bucket)) = (&config.object_store, &config.s3_bucket) {
         let path = s3_url_to_object_path(location, bucket).ok_or_else(|| {
             IcebergError::InternalServerError {
@@ -188,6 +188,7 @@ pub async fn list_tables(
 /// POST /iceberg/v1/namespaces/{ns}/tables
 pub async fn create_table(
     State(store): State<Arc<dyn CatalogStore>>,
+    Extension(config): Extension<IcebergConfig>,
     Path(ns): Path<String>,
     Json(req): Json<CreateTableRequest>,
 ) -> Result<impl IntoResponse, IcebergError> {
@@ -195,7 +196,6 @@ pub async fn create_table(
     validate_name(&req.name).map_err(store_error_to_iceberg_table)?;
 
     let location = req.location.unwrap_or_else(|| {
-        let config = iceberg_config();
         if let Some(ref wp) = config.warehouse_path {
             format!("{}/{}/{}", wp.trim_end_matches('/'), ns, req.name)
         } else {
@@ -214,7 +214,7 @@ pub async fn create_table(
     let metadata_json = metadata.clone();
 
     // Write initial metadata.json to object store
-    write_metadata_to_store(&metadata_location, &metadata_json).await?;
+    write_metadata_to_store(&metadata_location, &metadata_json, &config).await?;
 
     let _asset = store
         .create_asset(
@@ -248,6 +248,7 @@ pub async fn create_table(
 /// GET /iceberg/v1/namespaces/{ns}/tables/{table}
 pub async fn load_table(
     State(store): State<Arc<dyn CatalogStore>>,
+    Extension(config): Extension<IcebergConfig>,
     Path((ns, table)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, IcebergError> {
     let asset = store
@@ -256,7 +257,7 @@ pub async fn load_table(
         .map_err(store_error_to_iceberg_table)?;
 
     let metadata = if let Some(ref ml) = asset.metadata_location {
-        read_metadata_from_store(ml, asset.schema_snapshot.clone()).await?
+        read_metadata_from_store(ml, asset.schema_snapshot.clone(), &config).await?
     } else {
         asset
             .schema_snapshot
@@ -350,6 +351,7 @@ pub async fn rename_table(
 /// Commit table updates (CAS).
 pub async fn commit_table(
     State(store): State<Arc<dyn CatalogStore>>,
+    Extension(config): Extension<IcebergConfig>,
     metrics: Option<Extension<MetricsState>>,
     Path((ns, table)): Path<(String, String)>,
     Json(req): Json<CommitTableRequest>,
@@ -370,7 +372,7 @@ pub async fn commit_table(
 
     // 2. Load current metadata from object store (or fallback to schema_snapshot)
     let current_metadata_json =
-        read_metadata_from_store(&metadata_location, asset.schema_snapshot.clone()).await?;
+        read_metadata_from_store(&metadata_location, asset.schema_snapshot.clone(), &config).await?;
     let mut table_metadata = serde_json::from_value::<TableMetadata>(current_metadata_json)
         .map_err(|e| IcebergError::InternalServerError {
             message: format!("Failed to parse table metadata: {}", e),
@@ -394,7 +396,7 @@ pub async fn commit_table(
         })?;
 
     // 7. Write new metadata.json to object store
-    write_metadata_to_store(&new_metadata_location, &new_schema_snapshot).await?;
+    write_metadata_to_store(&new_metadata_location, &new_schema_snapshot, &config).await?;
 
     // 8. CAS update via storage layer
     store

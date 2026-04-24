@@ -72,13 +72,16 @@ fn test_app_with_store(
     store: PgCatalogStore,
     object_store: Arc<dyn object_store::ObjectStore>,
 ) -> axum::Router {
+    use axum::Extension;
     let store: Arc<dyn CatalogStore> = Arc::new(store);
     let config = iceberg::IcebergConfig {
         warehouse_path: Some("s3://warehouse/".to_string()),
         object_store: Some(object_store),
         s3_bucket: Some("warehouse".to_string()),
     };
-    iceberg::routes(config).with_state(store)
+    iceberg::routes()
+        .layer(Extension(config))
+        .with_state(store)
 }
 
 async fn body_json(response: axum::response::Response) -> Value {
