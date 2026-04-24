@@ -21,12 +21,15 @@ impl PgCatalogStore {
         Self { pool }
     }
 
-    pub async fn migrate(&self) -> Result<(), StoreError> {
-        let mut client = self
-            .pool
+    async fn get_client(&self) -> Result<deadpool_postgres::Client, StoreError> {
+        self.pool
             .get()
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(|e| StoreError::Internal(format!("connection pool error: {}", e)))
+    }
+
+    pub async fn migrate(&self) -> Result<(), StoreError> {
+        let mut client = self.get_client().await?;
 
         let report = embedded::migrations::runner()
             .run_async(&mut **client)
@@ -41,10 +44,15 @@ impl PgCatalogStore {
     }
 }
 
+macro_rules! try_get {
+    ($row:expr, $col:expr) => {
+        $row.try_get($col)
+            .map_err(|e| StoreError::Internal(format!("column '{}': {}", $col, e)))?
+    };
+}
+
 fn row_to_namespace(row: &Row) -> Result<Namespace, StoreError> {
-    let format_str: String = row
-        .try_get("format")
-        .map_err(|e| StoreError::Internal(e.to_string()))?;
+    let format_str: String = try_get!(row, "format");
     let format = match format_str.as_str() {
         "iceberg" => AssetFormat::Iceberg,
         "lance" => AssetFormat::Lance,
@@ -56,83 +64,54 @@ fn row_to_namespace(row: &Row) -> Result<Namespace, StoreError> {
         }
     };
 
-    let props: serde_json::Value = row
-        .try_get("properties")
-        .map_err(|e| StoreError::Internal(e.to_string()))?;
+    let props: serde_json::Value = try_get!(row, "properties");
     let properties: HashMap<String, String> =
-        serde_json::from_value(props).map_err(|e| StoreError::Internal(e.to_string()))?;
+        serde_json::from_value(props)
+            .map_err(|e| StoreError::Internal(format!("properties JSON: {}", e)))?;
 
     Ok(Namespace {
-        id: row
-            .try_get("id")
-            .map_err(|e| StoreError::Internal(e.to_string()))?,
-        name: row
-            .try_get("name")
-            .map_err(|e| StoreError::Internal(e.to_string()))?,
+        id: try_get!(row, "id"),
+        name: try_get!(row, "name"),
         format,
         properties,
-        created_at: row
-            .try_get("created_at")
-            .map_err(|e| StoreError::Internal(e.to_string()))?,
+        created_at: try_get!(row, "created_at"),
     })
 }
 
 fn row_to_asset(row: &Row) -> Result<Asset, StoreError> {
-    let props: serde_json::Value = row
-        .try_get("properties")
-        .map_err(|e| StoreError::Internal(e.to_string()))?;
+    let props: serde_json::Value = try_get!(row, "properties");
     let properties: HashMap<String, String> =
-        serde_json::from_value(props).map_err(|e| StoreError::Internal(e.to_string()))?;
+        serde_json::from_value(props)
+            .map_err(|e| StoreError::Internal(format!("properties JSON: {}", e)))?;
 
     let schema_snapshot: Option<serde_json::Value> = row.try_get("schema_snapshot").ok();
 
     Ok(Asset {
-        id: row
-            .try_get("id")
-            .map_err(|e| StoreError::Internal(e.to_string()))?,
-        namespace_id: row
-            .try_get("namespace_id")
-            .map_err(|e| StoreError::Internal(e.to_string()))?,
-        name: row
-            .try_get("name")
-            .map_err(|e| StoreError::Internal(e.to_string()))?,
-        location: row
-            .try_get("location")
-            .map_err(|e| StoreError::Internal(e.to_string()))?,
+        id: try_get!(row, "id"),
+        namespace_id: try_get!(row, "namespace_id"),
+        name: try_get!(row, "name"),
+        location: try_get!(row, "location"),
         metadata_location: row.try_get("metadata_location").ok(),
         schema_snapshot,
         properties,
-        created_at: row
-            .try_get("created_at")
-            .map_err(|e| StoreError::Internal(e.to_string()))?,
+        created_at: try_get!(row, "created_at"),
     })
 }
 
 fn row_to_version(row: &Row) -> Result<AssetVersion, StoreError> {
     Ok(AssetVersion {
-        id: row
-            .try_get("id")
-            .map_err(|e| StoreError::Internal(e.to_string()))?,
-        asset_id: row
-            .try_get("asset_id")
-            .map_err(|e| StoreError::Internal(e.to_string()))?,
-        version_id: row
-            .try_get("version_id")
-            .map_err(|e| StoreError::Internal(e.to_string()))?,
-        metadata_location: row
-            .try_get("metadata_location")
-            .map_err(|e| StoreError::Internal(e.to_string()))?,
-        previous_version_id: row
-            .try_get("previous_version_id")
-            .map_err(|e| StoreError::Internal(e.to_string()))?,
-        timestamp: row
-            .try_get("timestamp")
-            .map_err(|e| StoreError::Internal(e.to_string()))?,
+        id: try_get!(row, "id"),
+        asset_id: try_get!(row, "asset_id"),
+        version_id: try_get!(row, "version_id"),
+        metadata_location: try_get!(row, "metadata_location"),
+        previous_version_id: try_get!(row, "previous_version_id"),
+        timestamp: try_get!(row, "timestamp"),
     })
 }
 
 fn props_to_json(props: &HashMap<String, String>) -> Result<serde_json::Value, StoreError> {
-    serde_json::to_value(props).map_err(|e| StoreError::Internal(e.to_string()))
+    serde_json::to_value(props)
+        .map_err(|e| StoreError::Internal(format!("properties serialization: {}", e)))
 }
 
 #[async_trait]
@@ -143,11 +122,7 @@ impl CatalogStore for PgCatalogStore {
         format: AssetFormat,
         properties: HashMap<String, String>,
     ) -> Result<Namespace, StoreError> {
-        let client = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        let client = self.get_client().await?;
 
         let props_json = props_to_json(&properties)?;
         let row = client
@@ -172,11 +147,7 @@ impl CatalogStore for PgCatalogStore {
         offset: i64,
         limit: i32,
     ) -> Result<Vec<Namespace>, StoreError> {
-        let client = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        let client = self.get_client().await?;
 
         let rows = client
             .query(
@@ -194,11 +165,7 @@ impl CatalogStore for PgCatalogStore {
         name: &str,
         format: AssetFormat,
     ) -> Result<Namespace, StoreError> {
-        let client = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        let client = self.get_client().await?;
 
         let row = client
             .query_opt(
@@ -215,11 +182,7 @@ impl CatalogStore for PgCatalogStore {
     }
 
     async fn namespace_exists(&self, name: &str, format: AssetFormat) -> Result<bool, StoreError> {
-        let client = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        let client = self.get_client().await?;
 
         let row = client
             .query_one(
@@ -233,11 +196,7 @@ impl CatalogStore for PgCatalogStore {
     }
 
     async fn drop_namespace(&self, name: &str, format: AssetFormat) -> Result<(), StoreError> {
-        let client = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        let client = self.get_client().await?;
 
         let deleted = client
             .execute(
@@ -261,11 +220,7 @@ impl CatalogStore for PgCatalogStore {
         removals: &[String],
         updates: &HashMap<String, String>,
     ) -> Result<Namespace, StoreError> {
-        let client = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        let client = self.get_client().await?;
 
         let props_json = props_to_json(updates)?;
 
@@ -297,11 +252,7 @@ impl CatalogStore for PgCatalogStore {
         schema_snapshot: Option<serde_json::Value>,
         properties: HashMap<String, String>,
     ) -> Result<Asset, StoreError> {
-        let client = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        let client = self.get_client().await?;
 
         let ns = self.get_namespace(namespace_name, format).await?;
         let props_json = props_to_json(&properties)?;
@@ -330,11 +281,7 @@ impl CatalogStore for PgCatalogStore {
         namespace_name: &str,
         format: AssetFormat,
     ) -> Result<Vec<Asset>, StoreError> {
-        let client = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        let client = self.get_client().await?;
 
         let ns = self.get_namespace(namespace_name, format).await?;
 
@@ -355,11 +302,7 @@ impl CatalogStore for PgCatalogStore {
         format: AssetFormat,
         name: &str,
     ) -> Result<Asset, StoreError> {
-        let client = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        let client = self.get_client().await?;
 
         let ns = self.get_namespace(namespace_name, format).await?;
 
@@ -386,11 +329,7 @@ impl CatalogStore for PgCatalogStore {
         format: AssetFormat,
         name: &str,
     ) -> Result<bool, StoreError> {
-        let client = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        let client = self.get_client().await?;
 
         let ns = self.get_namespace(namespace_name, format).await?;
 
@@ -411,11 +350,7 @@ impl CatalogStore for PgCatalogStore {
         format: AssetFormat,
         name: &str,
     ) -> Result<(), StoreError> {
-        let client = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        let client = self.get_client().await?;
 
         let ns = self.get_namespace(namespace_name, format).await?;
 
@@ -444,11 +379,7 @@ impl CatalogStore for PgCatalogStore {
         name: &str,
         new_name: &str,
     ) -> Result<(), StoreError> {
-        let client = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        let client = self.get_client().await?;
 
         let ns = self.get_namespace(namespace_name, format).await?;
 
@@ -485,27 +416,22 @@ impl CatalogStore for PgCatalogStore {
         asset_name: &str,
         update: AssetCommitUpdate,
     ) -> Result<AssetVersion, StoreError> {
-        let mut client = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        let mut client = self.get_client().await?;
 
         let asset = self.get_asset(namespace_name, format, asset_name).await?;
 
         let tx = client
             .transaction()
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(|e| StoreError::Internal(format!("transaction start: {}", e)))?;
 
         let current_row = tx
             .query_opt(
                 "SELECT version_id FROM asset_versions WHERE asset_id = $1 ORDER BY version_id DESC LIMIT 1",
-                &[&asset.id,
-                ],
+                &[&asset.id],
             )
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(|e| StoreError::Internal(format!("version query: {}", e)))?;
 
         let current_version_id = current_row.map(|r: Row| r.get::<_, i64>(0));
 
@@ -536,7 +462,7 @@ impl CatalogStore for PgCatalogStore {
 
         tx.commit()
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(|e| StoreError::Internal(format!("transaction commit: {}", e)))?;
 
         row_to_version(&row)
     }
@@ -548,11 +474,7 @@ impl CatalogStore for PgCatalogStore {
         asset_name: &str,
         version_id: i64,
     ) -> Result<AssetVersion, StoreError> {
-        let client = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        let client = self.get_client().await?;
 
         let asset = self.get_asset(namespace_name, format, asset_name).await?;
 
@@ -579,11 +501,7 @@ impl CatalogStore for PgCatalogStore {
         format: AssetFormat,
         asset_name: &str,
     ) -> Result<AssetVersion, StoreError> {
-        let client = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        let client = self.get_client().await?;
 
         let asset = self.get_asset(namespace_name, format, asset_name).await?;
 
@@ -610,11 +528,7 @@ impl CatalogStore for PgCatalogStore {
         format: AssetFormat,
         asset_name: &str,
     ) -> Result<Vec<AssetVersion>, StoreError> {
-        let client = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        let client = self.get_client().await?;
 
         let asset = self.get_asset(namespace_name, format, asset_name).await?;
 
@@ -637,11 +551,7 @@ impl CatalogStore for PgCatalogStore {
         version_id: i64,
         metadata_location: String,
     ) -> Result<AssetVersion, StoreError> {
-        let client = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        let client = self.get_client().await?;
 
         let asset = self.get_asset(namespace_name, format, asset_name).await?;
 
@@ -672,11 +582,7 @@ impl CatalogStore for PgCatalogStore {
         new_metadata_location: &str,
         new_schema_snapshot: Option<serde_json::Value>,
     ) -> Result<(), StoreError> {
-        let client = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        let client = self.get_client().await?;
 
         let updated = client
             .execute(
