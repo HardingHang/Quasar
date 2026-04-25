@@ -275,7 +275,10 @@ impl CatalogStore for PgCatalogStore {
 
         match row {
             Some(r) => row_to_asset(&r),
-            None => Err(StoreError::NotFound(format!("namespace '{}'", namespace_name))),
+            None => Err(StoreError::NotFound(format!(
+                "namespace '{}'",
+                namespace_name
+            ))),
         }
     }
 
@@ -348,7 +351,10 @@ impl CatalogStore for PgCatalogStore {
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
         if ns_row.is_none() {
-            return Err(StoreError::NotFound(format!("namespace '{}'", namespace_name)));
+            return Err(StoreError::NotFound(format!(
+                "namespace '{}'",
+                namespace_name
+            )));
         }
 
         // Then check if asset exists
@@ -620,7 +626,13 @@ impl CatalogStore for PgCatalogStore {
                  JOIN namespaces n ON a.namespace_id = n.id
                  WHERE n.name = $1 AND n.format = $2 AND a.name = $3
                  RETURNING *",
-                &[&namespace_name, &format.as_str(), &asset_name, &version_id, &metadata_location],
+                &[
+                    &namespace_name,
+                    &format.as_str(),
+                    &asset_name,
+                    &version_id,
+                    &metadata_location,
+                ],
             )
             .await
             .map_err(|e| match e.code() {

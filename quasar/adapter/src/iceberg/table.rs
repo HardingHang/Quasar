@@ -133,7 +133,11 @@ fn next_metadata_location(current: &str) -> String {
     }
     // Fallback: append timestamp-based sequence if format is unrecognized
     let timestamp = chrono::Utc::now().timestamp_millis();
-    format!("{}-{}.metadata.json", current.trim_end_matches(".metadata.json"), timestamp)
+    format!(
+        "{}-{}.metadata.json",
+        current.trim_end_matches(".metadata.json"),
+        timestamp
+    )
 }
 
 fn build_initial_metadata(

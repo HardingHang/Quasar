@@ -56,7 +56,10 @@ impl MetricsRegistry {
             }
         }
         // Key doesn't exist, need write lock to insert
-        let mut map = self.http_requests.write().unwrap_or_else(|e| e.into_inner());
+        let mut map = self
+            .http_requests
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         // Double-check in case another thread inserted while we waited
         map.entry(key).or_default().inc();
     }

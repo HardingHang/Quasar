@@ -184,7 +184,11 @@ pub async fn drop_namespace(
         return Err(ProblemDetails {
             error: "NamespaceNotEmpty".to_string(),
             code: 409,
-            detail: format!("Namespace '{}' is not empty (contains {} tables)", id, assets.len()),
+            detail: format!(
+                "Namespace '{}' is not empty (contains {} tables)",
+                id,
+                assets.len()
+            ),
             instance,
         });
     }
