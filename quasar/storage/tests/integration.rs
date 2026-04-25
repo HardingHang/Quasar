@@ -2,7 +2,7 @@
 
 use deadpool_postgres::{Pool, Runtime};
 use postgresql_embedded::PostgreSQL;
-use quasar_storage::{AssetCommitUpdate, AssetFormat, CatalogStore, PgCatalogStore, StoreError};
+use quasar_storage::{AssetFormat, CatalogStore, PgCatalogStore, StoreError};
 use serial_test::serial;
 use std::collections::HashMap;
 use tokio::sync::OnceCell;
@@ -242,14 +242,13 @@ async fn test_version_commit_and_load() {
         .unwrap();
 
     let v1 = store
-        .commit_version(
+        .create_version(
             "ns1",
             AssetFormat::Lance,
             "tbl",
-            AssetCommitUpdate {
-                metadata_location: "s3://bucket/v1".to_string(),
-                previous_version_id: None,
-            },
+            1,
+            "s3://bucket/v1".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -257,14 +256,13 @@ async fn test_version_commit_and_load() {
     assert_eq!(v1.metadata_location, "s3://bucket/v1");
 
     let v2 = store
-        .commit_version(
+        .create_version(
             "ns1",
             AssetFormat::Lance,
             "tbl",
-            AssetCommitUpdate {
-                metadata_location: "s3://bucket/v2".to_string(),
-                previous_version_id: Some(1),
-            },
+            2,
+            "s3://bucket/v2".to_string(),
+            Some(1),
         )
         .await
         .unwrap();
@@ -316,27 +314,25 @@ async fn test_version_conflict() {
         .unwrap();
 
     store
-        .commit_version(
+        .create_version(
             "ns1",
             AssetFormat::Lance,
             "tbl",
-            AssetCommitUpdate {
-                metadata_location: "s3://bucket/v1".to_string(),
-                previous_version_id: None,
-            },
+            1,
+            "s3://bucket/v1".to_string(),
+            None,
         )
         .await
         .unwrap();
 
     let err = store
-        .commit_version(
+        .create_version(
             "ns1",
             AssetFormat::Lance,
             "tbl",
-            AssetCommitUpdate {
-                metadata_location: "s3://bucket/v2".to_string(),
-                previous_version_id: Some(999),
-            },
+            2,
+            "s3://bucket/v2".to_string(),
+            Some(999),
         )
         .await
         .unwrap_err();

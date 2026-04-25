@@ -440,9 +440,10 @@ async fn test_commit_cas_conflict_simulated() {
 
     // First CAS commit succeeds: expected 00001 matches DB
     store
-        .commit_iceberg_table(
+        .cas_update_metadata_location(
             "prod",
             "users",
+            AssetFormat::Iceberg,
             "s3://bucket/warehouse/prod/users/metadata/00001-uuid.metadata.json",
             "s3://bucket/warehouse/prod/users/metadata/00002-uuid.metadata.json",
             None,
@@ -452,9 +453,10 @@ async fn test_commit_cas_conflict_simulated() {
 
     // Second CAS commit fails: expected 00001 no longer matches DB (now 00002)
     let err = store
-        .commit_iceberg_table(
+        .cas_update_metadata_location(
             "prod",
             "users",
+            AssetFormat::Iceberg,
             "s3://bucket/warehouse/prod/users/metadata/00001-uuid.metadata.json",
             "s3://bucket/warehouse/prod/users/metadata/00003-uuid.metadata.json",
             None,

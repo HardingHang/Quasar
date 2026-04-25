@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 
 use crate::error::StoreError;
-use crate::models::{Asset, AssetCommitUpdate, AssetFormat, AssetVersion, Namespace};
+use crate::models::{Asset, AssetFormat, AssetVersion, Namespace};
 
 #[async_trait]
 pub trait CatalogStore: Send + Sync {
@@ -91,14 +91,6 @@ pub trait CatalogStore: Send + Sync {
         new_name: &str,
     ) -> Result<(), StoreError>;
 
-    async fn commit_version(
-        &self,
-        namespace_name: &str,
-        format: AssetFormat,
-        asset_name: &str,
-        update: AssetCommitUpdate,
-    ) -> Result<AssetVersion, StoreError>;
-
     async fn load_version(
         &self,
         namespace_name: &str,
@@ -121,6 +113,9 @@ pub trait CatalogStore: Send + Sync {
         asset_name: &str,
     ) -> Result<Vec<AssetVersion>, StoreError>;
 
+    /// Create a version record.
+    /// If `previous_version_id` is Some, performs CAS check against the current
+    /// latest version before inserting. Returns Conflict if the check fails.
     async fn create_version(
         &self,
         namespace_name: &str,
@@ -128,14 +123,18 @@ pub trait CatalogStore: Send + Sync {
         asset_name: &str,
         version_id: i64,
         metadata_location: String,
+        previous_version_id: Option<i64>,
     ) -> Result<AssetVersion, StoreError>;
 
-    async fn commit_iceberg_table(
+    /// Atomically update metadata_location if it matches the expected value.
+    /// Returns Conflict if the current location does not match.
+    async fn cas_update_metadata_location(
         &self,
         namespace_name: &str,
         asset_name: &str,
-        expected_metadata_location: &str,
-        new_metadata_location: &str,
+        format: AssetFormat,
+        expected_location: &str,
+        new_location: &str,
         new_schema_snapshot: Option<serde_json::Value>,
     ) -> Result<(), StoreError>;
 }

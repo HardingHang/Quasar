@@ -230,6 +230,7 @@ async fn test_list_versions() {
             "users",
             1,
             "s3://bucket/v1.manifest".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -240,6 +241,7 @@ async fn test_list_versions() {
             "users",
             2,
             "s3://bucket/v2.manifest".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -353,6 +355,7 @@ async fn test_describe_current_version_in_describe_table() {
             "users",
             1,
             "s3://bucket/v1.manifest".to_string(),
+            None,
         )
         .await
         .unwrap();

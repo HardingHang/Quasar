@@ -56,6 +56,7 @@ pub async fn create_version(
             table,
             req.version,
             req.manifest_path.clone(),
+            None,
         )
         .await
         .map_err(|e| store_error_to_lance_version(e, &instance).to_problem_details())?;
