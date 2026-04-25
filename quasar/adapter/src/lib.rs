@@ -10,4 +10,6 @@
 pub mod iceberg;
 #[cfg(feature = "lance")]
 pub mod lance;
+#[cfg(feature = "iceberg")]
+pub mod object_store_util;
 pub use quasar_core::*;

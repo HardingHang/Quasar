@@ -15,17 +15,10 @@ use super::dto::{
 use super::error::{store_error_to_iceberg_table, IcebergError};
 use super::table_metadata::TableMetadata;
 use super::IcebergConfig;
+use crate::object_store_util::{object_exists, read_json, s3_url_to_path, write_json};
 use quasar_core::validate_name;
 
 // ── Object Store Helpers ───────────────────────────────────
-
-/// Convert an S3 URL to an object store relative Path.
-fn s3_url_to_object_path(location: &str, bucket: &str) -> Option<object_store::path::Path> {
-    let prefix = format!("s3://{}/", bucket);
-    location
-        .strip_prefix(&prefix)
-        .map(object_store::path::Path::from)
-}
 
 /// Write metadata JSON to object store if configured.
 /// After writing, verifies the file exists using HEAD operation.
@@ -35,30 +28,22 @@ async fn write_metadata_to_store(
     config: &IcebergConfig,
 ) -> Result<(), IcebergError> {
     if let (Some(ref store), Some(ref bucket)) = (&config.object_store, &config.s3_bucket) {
-        let path = s3_url_to_object_path(location, bucket).ok_or_else(|| {
-            IcebergError::InternalServerError {
+        let path =
+            s3_url_to_path(location, bucket).ok_or_else(|| IcebergError::InternalServerError {
                 message: format!("invalid metadata location: {}", location),
-            }
-        })?;
-        // Use serde_json::to_vec to directly serialize to bytes, avoiding intermediate String
-        let bytes = serde_json::to_vec(content).map_err(|e| IcebergError::InternalServerError {
-            message: format!("failed to serialize metadata JSON: {}", e),
-        })?;
-        let payload = object_store::PutPayload::from(bytes);
-        store
-            .put(&path, payload)
-            .await
-            .map_err(|e| IcebergError::InternalServerError {
-                message: format!("failed to write metadata to object store: {}", e),
             })?;
 
-        // Verify file was successfully written using HEAD operation
-        store
-            .head(&path)
-            .await
-            .map_err(|e| IcebergError::InternalServerError {
-                message: format!("write verification failed for {}: {}", location, e),
-            })?;
+        write_json(&**store, &path, content).await.map_err(|e| {
+            IcebergError::InternalServerError {
+                message: format!("failed to write metadata to object store: {}", e),
+            }
+        })?;
+
+        if !object_exists(&**store, &path).await {
+            return Err(IcebergError::InternalServerError {
+                message: format!("write verification failed for {}", location),
+            });
+        }
     }
     Ok(())
 }
@@ -70,26 +55,15 @@ async fn read_metadata_from_store(
     config: &IcebergConfig,
 ) -> Result<serde_json::Value, IcebergError> {
     if let (Some(ref store), Some(ref bucket)) = (&config.object_store, &config.s3_bucket) {
-        let path = s3_url_to_object_path(location, bucket).ok_or_else(|| {
-            IcebergError::InternalServerError {
+        let path =
+            s3_url_to_path(location, bucket).ok_or_else(|| IcebergError::InternalServerError {
                 message: format!("invalid metadata location: {}", location),
-            }
-        })?;
-        let result = store
-            .get(&path)
+            })?;
+        read_json(&**store, &path)
             .await
             .map_err(|e| IcebergError::InternalServerError {
                 message: format!("failed to read metadata from object store: {}", e),
-            })?;
-        let bytes = result
-            .bytes()
-            .await
-            .map_err(|e| IcebergError::InternalServerError {
-                message: format!("failed to read metadata bytes: {}", e),
-            })?;
-        serde_json::from_slice(&bytes).map_err(|e| IcebergError::InternalServerError {
-            message: format!("failed to parse metadata JSON: {}", e),
-        })
+            })
     } else if let Some(fb) = fallback {
         Ok(fb)
     } else {
@@ -104,8 +78,8 @@ async fn read_metadata_from_store(
 /// If object_store is not configured, returns true (assumes fallback is available).
 async fn check_metadata_exists(location: &str, config: &IcebergConfig) -> bool {
     if let (Some(ref store), Some(ref bucket)) = (&config.object_store, &config.s3_bucket) {
-        if let Some(path) = s3_url_to_object_path(location, bucket) {
-            store.head(&path).await.is_ok()
+        if let Some(path) = s3_url_to_path(location, bucket) {
+            object_exists(&**store, &path).await
         } else {
             false
         }
@@ -458,9 +432,10 @@ pub async fn commit_table(
 
     // 9. CAS update via storage layer
     store
-        .commit_iceberg_table(
+        .cas_update_metadata_location(
             &ns,
             &table,
+            AssetFormat::Iceberg,
             &metadata_location,
             &new_metadata_location,
             Some(new_schema_snapshot.clone()),
