@@ -251,14 +251,16 @@ impl CatalogStore for PgCatalogStore {
         properties: HashMap<String, String>,
     ) -> Result<Asset, StoreError> {
         let client = self.get_client().await?;
-
-        let ns = self.get_namespace(namespace_name, format).await?;
         let props_json = props_to_json(&properties)?;
 
+        // Use single query with subquery to avoid separate get_namespace call
+        // This prevents race condition where namespace could be deleted between calls
         let row = client
-            .query_one(
-                "INSERT INTO assets (namespace_id, name, location, metadata_location, schema_snapshot, properties) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
-                &[&ns.id, &name, &location, &metadata_location, &schema_snapshot, &props_json],
+            .query_opt(
+                "INSERT INTO assets (namespace_id, name, location, metadata_location, schema_snapshot, properties)
+                 SELECT id, $2, $3, $4, $5, $6 FROM namespaces WHERE name = $1 AND format = $7
+                 RETURNING *",
+                &[&namespace_name, &name, &location, &metadata_location, &schema_snapshot, &props_json, &format.as_str()],
             )
             .await
             .map_err(|e| match e.code() {
@@ -271,7 +273,10 @@ impl CatalogStore for PgCatalogStore {
                 _ => StoreError::Internal(e.to_string()),
             })?;
 
-        row_to_asset(&row)
+        match row {
+            Some(r) => row_to_asset(&r),
+            None => Err(StoreError::NotFound(format!("namespace '{}'", namespace_name))),
+        }
     }
 
     async fn list_assets(
@@ -281,12 +286,15 @@ impl CatalogStore for PgCatalogStore {
     ) -> Result<Vec<Asset>, StoreError> {
         let client = self.get_client().await?;
 
-        let ns = self.get_namespace(namespace_name, format).await?;
-
+        // Use JOIN to avoid N+1 query pattern
         let rows = client
             .query(
-                "SELECT * FROM assets WHERE namespace_id = $1 ORDER BY created_at",
-                &[&ns.id],
+                "SELECT a.id, a.namespace_id, a.name, a.location, a.metadata_location, a.schema_snapshot, a.properties, a.created_at
+                 FROM assets a
+                 JOIN namespaces n ON a.namespace_id = n.id
+                 WHERE n.name = $1 AND n.format = $2
+                 ORDER BY a.created_at",
+                &[&namespace_name, &format.as_str()],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -302,12 +310,13 @@ impl CatalogStore for PgCatalogStore {
     ) -> Result<Asset, StoreError> {
         let client = self.get_client().await?;
 
-        let ns = self.get_namespace(namespace_name, format).await?;
-
+        // Use JOIN to avoid separate namespace query
         let row = client
             .query_opt(
-                "SELECT * FROM assets WHERE namespace_id = $1 AND name = $2",
-                &[&ns.id, &name],
+                "SELECT a.* FROM assets a
+                 JOIN namespaces n ON a.namespace_id = n.id
+                 WHERE n.name = $1 AND n.format = $2 AND a.name = $3",
+                &[&namespace_name, &format.as_str(), &name],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -329,12 +338,28 @@ impl CatalogStore for PgCatalogStore {
     ) -> Result<bool, StoreError> {
         let client = self.get_client().await?;
 
-        let ns = self.get_namespace(namespace_name, format).await?;
+        // First check if namespace exists
+        let ns_row = client
+            .query_opt(
+                "SELECT id FROM namespaces WHERE name = $1 AND format = $2",
+                &[&namespace_name, &format.as_str()],
+            )
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
 
+        if ns_row.is_none() {
+            return Err(StoreError::NotFound(format!("namespace '{}'", namespace_name)));
+        }
+
+        // Then check if asset exists
         let row = client
             .query_one(
-                "SELECT EXISTS(SELECT 1 FROM assets WHERE namespace_id = $1 AND name = $2)",
-                &[&ns.id, &name],
+                "SELECT EXISTS(
+                    SELECT 1 FROM assets a
+                    JOIN namespaces n ON a.namespace_id = n.id
+                    WHERE n.name = $1 AND n.format = $2 AND a.name = $3
+                )",
+                &[&namespace_name, &format.as_str(), &name],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -350,12 +375,13 @@ impl CatalogStore for PgCatalogStore {
     ) -> Result<(), StoreError> {
         let client = self.get_client().await?;
 
-        let ns = self.get_namespace(namespace_name, format).await?;
-
+        // Use DELETE with JOIN to avoid separate namespace query
         let deleted = client
             .execute(
-                "DELETE FROM assets WHERE namespace_id = $1 AND name = $2",
-                &[&ns.id, &name],
+                "DELETE FROM assets
+                 WHERE namespace_id = (SELECT id FROM namespaces WHERE name = $1 AND format = $2)
+                 AND name = $3",
+                &[&namespace_name, &format.as_str(), &name],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -379,12 +405,13 @@ impl CatalogStore for PgCatalogStore {
     ) -> Result<(), StoreError> {
         let client = self.get_client().await?;
 
-        let ns = self.get_namespace(namespace_name, format).await?;
-
+        // Use single UPDATE with subquery to avoid separate namespace query
         let updated = client
             .execute(
-                "UPDATE assets SET name = $1 WHERE namespace_id = $2 AND name = $3",
-                &[&new_name, &ns.id, &name],
+                "UPDATE assets SET name = $1
+                 WHERE namespace_id = (SELECT id FROM namespaces WHERE name = $2 AND format = $3)
+                 AND name = $4",
+                &[&new_name, &namespace_name, &format.as_str(), &name],
             )
             .await
             .map_err(|e| match e.code() {
@@ -416,16 +443,42 @@ impl CatalogStore for PgCatalogStore {
     ) -> Result<AssetVersion, StoreError> {
         let mut client = self.get_client().await?;
 
-        let asset = self.get_asset(namespace_name, format, asset_name).await?;
-
+        // Start transaction first - all operations must use same connection
         let tx = client
             .transaction()
             .await
             .map_err(|e| StoreError::Internal(format!("transaction start: {}", e)))?;
 
+        // Get asset within the same transaction to avoid race condition
+        let asset_row = tx
+            .query_opt(
+                "SELECT a.* FROM assets a
+                 JOIN namespaces n ON a.namespace_id = n.id
+                 WHERE n.name = $1 AND n.format = $2 AND a.name = $3",
+                &[&namespace_name, &format.as_str(), &asset_name],
+            )
+            .await
+            .map_err(|e| StoreError::Internal(format!("asset query: {}", e)))?;
+
+        let asset = match asset_row {
+            Some(r) => row_to_asset(&r)?,
+            None => {
+                let _ = tx.rollback().await;
+                return Err(StoreError::NotFound(format!(
+                    "asset '{}' in namespace '{}'",
+                    asset_name, namespace_name
+                )));
+            }
+        };
+
+        // Use SELECT ... FOR UPDATE to lock the asset's version row
+        // This prevents concurrent transactions from modifying versions
         let current_row = tx
             .query_opt(
-                "SELECT version_id FROM asset_versions WHERE asset_id = $1 ORDER BY version_id DESC LIMIT 1",
+                "SELECT version_id FROM asset_versions
+                 WHERE asset_id = $1
+                 ORDER BY version_id DESC LIMIT 1
+                 FOR UPDATE",
                 &[&asset.id],
             )
             .await
@@ -474,12 +527,14 @@ impl CatalogStore for PgCatalogStore {
     ) -> Result<AssetVersion, StoreError> {
         let client = self.get_client().await?;
 
-        let asset = self.get_asset(namespace_name, format, asset_name).await?;
-
+        // Use JOIN to avoid separate asset query
         let row = client
             .query_opt(
-                "SELECT * FROM asset_versions WHERE asset_id = $1 AND version_id = $2",
-                &[&asset.id, &version_id],
+                "SELECT av.* FROM asset_versions av
+                 JOIN assets a ON av.asset_id = a.id
+                 JOIN namespaces n ON a.namespace_id = n.id
+                 WHERE n.name = $1 AND n.format = $2 AND a.name = $3 AND av.version_id = $4",
+                &[&namespace_name, &format.as_str(), &asset_name, &version_id],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -501,12 +556,15 @@ impl CatalogStore for PgCatalogStore {
     ) -> Result<AssetVersion, StoreError> {
         let client = self.get_client().await?;
 
-        let asset = self.get_asset(namespace_name, format, asset_name).await?;
-
+        // Use JOIN to avoid separate asset query
         let row = client
             .query_opt(
-                "SELECT * FROM asset_versions WHERE asset_id = $1 ORDER BY version_id DESC LIMIT 1",
-                &[&asset.id],
+                "SELECT av.* FROM asset_versions av
+                 JOIN assets a ON av.asset_id = a.id
+                 JOIN namespaces n ON a.namespace_id = n.id
+                 WHERE n.name = $1 AND n.format = $2 AND a.name = $3
+                 ORDER BY av.version_id DESC LIMIT 1",
+                &[&namespace_name, &format.as_str(), &asset_name],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -528,12 +586,15 @@ impl CatalogStore for PgCatalogStore {
     ) -> Result<Vec<AssetVersion>, StoreError> {
         let client = self.get_client().await?;
 
-        let asset = self.get_asset(namespace_name, format, asset_name).await?;
-
+        // Use JOIN to avoid separate asset query
         let rows = client
             .query(
-                "SELECT * FROM asset_versions WHERE asset_id = $1 ORDER BY version_id ASC",
-                &[&asset.id],
+                "SELECT av.* FROM asset_versions av
+                 JOIN assets a ON av.asset_id = a.id
+                 JOIN namespaces n ON a.namespace_id = n.id
+                 WHERE n.name = $1 AND n.format = $2 AND a.name = $3
+                 ORDER BY av.version_id ASC",
+                &[&namespace_name, &format.as_str(), &asset_name],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -551,12 +612,15 @@ impl CatalogStore for PgCatalogStore {
     ) -> Result<AssetVersion, StoreError> {
         let client = self.get_client().await?;
 
-        let asset = self.get_asset(namespace_name, format, asset_name).await?;
-
+        // Use single INSERT with subquery to avoid separate asset query
         let row = client
-            .query_one(
-                "INSERT INTO asset_versions (asset_id, version_id, metadata_location) VALUES ($1, $2, $3) RETURNING *",
-                &[&asset.id, &version_id, &metadata_location],
+            .query_opt(
+                "INSERT INTO asset_versions (asset_id, version_id, metadata_location)
+                 SELECT a.id, $4, $5 FROM assets a
+                 JOIN namespaces n ON a.namespace_id = n.id
+                 WHERE n.name = $1 AND n.format = $2 AND a.name = $3
+                 RETURNING *",
+                &[&namespace_name, &format.as_str(), &asset_name, &version_id, &metadata_location],
             )
             .await
             .map_err(|e| match e.code() {
@@ -569,7 +633,13 @@ impl CatalogStore for PgCatalogStore {
                 _ => StoreError::Internal(e.to_string()),
             })?;
 
-        row_to_version(&row)
+        match row {
+            Some(r) => row_to_version(&r),
+            None => Err(StoreError::NotFound(format!(
+                "asset '{}' in namespace '{}'",
+                asset_name, namespace_name
+            ))),
+        }
     }
 
     async fn commit_iceberg_table(
