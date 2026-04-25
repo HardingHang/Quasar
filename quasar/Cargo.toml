@@ -12,7 +12,7 @@ license = "Apache-2.0"
 # internal
 quasar-core = { path = "core" }
 quasar-storage = { path = "storage" }
-quasar-adapter = { path = "adapter" }
+quasar-adapter = { path = "adapter", default-features = false }
 
 # async
 tokio = { version = "1", features = ["full"] }

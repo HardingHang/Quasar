@@ -15,7 +15,7 @@ iceberg = ["quasar-adapter/iceberg", "dep:object_store"]
 [dependencies]
 quasar-core = { workspace = true }
 quasar-storage = { workspace = true }
-quasar-adapter = { workspace = true }
+quasar-adapter = { workspace = true, default-features = false }
 axum = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
