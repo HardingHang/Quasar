@@ -202,7 +202,12 @@ impl CatalogStore for PgCatalogStore {
                 &[&name, &format.as_str()],
             )
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(|e| match e.code() {
+                Some(&tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION) => {
+                    StoreError::Conflict(format!("namespace '{}' is not empty", name))
+                }
+                _ => StoreError::Internal(e.to_string()),
+            })?;
 
         if deleted == 0 {
             return Err(StoreError::NotFound(format!("namespace '{}'", name)));
