@@ -40,7 +40,11 @@ async fn write_metadata_to_store(
                 message: format!("invalid metadata location: {}", location),
             }
         })?;
-        let payload = object_store::PutPayload::from(content.to_string());
+        // Use serde_json::to_vec to directly serialize to bytes, avoiding intermediate String
+        let bytes = serde_json::to_vec(content).map_err(|e| IcebergError::InternalServerError {
+            message: format!("failed to serialize metadata JSON: {}", e),
+        })?;
+        let payload = object_store::PutPayload::from(bytes);
         store
             .put(&path, payload)
             .await

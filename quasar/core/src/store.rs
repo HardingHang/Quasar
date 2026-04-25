@@ -60,6 +60,15 @@ pub trait CatalogStore: Send + Sync {
         name: &str,
     ) -> Result<Asset, StoreError>;
 
+    /// Get asset with its current version in a single query.
+    /// Returns (Asset, Option<AssetVersion>) - version may be None if no versions exist.
+    async fn get_asset_with_current_version(
+        &self,
+        namespace_name: &str,
+        format: AssetFormat,
+        name: &str,
+    ) -> Result<(Asset, Option<AssetVersion>), StoreError>;
+
     async fn asset_exists(
         &self,
         namespace_name: &str,

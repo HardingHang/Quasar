@@ -222,21 +222,22 @@ impl CatalogStore for PgCatalogStore {
 
         let props_json = props_to_json(updates)?;
 
-        let updated = client
-            .execute(
+        // Use RETURNING * to get updated row in single query
+        let row = client
+            .query_opt(
                 "UPDATE namespaces
                  SET properties = (properties - $1::text[]) || $2::jsonb
-                 WHERE name = $3 AND format = $4",
+                 WHERE name = $3 AND format = $4
+                 RETURNING *",
                 &[&removals, &props_json, &name, &format.as_str()],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-        if updated == 0 {
-            return Err(StoreError::NotFound(format!("namespace '{}'", name)));
+        match row {
+            Some(r) => row_to_namespace(&r),
+            None => Err(StoreError::NotFound(format!("namespace '{}'", name))),
         }
-
-        self.get_namespace(name, format).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -333,6 +334,61 @@ impl CatalogStore for PgCatalogStore {
         }
     }
 
+    async fn get_asset_with_current_version(
+        &self,
+        namespace_name: &str,
+        format: AssetFormat,
+        name: &str,
+    ) -> Result<(Asset, Option<AssetVersion>), StoreError> {
+        let client = self.get_client().await?;
+
+        // Single query: get asset and its latest version using lateral join
+        let row = client
+            .query_opt(
+                "SELECT a.id, a.namespace_id, a.name, a.location, a.metadata_location,
+                        a.schema_snapshot, a.properties, a.created_at,
+                        av.id as version_id_col, av.asset_id as version_asset_id,
+                        av.version_id, av.metadata_location as version_metadata_location,
+                        av.previous_version_id, av.timestamp as version_timestamp
+                 FROM assets a
+                 JOIN namespaces n ON a.namespace_id = n.id
+                 LEFT JOIN LATERAL (
+                     SELECT * FROM asset_versions
+                     WHERE asset_id = a.id
+                     ORDER BY version_id DESC LIMIT 1
+                 ) av ON true
+                 WHERE n.name = $1 AND n.format = $2 AND a.name = $3",
+                &[&namespace_name, &format.as_str(), &name],
+            )
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+
+        match row {
+            Some(r) => {
+                let asset = row_to_asset(&r)?;
+                // Check if version columns are present (not null)
+                let version_id: Option<i64> = r.try_get("version_id").ok();
+                let version = if version_id.is_some() {
+                    Some(AssetVersion {
+                        id: try_get!(r, "version_id_col"),
+                        asset_id: try_get!(r, "version_asset_id"),
+                        version_id: try_get!(r, "version_id"),
+                        metadata_location: try_get!(r, "version_metadata_location"),
+                        previous_version_id: r.try_get("previous_version_id").ok(),
+                        timestamp: try_get!(r, "version_timestamp"),
+                    })
+                } else {
+                    None
+                };
+                Ok((asset, version))
+            }
+            None => Err(StoreError::NotFound(format!(
+                "asset '{}' in namespace '{}'",
+                name, namespace_name
+            ))),
+        }
+    }
+
     async fn asset_exists(
         &self,
         namespace_name: &str,
@@ -341,36 +397,36 @@ impl CatalogStore for PgCatalogStore {
     ) -> Result<bool, StoreError> {
         let client = self.get_client().await?;
 
-        // First check if namespace exists
-        let ns_row = client
-            .query_opt(
-                "SELECT id FROM namespaces WHERE name = $1 AND format = $2",
-                &[&namespace_name, &format.as_str()],
-            )
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
-
-        if ns_row.is_none() {
-            return Err(StoreError::NotFound(format!(
-                "namespace '{}'",
-                namespace_name
-            )));
-        }
-
-        // Then check if asset exists
+        // Single query using CASE to distinguish namespace vs asset existence
+        // Returns: 'namespace_not_found', 'asset_not_found', or 'asset_found'
         let row = client
             .query_one(
-                "SELECT EXISTS(
-                    SELECT 1 FROM assets a
-                    JOIN namespaces n ON a.namespace_id = n.id
-                    WHERE n.name = $1 AND n.format = $2 AND a.name = $3
-                )",
+                "SELECT CASE
+                    WHEN n.id IS NULL THEN 'namespace_not_found'
+                    WHEN a.id IS NULL THEN 'asset_not_found'
+                    ELSE 'asset_found'
+                 END as status
+                 FROM (SELECT 1) dummy
+                 LEFT JOIN namespaces n ON n.name = $1 AND n.format = $2
+                 LEFT JOIN assets a ON a.namespace_id = n.id AND a.name = $3",
                 &[&namespace_name, &format.as_str(), &name],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-        Ok(row.get(0))
+        let status: String = row.get(0);
+        match status.as_str() {
+            "namespace_not_found" => Err(StoreError::NotFound(format!(
+                "namespace '{}'",
+                namespace_name
+            ))),
+            "asset_not_found" => Ok(false),
+            "asset_found" => Ok(true),
+            other => Err(StoreError::Internal(format!(
+                "unexpected status from asset_exists query: {}",
+                other
+            ))),
+        }
     }
 
     async fn drop_asset(

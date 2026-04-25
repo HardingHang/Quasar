@@ -127,25 +127,18 @@ pub async fn describe_table(
     let instance = format!("/lance/v1/table/{}/describe", id);
     let (namespace, table) = parse_table_id(&id)?;
 
-    let asset = store
-        .get_asset(namespace, AssetFormat::Lance, table)
+    // Use single query to get asset and current version
+    let (asset, current_version) = store
+        .get_asset_with_current_version(namespace, AssetFormat::Lance, table)
         .await
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
-
-    let location = asset.location;
-
-    let current_version = store
-        .load_current_version(namespace, AssetFormat::Lance, table)
-        .await
-        .map(|v| v.version_id)
-        .ok();
 
     Ok((
         StatusCode::OK,
         Json(DescribeTableResponse {
             name: asset.name,
-            location,
-            current_version,
+            location: asset.location,
+            current_version: current_version.map(|v| v.version_id),
             created_at: asset.created_at.to_rfc3339(),
         }),
     ))
