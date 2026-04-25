@@ -516,12 +516,14 @@ impl CatalogStore for PgCatalogStore {
             .await
             .map_err(|e| StoreError::Internal(format!("transaction start: {}", e)))?;
 
-        // Get asset within the same transaction to avoid race condition
+        // Lock the asset row to serialize version allocation for this table,
+        // including the initial version where no asset_versions row exists yet.
         let asset_row = tx
             .query_opt(
                 "SELECT a.* FROM assets a
                  JOIN namespaces n ON a.namespace_id = n.id
-                 WHERE n.name = $1 AND n.format = $2 AND a.name = $3",
+                 WHERE n.name = $1 AND n.format = $2 AND a.name = $3
+                 FOR UPDATE OF a",
                 &[&namespace_name, &format.as_str(), &asset_name],
             )
             .await
@@ -538,14 +540,11 @@ impl CatalogStore for PgCatalogStore {
             }
         };
 
-        // Use SELECT ... FOR UPDATE to lock the asset's version row
-        // This prevents concurrent transactions from modifying versions
         let current_row = tx
             .query_opt(
                 "SELECT version_id FROM asset_versions
                  WHERE asset_id = $1
-                 ORDER BY version_id DESC LIMIT 1
-                 FOR UPDATE",
+                 ORDER BY version_id DESC LIMIT 1",
                 &[&asset.id],
             )
             .await
@@ -574,8 +573,14 @@ impl CatalogStore for PgCatalogStore {
                 ],
             )
             .await
-            .map_err(|e| {
-                StoreError::Internal(format!("failed to commit version: {}", e))
+            .map_err(|e| match e.code() {
+                Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) => {
+                    StoreError::Conflict(format!(
+                        "version {} for asset '{}' already exists",
+                        new_version_id, asset_name
+                    ))
+                }
+                _ => StoreError::Internal(format!("failed to commit version: {}", e)),
             })?;
 
         tx.commit()
