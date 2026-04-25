@@ -114,20 +114,26 @@ async fn check_metadata_exists(location: &str, config: &IcebergConfig) -> bool {
 
 /// Generate the next metadata location by incrementing the sequence number.
 /// Expected format: `{...}/metadata/{NNNNN}-{uuid}.metadata.json`
+/// Handles overflow by extending width when sequence exceeds current width.
 fn next_metadata_location(current: &str) -> String {
     if let Some(metadata_idx) = current.rfind("/metadata/") {
         let prefix = &current[..metadata_idx + 10];
         let rest = &current[metadata_idx + 10..];
         if let Some(dash_idx) = rest.find('-') {
             let seq_str = &rest[..dash_idx];
-            if let Ok(seq) = seq_str.parse::<u32>() {
+            if let Ok(seq) = seq_str.parse::<u64>() {
                 let suffix = &rest[dash_idx..];
-                let new_seq_str = format!("{:0width$}", seq + 1, width = seq_str.len());
+                let new_seq = seq + 1;
+                // Handle overflow: if new_seq needs more digits, extend width
+                let new_width = seq_str.len().max(new_seq.to_string().len());
+                let new_seq_str = format!("{:0width$}", new_seq, width = new_width);
                 return format!("{}{}{}", prefix, new_seq_str, suffix);
             }
         }
     }
-    current.to_string()
+    // Fallback: append timestamp-based sequence if format is unrecognized
+    let timestamp = chrono::Utc::now().timestamp_millis();
+    format!("{}-{}.metadata.json", current.trim_end_matches(".metadata.json"), timestamp)
 }
 
 fn build_initial_metadata(
