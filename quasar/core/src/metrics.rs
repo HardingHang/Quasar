@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::RwLock;
 
 /// Simple atomic counter.
 pub struct Counter {
@@ -31,7 +31,7 @@ impl Default for Counter {
 
 /// Application-level metrics registry.
 pub struct MetricsRegistry {
-    http_requests: Mutex<HashMap<(String, String, u16), Counter>>,
+    http_requests: RwLock<HashMap<(String, String, u16), Counter>>,
     iceberg_commit_conflicts: Counter,
     iceberg_commit_successes: Counter,
 }
@@ -39,7 +39,7 @@ pub struct MetricsRegistry {
 impl MetricsRegistry {
     pub fn new() -> Self {
         Self {
-            http_requests: Mutex::new(HashMap::new()),
+            http_requests: RwLock::new(HashMap::new()),
             iceberg_commit_conflicts: Counter::new(),
             iceberg_commit_successes: Counter::new(),
         }
@@ -47,7 +47,17 @@ impl MetricsRegistry {
 
     pub fn record_http_request(&self, method: &str, path: &str, status: u16) {
         let key = (method.to_string(), path.to_string(), status);
-        let mut map = self.http_requests.lock().unwrap_or_else(|e| e.into_inner());
+        // First try read lock to check if key exists
+        {
+            let map = self.http_requests.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(counter) = map.get(&key) {
+                counter.inc();
+                return;
+            }
+        }
+        // Key doesn't exist, need write lock to insert
+        let mut map = self.http_requests.write().unwrap_or_else(|e| e.into_inner());
+        // Double-check in case another thread inserted while we waited
         map.entry(key).or_default().inc();
     }
 
@@ -65,7 +75,7 @@ impl MetricsRegistry {
         output.push_str("# HELP http_requests_total Total HTTP requests\n");
         output.push_str("# TYPE http_requests_total counter\n");
         {
-            let map = self.http_requests.lock().unwrap_or_else(|e| e.into_inner());
+            let map = self.http_requests.read().unwrap_or_else(|e| e.into_inner());
             for ((method, path, status), counter) in map.iter() {
                 output.push_str(&format!(
                     "http_requests_total{{method=\"{}\",path=\"{}\",status=\"{}\"}} {}\n",
