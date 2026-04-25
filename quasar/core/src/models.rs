@@ -1,10 +1,14 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use strum::{Display, EnumString, IntoStaticStr};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display, EnumString, IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum AssetFormat {
     Iceberg,
     Lance,
@@ -12,10 +16,7 @@ pub enum AssetFormat {
 
 impl AssetFormat {
     pub fn as_str(&self) -> &'static str {
-        match self {
-            AssetFormat::Iceberg => "iceberg",
-            AssetFormat::Lance => "lance",
-        }
+        (*self).into()
     }
 }
 

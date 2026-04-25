@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use deadpool_postgres::Pool;
-use quasar_core::{
-    Asset, AssetCommitUpdate, AssetFormat, AssetVersion, CatalogStore, Namespace, StoreError,
-};
+use quasar_core::{Asset, AssetFormat, AssetVersion, CatalogStore, Namespace, StoreError};
 use serde_json;
 use std::collections::HashMap;
+use std::str::FromStr;
+use strum::ParseError;
 use tokio_postgres::Row;
 
 pub struct PgCatalogStore {
@@ -53,16 +53,9 @@ macro_rules! try_get {
 
 fn row_to_namespace(row: &Row) -> Result<Namespace, StoreError> {
     let format_str: String = try_get!(row, "format");
-    let format = match format_str.as_str() {
-        "iceberg" => AssetFormat::Iceberg,
-        "lance" => AssetFormat::Lance,
-        other => {
-            return Err(StoreError::Internal(format!(
-                "unknown asset format in DB: {}",
-                other
-            )))
-        }
-    };
+    let format = AssetFormat::from_str(&format_str).map_err(|e: ParseError| {
+        StoreError::Internal(format!("unknown asset format in DB: {}", e))
+    })?;
 
     let props: serde_json::Value = try_get!(row, "properties");
     let properties: HashMap<String, String> = serde_json::from_value(props)
@@ -501,95 +494,6 @@ impl CatalogStore for PgCatalogStore {
         Ok(())
     }
 
-    async fn commit_version(
-        &self,
-        namespace_name: &str,
-        format: AssetFormat,
-        asset_name: &str,
-        update: AssetCommitUpdate,
-    ) -> Result<AssetVersion, StoreError> {
-        let mut client = self.get_client().await?;
-
-        // Start transaction first - all operations must use same connection
-        let tx = client
-            .transaction()
-            .await
-            .map_err(|e| StoreError::Internal(format!("transaction start: {}", e)))?;
-
-        // Lock the asset row to serialize version allocation for this table,
-        // including the initial version where no asset_versions row exists yet.
-        let asset_row = tx
-            .query_opt(
-                "SELECT a.* FROM assets a
-                 JOIN namespaces n ON a.namespace_id = n.id
-                 WHERE n.name = $1 AND n.format = $2 AND a.name = $3
-                 FOR UPDATE OF a",
-                &[&namespace_name, &format.as_str(), &asset_name],
-            )
-            .await
-            .map_err(|e| StoreError::Internal(format!("asset query: {}", e)))?;
-
-        let asset = match asset_row {
-            Some(r) => row_to_asset(&r)?,
-            None => {
-                let _ = tx.rollback().await;
-                return Err(StoreError::NotFound(format!(
-                    "asset '{}' in namespace '{}'",
-                    asset_name, namespace_name
-                )));
-            }
-        };
-
-        let current_row = tx
-            .query_opt(
-                "SELECT version_id FROM asset_versions
-                 WHERE asset_id = $1
-                 ORDER BY version_id DESC LIMIT 1",
-                &[&asset.id],
-            )
-            .await
-            .map_err(|e| StoreError::Internal(format!("version query: {}", e)))?;
-
-        let current_version_id = current_row.map(|r: Row| r.get::<_, i64>(0));
-
-        if current_version_id != update.previous_version_id {
-            let _ = tx.rollback().await;
-            return Err(StoreError::Conflict(format!(
-                "version conflict: expected {:?}, got {:?}",
-                update.previous_version_id, current_version_id
-            )));
-        }
-
-        let new_version_id = current_version_id.map(|v| v + 1).unwrap_or(1);
-
-        let row = tx
-            .query_one(
-                "INSERT INTO asset_versions (asset_id, version_id, metadata_location, previous_version_id) VALUES ($1, $2, $3, $4) RETURNING *",
-                &[
-                    &asset.id,
-                    &new_version_id,
-                    &update.metadata_location,
-                    &update.previous_version_id,
-                ],
-            )
-            .await
-            .map_err(|e| match e.code() {
-                Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) => {
-                    StoreError::Conflict(format!(
-                        "version {} for asset '{}' already exists",
-                        new_version_id, asset_name
-                    ))
-                }
-                _ => StoreError::Internal(format!("failed to commit version: {}", e)),
-            })?;
-
-        tx.commit()
-            .await
-            .map_err(|e| StoreError::Internal(format!("transaction commit: {}", e)))?;
-
-        row_to_version(&row)
-    }
-
     async fn load_version(
         &self,
         namespace_name: &str,
@@ -681,51 +585,131 @@ impl CatalogStore for PgCatalogStore {
         asset_name: &str,
         version_id: i64,
         metadata_location: String,
+        previous_version_id: Option<i64>,
     ) -> Result<AssetVersion, StoreError> {
-        let client = self.get_client().await?;
+        if let Some(expected_prev) = previous_version_id {
+            // CAS mode: transaction + previous_version_id check
+            let mut client = self.get_client().await?;
+            let tx = client
+                .transaction()
+                .await
+                .map_err(|e| StoreError::Internal(format!("transaction start: {}", e)))?;
 
-        // Use single INSERT with subquery to avoid separate asset query
-        let row = client
-            .query_opt(
-                "INSERT INTO asset_versions (asset_id, version_id, metadata_location)
-                 SELECT a.id, $4, $5 FROM assets a
-                 JOIN namespaces n ON a.namespace_id = n.id
-                 WHERE n.name = $1 AND n.format = $2 AND a.name = $3
-                 RETURNING *",
-                &[
-                    &namespace_name,
-                    &format.as_str(),
-                    &asset_name,
-                    &version_id,
-                    &metadata_location,
-                ],
-            )
-            .await
-            .map_err(|e| match e.code() {
-                Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) => {
-                    StoreError::AlreadyExists(format!(
-                        "version {} for asset '{}'",
-                        version_id, asset_name
-                    ))
+            let asset_row = tx
+                .query_opt(
+                    "SELECT a.* FROM assets a
+                     JOIN namespaces n ON a.namespace_id = n.id
+                     WHERE n.name = $1 AND n.format = $2 AND a.name = $3
+                     FOR UPDATE OF a",
+                    &[&namespace_name, &format.as_str(), &asset_name],
+                )
+                .await
+                .map_err(|e| StoreError::Internal(format!("asset query: {}", e)))?;
+
+            let asset = match asset_row {
+                Some(r) => row_to_asset(&r)?,
+                None => {
+                    let _ = tx.rollback().await;
+                    return Err(StoreError::NotFound(format!(
+                        "asset '{}' in namespace '{}'",
+                        asset_name, namespace_name
+                    )));
                 }
-                _ => StoreError::Internal(e.to_string()),
-            })?;
+            };
 
-        match row {
-            Some(r) => row_to_version(&r),
-            None => Err(StoreError::NotFound(format!(
-                "asset '{}' in namespace '{}'",
-                asset_name, namespace_name
-            ))),
+            let current_row = tx
+                .query_opt(
+                    "SELECT version_id FROM asset_versions
+                     WHERE asset_id = $1
+                     ORDER BY version_id DESC LIMIT 1",
+                    &[&asset.id],
+                )
+                .await
+                .map_err(|e| StoreError::Internal(format!("version query: {}", e)))?;
+
+            let current_version_id = current_row.map(|r: Row| r.get::<_, i64>(0));
+
+            if current_version_id != Some(expected_prev) {
+                let _ = tx.rollback().await;
+                return Err(StoreError::Conflict(format!(
+                    "version conflict: expected {:?}, got {:?}",
+                    expected_prev, current_version_id
+                )));
+            }
+
+            let row = tx
+                .query_one(
+                    "INSERT INTO asset_versions (asset_id, version_id, metadata_location, previous_version_id)
+                     VALUES ($1, $2, $3, $4) RETURNING *",
+                    &[
+                        &asset.id,
+                        &version_id,
+                        &metadata_location,
+                        &expected_prev,
+                    ],
+                )
+                .await
+                .map_err(|e| match e.code() {
+                    Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) => {
+                        StoreError::Conflict(format!(
+                            "version {} for asset '{}' already exists",
+                            version_id, asset_name
+                        ))
+                    }
+                    _ => StoreError::Internal(format!("failed to create version: {}", e)),
+                })?;
+
+            tx.commit()
+                .await
+                .map_err(|e| StoreError::Internal(format!("transaction commit: {}", e)))?;
+
+            row_to_version(&row)
+        } else {
+            // Non-CAS mode: direct INSERT
+            let client = self.get_client().await?;
+            let row = client
+                .query_opt(
+                    "INSERT INTO asset_versions (asset_id, version_id, metadata_location)
+                     SELECT a.id, $4, $5 FROM assets a
+                     JOIN namespaces n ON a.namespace_id = n.id
+                     WHERE n.name = $1 AND n.format = $2 AND a.name = $3
+                     RETURNING *",
+                    &[
+                        &namespace_name,
+                        &format.as_str(),
+                        &asset_name,
+                        &version_id,
+                        &metadata_location,
+                    ],
+                )
+                .await
+                .map_err(|e| match e.code() {
+                    Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) => {
+                        StoreError::AlreadyExists(format!(
+                            "version {} for asset '{}'",
+                            version_id, asset_name
+                        ))
+                    }
+                    _ => StoreError::Internal(e.to_string()),
+                })?;
+
+            match row {
+                Some(r) => row_to_version(&r),
+                None => Err(StoreError::NotFound(format!(
+                    "asset '{}' in namespace '{}'",
+                    asset_name, namespace_name
+                ))),
+            }
         }
     }
 
-    async fn commit_iceberg_table(
+    async fn cas_update_metadata_location(
         &self,
         namespace_name: &str,
         asset_name: &str,
-        expected_metadata_location: &str,
-        new_metadata_location: &str,
+        format: AssetFormat,
+        expected_location: &str,
+        new_location: &str,
         new_schema_snapshot: Option<serde_json::Value>,
     ) -> Result<(), StoreError> {
         let client = self.get_client().await?;
@@ -735,15 +719,16 @@ impl CatalogStore for PgCatalogStore {
                 "UPDATE assets
                  SET metadata_location = $1,
                      schema_snapshot = COALESCE($2, schema_snapshot)
-                 WHERE namespace_id = (SELECT id FROM namespaces WHERE name = $3 AND format = 'iceberg')
-                   AND name = $4
-                   AND metadata_location = $5",
+                 WHERE namespace_id = (SELECT id FROM namespaces WHERE name = $3 AND format = $4)
+                   AND name = $5
+                   AND metadata_location = $6",
                 &[
-                    &new_metadata_location,
+                    &new_location,
                     &new_schema_snapshot,
                     &namespace_name,
+                    &format.as_str(),
                     &asset_name,
-                    &expected_metadata_location,
+                    &expected_location,
                 ],
             )
             .await
