@@ -307,3 +307,123 @@ async fn test_load_table_reads_from_object_store() {
     assert_eq!(load_json["metadata"]["last-sequence-number"], 42);
     assert_eq!(load_json["metadata"]["last-updated-ms"], 9999999999_i64);
 }
+
+#[tokio::test]
+#[serial]
+async fn test_load_table_metadata_not_found() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+
+    let mem_store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+    let app = test_app_with_store(store, mem_store.clone());
+
+    // Create table - this writes metadata.json
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/namespaces/prod/tables")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"name": "users"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::OK);
+    let create_json = body_json(create).await;
+    let metadata_location = create_json["metadata-location"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Delete the metadata.json from object store
+    let path = object_store::path::Path::from(s3_to_relative(&metadata_location));
+    mem_store.delete(&path).await.unwrap();
+
+    // Load table should return 404 MetadataNotFoundException
+    let load = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(load.status(), StatusCode::NOT_FOUND);
+    let json = body_json(load).await;
+    assert_eq!(json["error"]["type"], "MetadataNotFoundException");
+    assert_eq!(json["error"]["code"], 404);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_table_metadata_not_found() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+
+    let mem_store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+    let app = test_app_with_store(store, mem_store.clone());
+
+    // Create table - this writes metadata.json
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/namespaces/prod/tables")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"name": "users"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::OK);
+    let create_json = body_json(create).await;
+    let metadata_location = create_json["metadata-location"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Delete the metadata.json from object store
+    let path = object_store::path::Path::from(s3_to_relative(&metadata_location));
+    mem_store.delete(&path).await.unwrap();
+
+    // Commit should return 409 CommitFailedException
+    let commit = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "requirements": [
+                            {"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": null}
+                        ],
+                        "updates": [
+                            {"action": "add-snapshot", "snapshot": {
+                                "snapshot-id": 1,
+                                "sequence-number": 1,
+                                "timestamp-ms": 1234567890,
+                                "manifest-list": "s3://bucket/manifest1.avro",
+                                "summary": {"operation": "append"},
+                                "schema-id": 0
+                            }},
+                            {"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 1, "type": "branch"}
+                        ]
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(commit.status(), StatusCode::CONFLICT);
+    let json = body_json(commit).await;
+    assert_eq!(json["error"]["type"], "CommitFailedException");
+    assert_eq!(json["error"]["code"], 409);
+}

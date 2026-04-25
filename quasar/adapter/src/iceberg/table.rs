@@ -28,6 +28,7 @@ fn s3_url_to_object_path(location: &str, bucket: &str) -> Option<object_store::p
 }
 
 /// Write metadata JSON to object store if configured.
+/// After writing, verifies the file exists using HEAD operation.
 async fn write_metadata_to_store(
     location: &str,
     content: &serde_json::Value,
@@ -45,6 +46,14 @@ async fn write_metadata_to_store(
             .await
             .map_err(|e| IcebergError::InternalServerError {
                 message: format!("failed to write metadata to object store: {}", e),
+            })?;
+
+        // Verify file was successfully written using HEAD operation
+        store
+            .head(&path)
+            .await
+            .map_err(|e| IcebergError::InternalServerError {
+                message: format!("write verification failed for {}: {}", location, e),
             })?;
     }
     Ok(())
@@ -83,6 +92,21 @@ async fn read_metadata_from_store(
         Err(IcebergError::InternalServerError {
             message: "no metadata available".to_string(),
         })
+    }
+}
+
+/// Check if metadata.json exists in object store using HEAD operation.
+/// Returns true if file exists, false if it doesn't.
+/// If object_store is not configured, returns true (assumes fallback is available).
+async fn check_metadata_exists(location: &str, config: &IcebergConfig) -> bool {
+    if let (Some(ref store), Some(ref bucket)) = (&config.object_store, &config.s3_bucket) {
+        if let Some(path) = s3_url_to_object_path(location, bucket) {
+            store.head(&path).await.is_ok()
+        } else {
+            false
+        }
+    } else {
+        true
     }
 }
 
@@ -256,6 +280,15 @@ pub async fn load_table(
         .await
         .map_err(store_error_to_iceberg_table)?;
 
+    // Check metadata.json exists before loading
+    if let Some(ref ml) = asset.metadata_location {
+        if !check_metadata_exists(ml, &config).await {
+            return Err(IcebergError::MetadataNotFoundException {
+                message: format!("metadata.json not found at {}", ml),
+            });
+        }
+    }
+
     let metadata = if let Some(ref ml) = asset.metadata_location {
         read_metadata_from_store(ml, asset.schema_snapshot.clone(), &config).await?
     } else {
@@ -370,7 +403,17 @@ pub async fn commit_table(
                 message: format!("Table '{}.{}' has no metadata location", ns, table),
             })?;
 
-    // 2. Load current metadata from object store (or fallback to schema_snapshot)
+    // 2. Check metadata.json exists before committing (CAS requires current metadata)
+    if !check_metadata_exists(&metadata_location, &config).await {
+        return Err(IcebergError::CommitFailedException {
+            message: format!(
+                "Cannot commit: metadata.json not found at {}",
+                metadata_location
+            ),
+        });
+    }
+
+    // 3. Load current metadata from object store (or fallback to schema_snapshot)
     let current_metadata_json =
         read_metadata_from_store(&metadata_location, asset.schema_snapshot.clone(), &config)
             .await?;
@@ -379,27 +422,27 @@ pub async fn commit_table(
             message: format!("Failed to parse table metadata: {}", e),
         })?;
 
-    // 3. Check requirements
+    // 4. Check requirements
     if let Err(msg) = table_metadata.check_requirements(&req.requirements) {
         return Err(IcebergError::CommitFailedException { message: msg });
     }
 
-    // 4. Apply updates
+    // 5. Apply updates
     table_metadata.apply_updates(&req.updates);
 
-    // 5. Generate new metadata location
+    // 6. Generate new metadata location
     let new_metadata_location = next_metadata_location(&metadata_location);
 
-    // 6. Serialize new metadata
+    // 7. Serialize new metadata
     let new_schema_snapshot =
         serde_json::to_value(&table_metadata).map_err(|e| IcebergError::InternalServerError {
             message: format!("Failed to serialize table metadata: {}", e),
         })?;
 
-    // 7. Write new metadata.json to object store
+    // 8. Write new metadata.json to object store
     write_metadata_to_store(&new_metadata_location, &new_schema_snapshot, &config).await?;
 
-    // 8. CAS update via storage layer
+    // 9. CAS update via storage layer
     store
         .commit_iceberg_table(
             &ns,
@@ -424,7 +467,7 @@ pub async fn commit_table(
         m.registry.record_iceberg_commit_success();
     }
 
-    // 9. Return updated table
+    // 10. Return updated table
     Ok((
         StatusCode::OK,
         Json(LoadTableResponse {

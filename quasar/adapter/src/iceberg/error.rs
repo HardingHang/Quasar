@@ -35,6 +35,7 @@ pub enum IcebergError {
     BadRequestException { message: String },
     CommitFailedException { message: String },
     InternalServerError { message: String },
+    MetadataNotFoundException { message: String },
 }
 
 impl IcebergError {
@@ -65,6 +66,11 @@ impl IcebergError {
             IcebergError::InternalServerError { message } => {
                 (message.clone(), "InternalServerError".to_string(), 500)
             }
+            IcebergError::MetadataNotFoundException { message } => (
+                message.clone(),
+                "MetadataNotFoundException".to_string(),
+                404,
+            ),
         };
 
         ErrorResponse {
@@ -181,6 +187,20 @@ mod tests {
         let resp = err.to_error_response();
         assert_eq!(resp.error.error_type, "InternalServerError");
         assert_eq!(resp.error.code, 500);
+    }
+
+    #[test]
+    fn test_iceberg_error_metadata_not_found_to_response() {
+        let err = IcebergError::MetadataNotFoundException {
+            message: "metadata.json not found at s3://bucket/path".to_string(),
+        };
+        let resp = err.to_error_response();
+        assert_eq!(resp.error.error_type, "MetadataNotFoundException");
+        assert_eq!(resp.error.code, 404);
+        assert_eq!(
+            resp.error.message,
+            "metadata.json not found at s3://bucket/path"
+        );
     }
 
     #[test]
