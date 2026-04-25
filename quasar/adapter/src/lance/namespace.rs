@@ -173,13 +173,26 @@ pub async fn drop_namespace(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
     let instance = format!("/lance/v1/namespace/{}/drop", id);
+
+    // Check if namespace is empty before dropping
+    let assets = store
+        .list_assets(&id, AssetFormat::Lance)
+        .await
+        .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
+
+    if !assets.is_empty() {
+        return Err(ProblemDetails {
+            error: "NamespaceNotEmpty".to_string(),
+            code: 409,
+            detail: format!("Namespace '{}' is not empty (contains {} tables)", id, assets.len()),
+            instance,
+        });
+    }
+
     store
         .drop_namespace(&id, AssetFormat::Lance)
         .await
-        .map_err(|e| {
-            let lance_err = store_error_to_lance(e, &instance);
-            lance_err.to_problem_details()
-        })?;
+        .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
 
     Ok(StatusCode::OK)
 }
