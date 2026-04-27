@@ -161,13 +161,16 @@ def main() -> int:
             "name": ["alice", "bob", "charlie"],
         })
 
-        lance.write_dataset(
+        # write_dataset returns a LanceDataset; read version directly
+        # without re-opening, avoiding extra S3 HEAD/GET round-trips.
+        dataset = lance.write_dataset(
             table_v1,
             location,
             storage_options=storage_options,
         )
+        actual_version_v1 = dataset.version
 
-        if check(True, "Write data to location (3 rows)"):
+        if check(True, f"Write data to location (3 rows), Lance version={actual_version_v1}"):
             passed += 1
         else:
             failed += 1
@@ -179,12 +182,12 @@ def main() -> int:
     # 4. Create table version v1
     print("\n[Step 4] Create table version: v1")
     try:
-        manifest_path = f"{location}_versions/1.manifest"
+        manifest_path = f"{location}_versions/{actual_version_v1}.manifest"
         quasar_post(
             f"/lance/v1/table/{table_id}/version/create",
-            {"version": 1, "manifest_path": manifest_path},
+            {"version": actual_version_v1, "manifest_path": manifest_path},
         )
-        if check(True, "Create table version: v1"):
+        if check(True, f"Create table version: v1 (Lance version={actual_version_v1})"):
             passed += 1
         else:
             failed += 1
@@ -239,14 +242,17 @@ def main() -> int:
             "name": ["alice", "bob", "charlie", "diana", "eve"],
         })
 
-        lance.write_dataset(
+        # write_dataset returns a LanceDataset; read version directly
+        # without re-opening, avoiding extra S3 HEAD/GET round-trips.
+        dataset = lance.write_dataset(
             table_v2,
             location,
             mode="append",
             storage_options=storage_options,
         )
+        actual_version_v2 = dataset.version
 
-        if check(True, "Write second batch (5 rows total)"):
+        if check(True, f"Write second batch (5 rows total), Lance version={actual_version_v2}"):
             passed += 1
         else:
             failed += 1
@@ -257,12 +263,12 @@ def main() -> int:
     # 8. Create table version v2
     print("\n[Step 8] Create table version: v2")
     try:
-        manifest_path_v2 = f"{location}_versions/2.manifest"
+        manifest_path_v2 = f"{location}_versions/{actual_version_v2}.manifest"
         quasar_post(
             f"/lance/v1/table/{table_id}/version/create",
-            {"version": 2, "manifest_path": manifest_path_v2},
+            {"version": actual_version_v2, "manifest_path": manifest_path_v2},
         )
-        if check(True, "Create table version: v2"):
+        if check(True, f"Create table version: v2 (Lance version={actual_version_v2})"):
             passed += 1
         else:
             failed += 1
