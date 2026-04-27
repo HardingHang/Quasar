@@ -483,6 +483,8 @@ pub trait CatalogStore: Send + Sync {
         properties: HashMap<String, String>,
     ) -> Result<Asset, StoreError>;
 
+    /// MVP 简化：无分页参数。大数据量 namespace 下可能一次返回全部表，
+    /// 后续版本应增加 `offset` / `limit` 参数。
     async fn list_assets(
         &self, namespace_name: &str, format: AssetFormat,
     ) -> Result<Vec<Asset>, StoreError>;
