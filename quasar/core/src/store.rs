@@ -122,8 +122,10 @@ pub trait CatalogStore: Send + Sync {
         previous_version_id: Option<i64>,
     ) -> Result<AssetVersion, StoreError>;
 
-    /// Atomically update metadata_location if it matches the expected value.
-    /// Returns Conflict if the current location does not match.
+    /// Atomically update metadata_location and properties if metadata_location
+    /// matches the expected value. Returns Conflict if the current location
+    /// does not match.
+    #[allow(clippy::too_many_arguments)]
     async fn cas_update_metadata_location(
         &self,
         namespace_name: &str,
@@ -132,5 +134,7 @@ pub trait CatalogStore: Send + Sync {
         expected_location: &str,
         new_location: &str,
         new_schema_snapshot: Option<serde_json::Value>,
+        property_removals: &[String],
+        property_updates: &HashMap<String, String>,
     ) -> Result<(), StoreError>;
 }

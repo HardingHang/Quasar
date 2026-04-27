@@ -5,6 +5,7 @@ use axum::{
 };
 use quasar_core::{AssetFormat, CatalogStore, MetricsState, StoreError};
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -415,22 +416,38 @@ pub async fn commit_table(
         return Err(IcebergError::CommitFailedException { message: msg });
     }
 
-    // 5. Apply updates
+    // 5. Save current properties before applying updates
+    let old_properties = table_metadata.properties.clone();
+
+    // 6. Apply updates
     table_metadata.apply_updates(&req.updates);
 
-    // 6. Generate new metadata location
+    // 7. Compute property changes
+    let property_removals: Vec<String> = old_properties
+        .keys()
+        .filter(|k| !table_metadata.properties.contains_key(*k))
+        .cloned()
+        .collect();
+    let property_updates: HashMap<String, String> = table_metadata
+        .properties
+        .iter()
+        .filter(|(k, v)| old_properties.get(*k) != Some(v))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    // 8. Generate new metadata location
     let new_metadata_location = next_metadata_location(&metadata_location);
 
-    // 7. Serialize new metadata
+    // 9. Serialize new metadata
     let new_schema_snapshot =
         serde_json::to_value(&table_metadata).map_err(|e| IcebergError::InternalServerError {
             message: format!("Failed to serialize table metadata: {}", e),
         })?;
 
-    // 8. Write new metadata.json to object store
+    // 10. Write new metadata.json to object store
     write_metadata_to_store(&new_metadata_location, &new_schema_snapshot, &config).await?;
 
-    // 9. CAS update via storage layer
+    // 11. CAS update via storage layer (atomically updates metadata_location, schema_snapshot, and properties)
     store
         .cas_update_metadata_location(
             &ns,
@@ -439,6 +456,8 @@ pub async fn commit_table(
             &metadata_location,
             &new_metadata_location,
             Some(new_schema_snapshot.clone()),
+            &property_removals,
+            &property_updates,
         )
         .await
         .map_err(|e| match e {

@@ -672,6 +672,7 @@ impl CatalogStore for PgCatalogStore {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn cas_update_metadata_location(
         &self,
         namespace_name: &str,
@@ -680,22 +681,29 @@ impl CatalogStore for PgCatalogStore {
         expected_location: &str,
         new_location: &str,
         new_schema_snapshot: Option<serde_json::Value>,
+        property_removals: &[String],
+        property_updates: &HashMap<String, String>,
     ) -> Result<(), StoreError> {
         let client = self.get_client().await?;
+
+        let props_json = props_to_json(property_updates)?;
 
         let updated = client
             .execute(
                 "UPDATE assets
                  SET metadata_location = $1,
-                     schema_snapshot = COALESCE($2, schema_snapshot)
+                     schema_snapshot = COALESCE($2, schema_snapshot),
+                     properties = (properties - $5::text[]) || $6::jsonb
                  WHERE namespace_id = (SELECT id FROM namespaces WHERE name = $3)
                    AND name = $4
-                   AND metadata_location = $5",
+                   AND metadata_location = $7",
                 &[
                     &new_location,
                     &new_schema_snapshot,
                     &namespace_name,
                     &asset_name,
+                    &property_removals,
+                    &props_json,
                     &expected_location,
                 ],
             )

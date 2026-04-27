@@ -447,6 +447,8 @@ async fn test_commit_cas_conflict_simulated() {
             "s3://bucket/warehouse/prod/users/metadata/00001-uuid.metadata.json",
             "s3://bucket/warehouse/prod/users/metadata/00002-uuid.metadata.json",
             None,
+            &[],
+            &HashMap::new(),
         )
         .await
         .unwrap();
@@ -460,6 +462,8 @@ async fn test_commit_cas_conflict_simulated() {
             "s3://bucket/warehouse/prod/users/metadata/00001-uuid.metadata.json",
             "s3://bucket/warehouse/prod/users/metadata/00003-uuid.metadata.json",
             None,
+            &[],
+            &HashMap::new(),
         )
         .await
         .unwrap_err();
