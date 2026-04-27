@@ -181,24 +181,25 @@ async fn test_commit_table_writes_new_metadata_to_object_store() {
                 .method("POST")
                 .uri("/iceberg/v1/namespaces/prod/tables/users")
                 .header("Content-Type", "application/json")
-                .body(Body::from(format!(
-                    r#"{{
+                .body(Body::from(
+                    r#"{
                         "requirements": [
-                            {{"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": null}}
+                            {"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": null}
                         ],
                         "updates": [
-                            {{"action": "add-snapshot", "snapshot": {{
+                            {"action": "add-snapshot", "snapshot": {
                                 "snapshot-id": 1,
                                 "sequence-number": 1,
                                 "timestamp-ms": 1234567890,
                                 "manifest-list": "s3://bucket/manifest1.avro",
-                                "summary": {{"operation": "append"}},
+                                "summary": {"operation": "append"},
                                 "schema-id": 0
-                            }}}},
-                            {{"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 1, "type": "branch"}}
+                            }},
+                            {"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 1, "type": "branch"}
                         ]
-                    }}"#
-                )))
+                    }"#
+                    .to_string(),
+                ))
                 .unwrap(),
         )
         .await

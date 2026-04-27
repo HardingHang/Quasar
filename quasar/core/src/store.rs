@@ -12,11 +12,7 @@ pub trait CatalogStore: Send + Sync {
         properties: HashMap<String, String>,
     ) -> Result<Namespace, StoreError>;
 
-    async fn list_namespaces(
-        &self,
-        offset: i64,
-        limit: i32,
-    ) -> Result<Vec<Namespace>, StoreError>;
+    async fn list_namespaces(&self, offset: i64, limit: i32) -> Result<Vec<Namespace>, StoreError>;
 
     async fn get_namespace(&self, name: &str) -> Result<Namespace, StoreError>;
 

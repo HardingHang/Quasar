@@ -82,10 +82,7 @@ async fn body_json(response: axum::response::Response) -> Value {
 }
 
 async fn create_namespace(store: &PgCatalogStore, name: &str) {
-    store
-        .create_namespace(name, HashMap::new())
-        .await
-        .unwrap();
+    store.create_namespace(name, HashMap::new()).await.unwrap();
 }
 
 #[tokio::test]
@@ -276,10 +273,7 @@ async fn test_update_namespace_properties() {
     let mut props = HashMap::new();
     props.insert("owner".to_string(), "team-a".to_string());
     props.insert("env".to_string(), "prod".to_string());
-    store
-        .create_namespace("prod", props)
-        .await
-        .unwrap();
+    store.create_namespace("prod", props).await.unwrap();
 
     let app = test_app(store);
 

@@ -82,10 +82,7 @@ async fn body_json(response: axum::response::Response) -> Value {
 }
 
 async fn create_namespace(store: &PgCatalogStore, name: &str) {
-    store
-        .create_namespace(name, HashMap::new())
-        .await
-        .unwrap();
+    store.create_namespace(name, HashMap::new()).await.unwrap();
 }
 
 #[tokio::test]
@@ -120,24 +117,25 @@ async fn test_commit_success() {
                 .method("POST")
                 .uri("/iceberg/v1/namespaces/prod/tables/users")
                 .header("Content-Type", "application/json")
-                .body(Body::from(format!(
-                    r#"{{
+                .body(Body::from(
+                    r#"{
                         "requirements": [
-                            {{"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": null}}
+                            {"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": null}
                         ],
                         "updates": [
-                            {{"action": "add-snapshot", "snapshot": {{
+                            {"action": "add-snapshot", "snapshot": {
                                 "snapshot-id": 1,
                                 "sequence-number": 1,
                                 "timestamp-ms": 1234567890,
                                 "manifest-list": "s3://bucket/manifest1.avro",
-                                "summary": {{"operation": "append"}},
+                                "summary": {"operation": "append"},
                                 "schema-id": 0
-                            }}}},
-                            {{"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 1, "type": "branch"}}
+                            }},
+                            {"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 1, "type": "branch"}
                         ]
-                    }}"#
-                )))
+                    }"#
+                    .to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -200,23 +198,24 @@ async fn test_commit_conflict() {
                 .method("POST")
                 .uri("/iceberg/v1/namespaces/prod/tables/users")
                 .header("Content-Type", "application/json")
-                .body(Body::from(format!(
-                    r#"{{
+                .body(Body::from(
+                    r#"{
                         "requirements": [
-                            {{"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": null}}
+                            {"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": null}
                         ],
                         "updates": [
-                            {{"action": "add-snapshot", "snapshot": {{
+                            {"action": "add-snapshot", "snapshot": {
                                 "snapshot-id": 1,
                                 "sequence-number": 1,
                                 "timestamp-ms": 1234567890,
                                 "manifest-list": "s3://bucket/manifest1.avro",
-                                "summary": {{}},
+                                "summary": {},
                                 "schema-id": 0
-                            }}}}
+                            }}
                         ]
-                    }}"#
-                )))
+                    }"#
+                    .to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -351,25 +350,26 @@ async fn test_commit_updates_persisted() {
                 .method("POST")
                 .uri("/iceberg/v1/namespaces/prod/tables/users")
                 .header("Content-Type", "application/json")
-                .body(Body::from(format!(
-                    r#"{{
+                .body(Body::from(
+                    r#"{
                         "requirements": [
-                            {{"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": null}}
+                            {"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": null}
                         ],
                         "updates": [
-                            {{"action": "add-snapshot", "snapshot": {{
+                            {"action": "add-snapshot", "snapshot": {
                                 "snapshot-id": 1,
                                 "sequence-number": 1,
                                 "timestamp-ms": 1234567890,
                                 "manifest-list": "s3://bucket/manifest1.avro",
-                                "summary": {{"operation": "append"}},
+                                "summary": {"operation": "append"},
                                 "schema-id": 0
-                            }}}},
-                            {{"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 1, "type": "branch"}},
-                            {{"action": "set-properties", "updates": {{"owner": "team-a"}}}}
+                            }},
+                            {"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 1, "type": "branch"},
+                            {"action": "set-properties", "updates": {"owner": "team-a"}}
                         ]
-                    }}"#
-                )))
+                    }"#
+                    .to_string(),
+                ))
                 .unwrap(),
         )
         .await

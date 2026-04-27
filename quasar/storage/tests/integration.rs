@@ -74,27 +74,15 @@ async fn test_namespace_crud() {
         .unwrap();
     assert_eq!(ns.name, "test_ns");
 
-    let list = store
-        .list_namespaces(0, 100)
-        .await
-        .unwrap();
+    let list = store.list_namespaces(0, 100).await.unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].name, "test_ns");
 
-    let got = store
-        .get_namespace("test_ns")
-        .await
-        .unwrap();
+    let got = store.get_namespace("test_ns").await.unwrap();
     assert_eq!(got.id, ns.id);
 
-    assert!(store
-        .namespace_exists("test_ns")
-        .await
-        .unwrap());
-    assert!(!store
-        .namespace_exists("missing")
-        .await
-        .unwrap());
+    assert!(store.namespace_exists("test_ns").await.unwrap());
+    assert!(!store.namespace_exists("missing").await.unwrap());
 
     let err = store
         .create_namespace("test_ns", HashMap::new())
@@ -102,19 +90,10 @@ async fn test_namespace_crud() {
         .unwrap_err();
     assert!(matches!(err, StoreError::AlreadyExists(_)));
 
-    store
-        .drop_namespace("test_ns")
-        .await
-        .unwrap();
-    assert!(!store
-        .namespace_exists("test_ns")
-        .await
-        .unwrap());
+    store.drop_namespace("test_ns").await.unwrap();
+    assert!(!store.namespace_exists("test_ns").await.unwrap());
 
-    let err = store
-        .drop_namespace("test_ns")
-        .await
-        .unwrap_err();
+    let err = store.drop_namespace("test_ns").await.unwrap_err();
     assert!(matches!(err, StoreError::NotFound(_)));
 }
 
@@ -123,10 +102,7 @@ async fn test_namespace_crud() {
 async fn test_asset_crud() {
     let store = setup().await;
 
-    store
-        .create_namespace("ns1", HashMap::new())
-        .await
-        .unwrap();
+    store.create_namespace("ns1", HashMap::new()).await.unwrap();
 
     let asset = store
         .create_asset(
@@ -223,10 +199,7 @@ async fn test_asset_crud() {
 async fn test_version_commit_and_load() {
     let store = setup().await;
 
-    store
-        .create_namespace("ns1", HashMap::new())
-        .await
-        .unwrap();
+    store.create_namespace("ns1", HashMap::new()).await.unwrap();
     store
         .create_asset(
             "ns1",
@@ -295,10 +268,7 @@ async fn test_version_commit_and_load() {
 async fn test_version_conflict() {
     let store = setup().await;
 
-    store
-        .create_namespace("ns1", HashMap::new())
-        .await
-        .unwrap();
+    store.create_namespace("ns1", HashMap::new()).await.unwrap();
     store
         .create_asset(
             "ns1",
@@ -343,10 +313,7 @@ async fn test_version_conflict() {
 async fn test_not_found_errors() {
     let store = setup().await;
 
-    let err = store
-        .get_namespace("missing")
-        .await
-        .unwrap_err();
+    let err = store.get_namespace("missing").await.unwrap_err();
     assert!(matches!(err, StoreError::NotFound(_)));
 
     let err = store
@@ -355,10 +322,7 @@ async fn test_not_found_errors() {
         .unwrap_err();
     assert!(matches!(err, StoreError::NotFound(_)));
 
-    store
-        .create_namespace("ns1", HashMap::new())
-        .await
-        .unwrap();
+    store.create_namespace("ns1", HashMap::new()).await.unwrap();
     let err = store
         .get_asset("ns1", AssetFormat::Lance, "tbl")
         .await
@@ -381,10 +345,7 @@ async fn test_update_namespace_properties() {
     props.insert("owner".to_string(), "team-a".to_string());
     props.insert("env".to_string(), "prod".to_string());
 
-    store
-        .create_namespace("ns1", props)
-        .await
-        .unwrap();
+    store.create_namespace("ns1", props).await.unwrap();
 
     // Add new property and update existing
     let mut updates = HashMap::new();

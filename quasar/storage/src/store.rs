@@ -123,11 +123,7 @@ impl CatalogStore for PgCatalogStore {
         row_to_namespace(&row)
     }
 
-    async fn list_namespaces(
-        &self,
-        offset: i64,
-        limit: i32,
-    ) -> Result<Vec<Namespace>, StoreError> {
+    async fn list_namespaces(&self, offset: i64, limit: i32) -> Result<Vec<Namespace>, StoreError> {
         let client = self.get_client().await?;
 
         let rows = client
@@ -145,10 +141,7 @@ impl CatalogStore for PgCatalogStore {
         let client = self.get_client().await?;
 
         let row = client
-            .query_opt(
-                "SELECT * FROM namespaces WHERE name = $1",
-                &[&name],
-            )
+            .query_opt("SELECT * FROM namespaces WHERE name = $1", &[&name])
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
@@ -176,10 +169,7 @@ impl CatalogStore for PgCatalogStore {
         let client = self.get_client().await?;
 
         let deleted = client
-            .execute(
-                "DELETE FROM namespaces WHERE name = $1",
-                &[&name],
-            )
+            .execute("DELETE FROM namespaces WHERE name = $1", &[&name])
             .await
             .map_err(|e| match e.code() {
                 Some(&tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION) => {
