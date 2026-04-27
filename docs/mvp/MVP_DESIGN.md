@@ -169,13 +169,10 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 -- ============================================
 CREATE TABLE namespaces (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name TEXT NOT NULL,
+    name TEXT NOT NULL UNIQUE,
     format TEXT NOT NULL CHECK (format IN ('iceberg', 'lance')),
     properties JSONB NOT NULL DEFAULT '{}',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    UNIQUE (name, format)
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 COMMENT ON COLUMN namespaces.format IS
@@ -186,14 +183,13 @@ COMMENT ON COLUMN namespaces.format IS
 -- ============================================
 CREATE TABLE assets (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    namespace_id UUID NOT NULL REFERENCES namespaces(id) ON DELETE RESTRICT,
+    namespace_id UUID NOT NULL REFERENCES namespaces(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     location TEXT NOT NULL,
     metadata_location TEXT,             -- Iceberg 专用：当前 metadata.json URI
     schema_snapshot JSONB,              -- 可选缓存的 Schema 快照
     properties JSONB NOT NULL DEFAULT '{}',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
     UNIQUE (namespace_id, name)
 );
@@ -211,15 +207,15 @@ COMMENT ON COLUMN assets.metadata_location IS
 CREATE TABLE asset_versions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     asset_id UUID NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
-    version INTEGER NOT NULL,
-    manifest_path TEXT NOT NULL,
-    naming_scheme TEXT NOT NULL DEFAULT 'V2',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    version_id BIGINT NOT NULL,
+    metadata_location TEXT NOT NULL,
+    previous_version_id BIGINT,
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    UNIQUE (asset_id, version)
+    UNIQUE (asset_id, version_id)
 );
 
-CREATE INDEX idx_asset_versions_asset ON asset_versions(asset_id);
+CREATE INDEX idx_versions_asset ON asset_versions(asset_id);
 
 COMMENT ON TABLE asset_versions IS
     '仅 Lance 格式使用。客户端写入数据后将 manifest 路径注册到此表。Iceberg 版本历史自包含在 metadata.json 链中。';
@@ -229,11 +225,11 @@ COMMENT ON TABLE asset_versions IS
 
 | 表 | 索引 | 用途 |
 |---|---|---|
-| namespaces | `UNIQUE(name, format)` | 防止同名 Namespace 在同一格式下重复 |
+| namespaces | `UNIQUE(name)` | 防止同名 Namespace 重复 |
 | assets | `UNIQUE(namespace_id, name)` | 防止同 Namespace 下同名表 |
 | assets | `idx_assets_namespace` | 加速 `list assets in namespace` 查询 |
-| asset_versions | `UNIQUE(asset_id, version)` | 防止同一表的版本号重复（并发控制） |
-| asset_versions | `idx_asset_versions_asset` | 加速 `list versions` 查询 |
+| asset_versions | `UNIQUE(asset_id, version_id)` | 防止同一表的版本号重复（并发控制） |
+| asset_versions | `idx_versions_asset` | 加速 `list versions` 查询 |
 
 ### 4.5 核心实体 Rust 定义
 
@@ -244,14 +240,20 @@ pub struct Namespace {
     pub format: AssetFormat,
     pub properties: HashMap<String, String>,
     pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display, EnumString, IntoStaticStr)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum AssetFormat {
-    #[serde(rename = "iceberg")]
     Iceberg,
-    #[serde(rename = "lance")]
     Lance,
+}
+
+impl AssetFormat {
+    pub fn as_str(&self) -> &'static str {
+        (*self).into()
+    }
 }
 
 pub struct Asset {
@@ -263,16 +265,15 @@ pub struct Asset {
     pub schema_snapshot: Option<serde_json::Value>,
     pub properties: HashMap<String, String>,
     pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
 }
 
 pub struct AssetVersion {
     pub id: Uuid,
     pub asset_id: Uuid,
-    pub version: i32,
-    pub manifest_path: String,
-    pub naming_scheme: String,
-    pub created_at: DateTime<Utc>,
+    pub version_id: i64,
+    pub metadata_location: String,
+    pub previous_version_id: Option<i64>,
+    pub timestamp: DateTime<Utc>,
 }
 ```
 
@@ -445,11 +446,19 @@ cargo build --no-default-features --features iceberg
 #[async_trait]
 pub trait CatalogStore: Send + Sync {
     // ── Namespace ──────────────────────────────
-    async fn create_namespace(&self, namespace: &Namespace) -> Result<Namespace, StoreError>;
-    async fn get_namespace(&self, name: &str, format: AssetFormat) -> Result<Option<Namespace>, StoreError>;
-    async fn list_namespaces(&self, format: AssetFormat, offset: i64, limit: i32) -> Result<Vec<Namespace>, StoreError>;
-    async fn namespace_is_empty(&self, name: &str, format: AssetFormat) -> Result<bool, StoreError>;
-    async fn delete_namespace(&self, name: &str, format: AssetFormat) -> Result<bool, StoreError>;
+    async fn create_namespace(
+        &self, name: &str, format: AssetFormat, properties: HashMap<String, String>,
+    ) -> Result<Namespace, StoreError>;
+
+    async fn list_namespaces(
+        &self, format: AssetFormat, offset: i64, limit: i32,
+    ) -> Result<Vec<Namespace>, StoreError>;
+
+    async fn get_namespace(&self, name: &str, format: AssetFormat) -> Result<Namespace, StoreError>;
+
+    async fn namespace_exists(&self, name: &str, format: AssetFormat) -> Result<bool, StoreError>;
+
+    async fn drop_namespace(&self, name: &str, format: AssetFormat) -> Result<(), StoreError>;
 
     /// 增量更新 properties：removals 删除指定 key，updates 新增/覆盖指定 key-value
     /// 对应 Iceberg REST 的 updateProperties 端点语义
@@ -462,60 +471,85 @@ pub trait CatalogStore: Send + Sync {
     ) -> Result<Namespace, StoreError>;
 
     // ── Asset ──────────────────────────────────
-    async fn create_asset(&self, asset: &Asset) -> Result<Asset, StoreError>;
-    async fn get_asset(&self, namespace_id: Uuid, name: &str)
-        -> Result<Option<Asset>, StoreError>;
-    async fn list_assets(&self, namespace_id: Uuid, offset: i64, limit: i32)
-        -> Result<Vec<Asset>, StoreError>;
-    async fn update_asset(&self, asset: &Asset) -> Result<Asset, StoreError>;
-    async fn delete_asset(&self, namespace_id: Uuid, name: &str)
-        -> Result<bool, StoreError>;
-
-    // ── Iceberg Commit (CAS) ───────────────────
-    /// Iceberg 适配器在内存中完成 TableMetadata 的更新、序列化、写入对象存储后，
-    /// 调用此方法原子更新数据库指针。CAS 条件始终是 metadata_location 未变。
-    /// 返回 true 表示成功，false 表示冲突（当前值已变）
-    async fn commit_iceberg_table(
+    #[allow(clippy::too_many_arguments)]
+    async fn create_asset(
         &self,
-        namespace_id: Uuid,
+        namespace_name: &str,
+        format: AssetFormat,
         name: &str,
-        expected_metadata_location: &str,
-        updates: &AssetCommitUpdate,
+        location: &str,
+        metadata_location: Option<&str>,
+        schema_snapshot: Option<serde_json::Value>,
+        properties: HashMap<String, String>,
+    ) -> Result<Asset, StoreError>;
+
+    async fn list_assets(
+        &self, namespace_name: &str, format: AssetFormat,
+    ) -> Result<Vec<Asset>, StoreError>;
+
+    async fn get_asset(
+        &self, namespace_name: &str, format: AssetFormat, name: &str,
+    ) -> Result<Asset, StoreError>;
+
+    /// Get asset with its current version in a single query.
+    /// Returns (Asset, Option<AssetVersion>) - version may be None if no versions exist.
+    async fn get_asset_with_current_version(
+        &self, namespace_name: &str, format: AssetFormat, name: &str,
+    ) -> Result<(Asset, Option<AssetVersion>), StoreError>;
+
+    async fn asset_exists(
+        &self, namespace_name: &str, format: AssetFormat, name: &str,
     ) -> Result<bool, StoreError>;
 
-    // ── Lance Version ──────────────────────────
-    async fn create_version(&self, version: &AssetVersion) -> Result<AssetVersion, StoreError>;
-    async fn list_versions(&self, asset_id: Uuid, descending: bool, limit: i32)
-        -> Result<Vec<AssetVersion>, StoreError>;
-    async fn get_version(&self, asset_id: Uuid, version: i32)
-        -> Result<Option<AssetVersion>, StoreError>;
-    async fn get_latest_version(&self, asset_id: Uuid)
-        -> Result<Option<AssetVersion>, StoreError>;
+    async fn drop_asset(
+        &self, namespace_name: &str, format: AssetFormat, name: &str,
+    ) -> Result<(), StoreError>;
+
+    async fn rename_asset(
+        &self, namespace_name: &str, format: AssetFormat, name: &str, new_name: &str,
+    ) -> Result<(), StoreError>;
+
+    // ── Version ────────────────────────────────
+    async fn load_version(
+        &self, namespace_name: &str, format: AssetFormat, asset_name: &str, version_id: i64,
+    ) -> Result<AssetVersion, StoreError>;
+
+    async fn load_current_version(
+        &self, namespace_name: &str, format: AssetFormat, asset_name: &str,
+    ) -> Result<AssetVersion, StoreError>;
+
+    async fn list_versions(
+        &self, namespace_name: &str, format: AssetFormat, asset_name: &str,
+    ) -> Result<Vec<AssetVersion>, StoreError>;
+
+    /// Create a version record.
+    /// If `previous_version_id` is Some, performs CAS check against the current
+    /// latest version before inserting. Returns Conflict if the check fails.
+    async fn create_version(
+        &self,
+        namespace_name: &str,
+        format: AssetFormat,
+        asset_name: &str,
+        version_id: i64,
+        metadata_location: String,
+        previous_version_id: Option<i64>,
+    ) -> Result<AssetVersion, StoreError>;
+
+    /// Atomically update metadata_location if it matches the expected value.
+    /// Returns Conflict if the current location does not match.
+    async fn cas_update_metadata_location(
+        &self,
+        namespace_name: &str,
+        asset_name: &str,
+        format: AssetFormat,
+        expected_location: &str,
+        new_location: &str,
+        new_schema_snapshot: Option<serde_json::Value>,
+    ) -> Result<(), StoreError>;
 }
 ```
 
-### 7.2 AssetCommitUpdate
-
-```rust
-/// 一次 Iceberg commit 中可能变化的所有字段集合
-pub struct AssetCommitUpdate {
-    /// 新的 metadata.json URI（必填，每次 commit 都会产生新文件）
-    pub new_metadata_location: String,
-
-    /// 表的数据基础路径（仅当 set-location update 出现时有值）
-    pub new_location: Option<String>,
-
-    /// 更新后的 schema 缓存
-    pub new_schema_snapshot: Option<serde_json::Value>,
-
-    /// properties 增量变更：新增/覆盖
-    pub property_updates: HashMap<String, String>,
-    /// properties 增量变更：移除的 key 列表
-    pub property_removals: Vec<String>,
-}
-```
-
-### 7.3 StoreError
+### 7.2 StoreError
 
 ```rust
 pub enum StoreError {
@@ -523,7 +557,6 @@ pub enum StoreError {
     AlreadyExists(String),
     Conflict(String),
     InvalidInput(String),
-    Database(String),
     Internal(String),
 }
 ```
@@ -554,7 +587,7 @@ MVP 阶段单级 Namespace 下，`namespace_name` 即为 Namespace 名，`table_
 3. **适配器校验 requirements 是否满足**（如断言 metadata_location 仍为 V1）。
 4. **适配器将 updates 逐一应用到 TableMetadata 上，生成新的 TableMetadata 对象**。
 5. **适配器将新 TableMetadata 序列化为新的 metadata.json（V2），写入对象存储**（路径由适配器决定，通常为递增编号或 UUID）。
-6. 适配器调用 `CatalogStore.commit_iceberg_table()`，以 `metadata_location = V1` 为 CAS 条件，原子更新数据库中的 `metadata_location` 为 V2 及其他相关字段。
+6. 适配器调用 `CatalogStore.cas_update_metadata_location()`，以 `metadata_location = V1` 为 CAS 条件，原子更新数据库中的 `metadata_location` 为 V2 及 `schema_snapshot`。
 7. 若 CAS 条件不满足（metadata_location 已不是 V1），返回 `409 Conflict`。
 
 **CAS SQL：**
@@ -562,12 +595,9 @@ MVP 阶段单级 Namespace 下，`namespace_name` 即为 Namespace 名，`table_
 ```sql
 UPDATE assets
 SET metadata_location = $new_metadata_location,
-    location = COALESCE($new_location, location),
-    schema_snapshot = COALESCE($new_schema_snapshot, schema_snapshot),
-    properties = (properties - $property_removals::text[]) || $property_updates::jsonb,
-    updated_at = NOW()
-WHERE namespace_id = $namespace_id
-  AND name = $table_name
+    schema_snapshot = COALESCE($new_schema_snapshot, schema_snapshot)
+WHERE namespace_id = (SELECT id FROM namespaces WHERE name = $namespace_name AND format = $format)
+  AND name = $asset_name
   AND metadata_location = $expected_metadata_location;
 ```
 
@@ -580,18 +610,17 @@ WHERE namespace_id = $namespace_id
 ### 8.2 Lance 版本唯一性约束
 
 ```sql
-INSERT INTO asset_versions (asset_id, version, manifest_path, naming_scheme)
+INSERT INTO asset_versions (asset_id, version_id, metadata_location, previous_version_id)
 VALUES ($1, $2, $3, $4);
 ```
 
-若违反 `UNIQUE(asset_id, version)` → 返回 `409 Conflict`（`TableVersionAlreadyExists`）
+若违反 `UNIQUE(asset_id, version_id)` → 返回 `409 Conflict`（`TableVersionAlreadyExists`）
 
 ### 8.3 Namespace 属性增量更新
 
 ```sql
 UPDATE namespaces
-SET properties = (properties - $removals::text[]) || $updates::jsonb,
-    updated_at = NOW()
+SET properties = (properties - $removals::text[]) || $updates::jsonb
 WHERE name = $name AND format = $format;
 ```
 
@@ -660,7 +689,6 @@ StoreError::NotFound      → 404
 StoreError::AlreadyExists → 409
 StoreError::Conflict      → 409
 StoreError::InvalidInput  → 400
-StoreError::Database      → 500（日志记录详情，对外返回通用错误）
 StoreError::Internal      → 500
 ```
 
@@ -764,7 +792,7 @@ cargo build  # 成功编译，无错误
 **前置依赖：** S0
 
 **工作内容：**
-- `core/src/lib.rs`：定义 `Namespace`、`Asset`、`AssetVersion`、`AssetFormat`、`AssetCommitUpdate`、`StoreError` 等全部数据结构
+- `core/src/lib.rs`：定义 `Namespace`、`Asset`、`AssetVersion`、`AssetFormat`、`StoreError` 等全部数据结构
 - `core/src/store.rs`：定义 `CatalogStore` trait（完整签名，含所有方法）
 - `storage`、`adapter` crate 添加对 `core` 的依赖，编译通过
 - 暂不实现任何方法体，仅签名和结构定义
@@ -784,10 +812,10 @@ cargo build  # 4 个 crate 全部编译通过
 **工作内容：**
 - `storage/src/migrations/`：refinery 迁移脚本 V1（完整 DDL，见 4.3 节）
 - `storage/src/lib.rs`：`PgCatalogStore` 结构体 + `impl CatalogStore for PgCatalogStore`
-- 实现以下方法（不含 `commit_iceberg_table`）：
-  - `create_namespace`、`get_namespace`、`list_namespaces`、`namespace_is_empty`、`delete_namespace`、`update_namespace_properties`
-  - `create_asset`、`get_asset`、`list_assets`、`update_asset`、`delete_asset`
-  - `create_version`、`list_versions`、`get_version`、`get_latest_version`
+- 实现以下方法（不含 `cas_update_metadata_location`）：
+  - `create_namespace`、`get_namespace`、`list_namespaces`、`namespace_exists`、`drop_namespace`、`update_namespace_properties`
+  - `create_asset`、`get_asset`、`list_assets`、`get_asset_with_current_version`、`asset_exists`、`drop_asset`、`rename_asset`
+  - `load_version`、`load_current_version`、`list_versions`、`create_version`
 - deadpool-postgres 连接池配置
 - 单元测试：每个方法至少一个正向用例 + 一个异常用例（如重复创建返回 `AlreadyExists`）
 
@@ -1082,14 +1110,14 @@ curl http://localhost:8080/iceberg/v1/namespaces/prod/tables/nonexistent
   - `TableMetadata::apply_updates()` 方法
   - `TableMetadata::check_requirements()` 方法
   - `TableMetadata::to_json()` 方法
-- `storage/src/lib.rs`：实现 `commit_iceberg_table` 方法（CAS SQL）
+- `storage/src/store.rs`：实现 `cas_update_metadata_location` 方法（CAS SQL）
 - `adapter/src/iceberg/table.rs`：实现 `POST /iceberg/v1/namespaces/{ns}/tables/{table}`（commit handler）
   - 解析 `requirements` + `updates`
   - 从对象存储加载当前 metadata.json
   - 校验 requirements
   - 应用 updates，生成新 metadata.json
   - 写入对象存储（新路径）
-  - 调用 `commit_iceberg_table` CAS 更新 DB
+  - 调用 `cas_update_metadata_location` CAS 更新 DB
   - 若冲突返回 `409 CommitFailedException`
 - 单元测试：模拟并发 commit 冲突场景
 
@@ -1113,8 +1141,8 @@ curl -X POST .../prod/tables/users \
 # 可通过两个终端同时 curl 验证
 
 # 4. 单元测试验证 CAS
-# cargo test -p storage commit_iceberg_table_concurrent
-# 验证：两次并行 commit 基于相同 expected_metadata_location，恰好一个成功一个失败
+# cargo test -p storage cas_update_metadata_location_concurrent
+# 验证：两次并行 commit 基于相同 expected_location，恰好一个成功一个失败
 ```
 
 **此阶段完成标志：Iceberg REST Catalog 协议全部 MVP 端点可用，CAS 并发控制正确。**
@@ -1164,12 +1192,12 @@ cd tests && python spark_iceberg_integration.py
 - `Namespace`、`Asset`、`AssetVersion` 数据结构
 - `AssetFormat` 枚举
 - `CatalogStore` trait（完整签名）
-- `StoreError`、`AssetCommitUpdate`
+- `StoreError`
 
 **storage：**
 - refinery 迁移脚本（DDL）
 - deadpool-postgres 连接池配置
-- `PgCatalogStore` 全部方法实现（S2 完成不含 CAS；S9 补充 `commit_iceberg_table`）
+- `PgCatalogStore` 全部方法实现（S2 完成不含 CAS；S9 补充 `cas_update_metadata_location`）
 
 **adapter/lance：**
 - Namespace 全部 handler（S3）
@@ -1201,7 +1229,7 @@ cd tests && python spark_iceberg_integration.py
 - Iceberg 错误响应格式
 
 **storage：**
-- `commit_iceberg_table` 方法实现（S9）
+- `cas_update_metadata_location` 方法实现（S9）
 
 **server：**
 - axum 路由注册（`/iceberg/v1/...`，S8）
@@ -1245,7 +1273,7 @@ cd tests && python spark_iceberg_integration.py
 - 新增：数据模型完整规格（6 条设计原则、ER 图、PostgreSQL DDL、5 个索引、实体 Rust 定义）
 - 新增：协议端点设计（Iceberg 13 个端点、Lance 16 个端点、基础设施 2 个端点，含明确不实现清单）
 - 新增：Crate 分层与模块职责（4 个 crate 目录结构、依赖关系图）
-- 新增：核心接口定义（`CatalogStore` trait 15 个方法、`AssetCommitUpdate`、`StoreError`、Lance 路径解析规则）
+- 新增：核心接口定义（`CatalogStore` trait 17 个方法、`StoreError`、Lance 路径解析规则）
 - 新增：并发控制与一致性（Iceberg CAS 7 步流程 + SQL、Lance 版本唯一性约束 SQL、Namespace 增量更新 SQL）
 - 新增：错误处理规范（两层错误体系、Iceberg ErrorResponse 格式、Lance RFC-7807 格式、状态码映射策略）
 - 新增：配置与部署（5 个环境变量、部署形态、优雅关机流程）
@@ -1260,6 +1288,23 @@ cd tests && python spark_iceberg_integration.py
 - 更新：6.1 节 Crate 分层注释——adapter 子模块标注 feature 依赖
 - 更新：附录关键决策清单——新增第 17 条「条件编译」决策
 - 更新：修订记录 V1.0 中「16 条关键决策」→「17 条关键决策」
+
+### V1.2
+
+- **更新：7.1 节 CatalogStore trait**——与实际代码同步：
+  - Asset 操作定位方式从 `namespace_id: Uuid` 改为 `namespace_name: &str, format: AssetFormat`
+  - 新增 `namespace_exists`、`asset_exists`、`rename_asset`、`get_asset_with_current_version`
+  - 删除 `namespace_is_empty`、`update_asset`
+  - `delete_namespace` 重命名为 `drop_namespace`，返回 `Result<(), StoreError>`
+  - `delete_asset` 重命名为 `drop_asset`
+  - `commit_iceberg_table` 重命名为 `cas_update_metadata_location`，参数从 `namespace_id + AssetCommitUpdate` 改为 `namespace_name + format + expected_location + new_location + new_schema_snapshot`
+  - Lance 版本方法从 `get_version`/`get_latest_version`/`create_version(&AssetVersion)` 改为 `load_version`/`load_current_version`/`create_version(namespace_name, format, asset_name, version_id, metadata_location, previous_version_id)`
+  - 方法总数从 15 个增至 17 个
+- **删除：7.2 节 AssetCommitUpdate**——该结构体已在实现中被移除，CAS 参数直接展开到 `cas_update_metadata_location` 方法签名中
+- **更新：7.3 节 StoreError**——删除 `Database(String)` 变体，合并入 `Internal`
+- **更新：8.1 节 CAS SQL**——与实际实现同步，仅更新 `metadata_location` 和 `schema_snapshot`
+- **更新：9.4 节 错误映射**——删除 `StoreError::Database → 500` 映射
+- **更新：S1/S2/S9 工作内容**——同步方法名变更，删除 `AssetCommitUpdate` 引用
 
 ---
 

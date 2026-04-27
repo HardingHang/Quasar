@@ -83,7 +83,7 @@ async fn body_json(response: axum::response::Response) -> Value {
 
 async fn create_namespace(store: &PgCatalogStore, name: &str) {
     store
-        .create_namespace(name, AssetFormat::Iceberg, HashMap::new())
+        .create_namespace(name, HashMap::new())
         .await
         .unwrap();
 }

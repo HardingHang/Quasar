@@ -110,7 +110,7 @@ pub async fn create_namespace(
     let instance = format!("/lance/v1/namespace/{}/create", id);
     validate_name(&id).map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
     let ns = store
-        .create_namespace(&id, AssetFormat::Lance, req.properties)
+        .create_namespace(&id, req.properties)
         .await
         .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
 
@@ -132,7 +132,7 @@ pub async fn list_namespaces(
         .unwrap_or(0);
 
     let namespaces = store
-        .list_namespaces(AssetFormat::Lance, offset, limit)
+        .list_namespaces(offset, limit)
         .await
         .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
 
@@ -160,7 +160,7 @@ pub async fn describe_namespace(
 ) -> Result<impl IntoResponse, ProblemDetails> {
     let instance = format!("/lance/v1/namespace/{}/describe", id);
     let ns = store
-        .get_namespace(&id, AssetFormat::Lance)
+        .get_namespace(&id)
         .await
         .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
 
@@ -194,7 +194,7 @@ pub async fn drop_namespace(
     }
 
     store
-        .drop_namespace(&id, AssetFormat::Lance)
+        .drop_namespace(&id)
         .await
         .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
 
@@ -230,7 +230,7 @@ pub async fn namespace_exists(
 ) -> Result<impl IntoResponse, ProblemDetails> {
     let instance = format!("/lance/v1/namespace/{}/exists", id);
     let exists = store
-        .namespace_exists(&id, AssetFormat::Lance)
+        .namespace_exists(&id)
         .await
         .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
 

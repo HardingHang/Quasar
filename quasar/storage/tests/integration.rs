@@ -69,51 +69,50 @@ async fn test_namespace_crud() {
     let store = setup().await;
 
     let ns = store
-        .create_namespace("test_ns", AssetFormat::Lance, HashMap::new())
+        .create_namespace("test_ns", HashMap::new())
         .await
         .unwrap();
     assert_eq!(ns.name, "test_ns");
-    assert!(matches!(ns.format, AssetFormat::Lance));
 
     let list = store
-        .list_namespaces(AssetFormat::Lance, 0, 100)
+        .list_namespaces(0, 100)
         .await
         .unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].name, "test_ns");
 
     let got = store
-        .get_namespace("test_ns", AssetFormat::Lance)
+        .get_namespace("test_ns")
         .await
         .unwrap();
     assert_eq!(got.id, ns.id);
 
     assert!(store
-        .namespace_exists("test_ns", AssetFormat::Lance)
+        .namespace_exists("test_ns")
         .await
         .unwrap());
     assert!(!store
-        .namespace_exists("missing", AssetFormat::Lance)
+        .namespace_exists("missing")
         .await
         .unwrap());
 
     let err = store
-        .create_namespace("test_ns", AssetFormat::Lance, HashMap::new())
+        .create_namespace("test_ns", HashMap::new())
         .await
         .unwrap_err();
     assert!(matches!(err, StoreError::AlreadyExists(_)));
 
     store
-        .drop_namespace("test_ns", AssetFormat::Lance)
+        .drop_namespace("test_ns")
         .await
         .unwrap();
     assert!(!store
-        .namespace_exists("test_ns", AssetFormat::Lance)
+        .namespace_exists("test_ns")
         .await
         .unwrap());
 
     let err = store
-        .drop_namespace("test_ns", AssetFormat::Lance)
+        .drop_namespace("test_ns")
         .await
         .unwrap_err();
     assert!(matches!(err, StoreError::NotFound(_)));
@@ -125,7 +124,7 @@ async fn test_asset_crud() {
     let store = setup().await;
 
     store
-        .create_namespace("ns1", AssetFormat::Lance, HashMap::new())
+        .create_namespace("ns1", HashMap::new())
         .await
         .unwrap();
 
@@ -225,7 +224,7 @@ async fn test_version_commit_and_load() {
     let store = setup().await;
 
     store
-        .create_namespace("ns1", AssetFormat::Lance, HashMap::new())
+        .create_namespace("ns1", HashMap::new())
         .await
         .unwrap();
     store
@@ -297,7 +296,7 @@ async fn test_version_conflict() {
     let store = setup().await;
 
     store
-        .create_namespace("ns1", AssetFormat::Lance, HashMap::new())
+        .create_namespace("ns1", HashMap::new())
         .await
         .unwrap();
     store
@@ -345,7 +344,7 @@ async fn test_not_found_errors() {
     let store = setup().await;
 
     let err = store
-        .get_namespace("missing", AssetFormat::Lance)
+        .get_namespace("missing")
         .await
         .unwrap_err();
     assert!(matches!(err, StoreError::NotFound(_)));
@@ -357,7 +356,7 @@ async fn test_not_found_errors() {
     assert!(matches!(err, StoreError::NotFound(_)));
 
     store
-        .create_namespace("ns1", AssetFormat::Lance, HashMap::new())
+        .create_namespace("ns1", HashMap::new())
         .await
         .unwrap();
     let err = store
@@ -383,7 +382,7 @@ async fn test_update_namespace_properties() {
     props.insert("env".to_string(), "prod".to_string());
 
     store
-        .create_namespace("ns1", AssetFormat::Iceberg, props)
+        .create_namespace("ns1", props)
         .await
         .unwrap();
 
@@ -393,7 +392,7 @@ async fn test_update_namespace_properties() {
     updates.insert("region".to_string(), "us-west".to_string());
 
     let updated = store
-        .update_namespace_properties("ns1", AssetFormat::Iceberg, &["env".to_string()], &updates)
+        .update_namespace_properties("ns1", &["env".to_string()], &updates)
         .await
         .unwrap();
 
@@ -406,7 +405,7 @@ async fn test_update_namespace_properties() {
 
     // Not found
     let err = store
-        .update_namespace_properties("missing", AssetFormat::Iceberg, &[], &HashMap::new())
+        .update_namespace_properties("missing", &[], &HashMap::new())
         .await
         .unwrap_err();
     assert!(matches!(err, StoreError::NotFound(_)));

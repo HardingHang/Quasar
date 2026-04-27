@@ -9,28 +9,24 @@ pub trait CatalogStore: Send + Sync {
     async fn create_namespace(
         &self,
         name: &str,
-        format: AssetFormat,
         properties: HashMap<String, String>,
     ) -> Result<Namespace, StoreError>;
 
     async fn list_namespaces(
         &self,
-        format: AssetFormat,
         offset: i64,
         limit: i32,
     ) -> Result<Vec<Namespace>, StoreError>;
 
-    async fn get_namespace(&self, name: &str, format: AssetFormat)
-        -> Result<Namespace, StoreError>;
+    async fn get_namespace(&self, name: &str) -> Result<Namespace, StoreError>;
 
-    async fn namespace_exists(&self, name: &str, format: AssetFormat) -> Result<bool, StoreError>;
+    async fn namespace_exists(&self, name: &str) -> Result<bool, StoreError>;
 
-    async fn drop_namespace(&self, name: &str, format: AssetFormat) -> Result<(), StoreError>;
+    async fn drop_namespace(&self, name: &str) -> Result<(), StoreError>;
 
     async fn update_namespace_properties(
         &self,
         name: &str,
-        format: AssetFormat,
         removals: &[String],
         updates: &HashMap<String, String>,
     ) -> Result<Namespace, StoreError>;

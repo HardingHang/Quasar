@@ -3,8 +3,6 @@ use deadpool_postgres::Pool;
 use quasar_core::{Asset, AssetFormat, AssetVersion, CatalogStore, Namespace, StoreError};
 use serde_json;
 use std::collections::HashMap;
-use std::str::FromStr;
-use strum::ParseError;
 use tokio_postgres::Row;
 
 pub struct PgCatalogStore {
@@ -52,11 +50,6 @@ macro_rules! try_get {
 }
 
 fn row_to_namespace(row: &Row) -> Result<Namespace, StoreError> {
-    let format_str: String = try_get!(row, "format");
-    let format = AssetFormat::from_str(&format_str).map_err(|e: ParseError| {
-        StoreError::Internal(format!("unknown asset format in DB: {}", e))
-    })?;
-
     let props: serde_json::Value = try_get!(row, "properties");
     let properties: HashMap<String, String> = serde_json::from_value(props)
         .map_err(|e| StoreError::Internal(format!("properties JSON: {}", e)))?;
@@ -64,7 +57,6 @@ fn row_to_namespace(row: &Row) -> Result<Namespace, StoreError> {
     Ok(Namespace {
         id: try_get!(row, "id"),
         name: try_get!(row, "name"),
-        format,
         properties,
         created_at: try_get!(row, "created_at"),
     })
@@ -110,7 +102,6 @@ impl CatalogStore for PgCatalogStore {
     async fn create_namespace(
         &self,
         name: &str,
-        format: AssetFormat,
         properties: HashMap<String, String>,
     ) -> Result<Namespace, StoreError> {
         let client = self.get_client().await?;
@@ -118,8 +109,8 @@ impl CatalogStore for PgCatalogStore {
         let props_json = props_to_json(&properties)?;
         let row = client
             .query_one(
-                "INSERT INTO namespaces (name, format, properties) VALUES ($1, $2, $3) RETURNING *",
-                &[&name, &format.as_str(), &props_json],
+                "INSERT INTO namespaces (name, properties) VALUES ($1, $2) RETURNING *",
+                &[&name, &props_json],
             )
             .await
             .map_err(|e| match e.code() {
@@ -134,7 +125,6 @@ impl CatalogStore for PgCatalogStore {
 
     async fn list_namespaces(
         &self,
-        format: AssetFormat,
         offset: i64,
         limit: i32,
     ) -> Result<Vec<Namespace>, StoreError> {
@@ -142,8 +132,8 @@ impl CatalogStore for PgCatalogStore {
 
         let rows = client
             .query(
-                "SELECT * FROM namespaces WHERE format = $1 ORDER BY created_at LIMIT $2 OFFSET $3",
-                &[&format.as_str(), &(limit as i64), &offset],
+                "SELECT * FROM namespaces ORDER BY created_at LIMIT $1 OFFSET $2",
+                &[&(limit as i64), &offset],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -151,17 +141,13 @@ impl CatalogStore for PgCatalogStore {
         rows.iter().map(row_to_namespace).collect()
     }
 
-    async fn get_namespace(
-        &self,
-        name: &str,
-        format: AssetFormat,
-    ) -> Result<Namespace, StoreError> {
+    async fn get_namespace(&self, name: &str) -> Result<Namespace, StoreError> {
         let client = self.get_client().await?;
 
         let row = client
             .query_opt(
-                "SELECT * FROM namespaces WHERE name = $1 AND format = $2",
-                &[&name, &format.as_str()],
+                "SELECT * FROM namespaces WHERE name = $1",
+                &[&name],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -172,13 +158,13 @@ impl CatalogStore for PgCatalogStore {
         }
     }
 
-    async fn namespace_exists(&self, name: &str, format: AssetFormat) -> Result<bool, StoreError> {
+    async fn namespace_exists(&self, name: &str) -> Result<bool, StoreError> {
         let client = self.get_client().await?;
 
         let row = client
             .query_one(
-                "SELECT EXISTS(SELECT 1 FROM namespaces WHERE name = $1 AND format = $2)",
-                &[&name, &format.as_str()],
+                "SELECT EXISTS(SELECT 1 FROM namespaces WHERE name = $1)",
+                &[&name],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -186,13 +172,13 @@ impl CatalogStore for PgCatalogStore {
         Ok(row.get(0))
     }
 
-    async fn drop_namespace(&self, name: &str, format: AssetFormat) -> Result<(), StoreError> {
+    async fn drop_namespace(&self, name: &str) -> Result<(), StoreError> {
         let client = self.get_client().await?;
 
         let deleted = client
             .execute(
-                "DELETE FROM namespaces WHERE name = $1 AND format = $2",
-                &[&name, &format.as_str()],
+                "DELETE FROM namespaces WHERE name = $1",
+                &[&name],
             )
             .await
             .map_err(|e| match e.code() {
@@ -212,7 +198,6 @@ impl CatalogStore for PgCatalogStore {
     async fn update_namespace_properties(
         &self,
         name: &str,
-        format: AssetFormat,
         removals: &[String],
         updates: &HashMap<String, String>,
     ) -> Result<Namespace, StoreError> {
@@ -225,9 +210,9 @@ impl CatalogStore for PgCatalogStore {
             .query_opt(
                 "UPDATE namespaces
                  SET properties = (properties - $1::text[]) || $2::jsonb
-                 WHERE name = $3 AND format = $4
+                 WHERE name = $3
                  RETURNING *",
-                &[&removals, &props_json, &name, &format.as_str()],
+                &[&removals, &props_json, &name],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -242,7 +227,7 @@ impl CatalogStore for PgCatalogStore {
     async fn create_asset(
         &self,
         namespace_name: &str,
-        format: AssetFormat,
+        _format: AssetFormat,
         name: &str,
         location: &str,
         metadata_location: Option<&str>,
@@ -257,9 +242,9 @@ impl CatalogStore for PgCatalogStore {
         let row = client
             .query_opt(
                 "INSERT INTO assets (namespace_id, name, location, metadata_location, schema_snapshot, properties)
-                 SELECT id, $2, $3, $4, $5, $6 FROM namespaces WHERE name = $1 AND format = $7
+                 SELECT id, $2, $3, $4, $5, $6 FROM namespaces WHERE name = $1
                  RETURNING *",
-                &[&namespace_name, &name, &location, &metadata_location, &schema_snapshot, &props_json, &format.as_str()],
+                &[&namespace_name, &name, &location, &metadata_location, &schema_snapshot, &props_json],
             )
             .await
             .map_err(|e| match e.code() {
@@ -284,7 +269,7 @@ impl CatalogStore for PgCatalogStore {
     async fn list_assets(
         &self,
         namespace_name: &str,
-        format: AssetFormat,
+        _format: AssetFormat,
     ) -> Result<Vec<Asset>, StoreError> {
         let client = self.get_client().await?;
 
@@ -294,9 +279,9 @@ impl CatalogStore for PgCatalogStore {
                 "SELECT a.id, a.namespace_id, a.name, a.location, a.metadata_location, a.schema_snapshot, a.properties, a.created_at
                  FROM assets a
                  JOIN namespaces n ON a.namespace_id = n.id
-                 WHERE n.name = $1 AND n.format = $2
+                 WHERE n.name = $1
                  ORDER BY a.created_at",
-                &[&namespace_name, &format.as_str()],
+                &[&namespace_name],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -307,7 +292,7 @@ impl CatalogStore for PgCatalogStore {
     async fn get_asset(
         &self,
         namespace_name: &str,
-        format: AssetFormat,
+        _format: AssetFormat,
         name: &str,
     ) -> Result<Asset, StoreError> {
         let client = self.get_client().await?;
@@ -317,8 +302,8 @@ impl CatalogStore for PgCatalogStore {
             .query_opt(
                 "SELECT a.* FROM assets a
                  JOIN namespaces n ON a.namespace_id = n.id
-                 WHERE n.name = $1 AND n.format = $2 AND a.name = $3",
-                &[&namespace_name, &format.as_str(), &name],
+                 WHERE n.name = $1 AND a.name = $2",
+                &[&namespace_name, &name],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -335,7 +320,7 @@ impl CatalogStore for PgCatalogStore {
     async fn get_asset_with_current_version(
         &self,
         namespace_name: &str,
-        format: AssetFormat,
+        _format: AssetFormat,
         name: &str,
     ) -> Result<(Asset, Option<AssetVersion>), StoreError> {
         let client = self.get_client().await?;
@@ -355,8 +340,8 @@ impl CatalogStore for PgCatalogStore {
                      WHERE asset_id = a.id
                      ORDER BY version_id DESC LIMIT 1
                  ) av ON true
-                 WHERE n.name = $1 AND n.format = $2 AND a.name = $3",
-                &[&namespace_name, &format.as_str(), &name],
+                 WHERE n.name = $1 AND a.name = $2",
+                &[&namespace_name, &name],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -390,7 +375,7 @@ impl CatalogStore for PgCatalogStore {
     async fn asset_exists(
         &self,
         namespace_name: &str,
-        format: AssetFormat,
+        _format: AssetFormat,
         name: &str,
     ) -> Result<bool, StoreError> {
         let client = self.get_client().await?;
@@ -399,38 +384,23 @@ impl CatalogStore for PgCatalogStore {
         // Returns: 'namespace_not_found', 'asset_not_found', or 'asset_found'
         let row = client
             .query_one(
-                "SELECT CASE
-                    WHEN n.id IS NULL THEN 'namespace_not_found'
-                    WHEN a.id IS NULL THEN 'asset_not_found'
-                    ELSE 'asset_found'
-                 END as status
-                 FROM (SELECT 1) dummy
-                 LEFT JOIN namespaces n ON n.name = $1 AND n.format = $2
-                 LEFT JOIN assets a ON a.namespace_id = n.id AND a.name = $3",
-                &[&namespace_name, &format.as_str(), &name],
+                "SELECT EXISTS(
+                    SELECT 1 FROM assets a
+                    JOIN namespaces n ON a.namespace_id = n.id
+                    WHERE n.name = $1 AND a.name = $2
+                )",
+                &[&namespace_name, &name],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-        let status: String = row.get(0);
-        match status.as_str() {
-            "namespace_not_found" => Err(StoreError::NotFound(format!(
-                "namespace '{}'",
-                namespace_name
-            ))),
-            "asset_not_found" => Ok(false),
-            "asset_found" => Ok(true),
-            other => Err(StoreError::Internal(format!(
-                "unexpected status from asset_exists query: {}",
-                other
-            ))),
-        }
+        Ok(row.get(0))
     }
 
     async fn drop_asset(
         &self,
         namespace_name: &str,
-        format: AssetFormat,
+        _format: AssetFormat,
         name: &str,
     ) -> Result<(), StoreError> {
         let client = self.get_client().await?;
@@ -439,9 +409,9 @@ impl CatalogStore for PgCatalogStore {
         let deleted = client
             .execute(
                 "DELETE FROM assets
-                 WHERE namespace_id = (SELECT id FROM namespaces WHERE name = $1 AND format = $2)
-                 AND name = $3",
-                &[&namespace_name, &format.as_str(), &name],
+                 WHERE namespace_id = (SELECT id FROM namespaces WHERE name = $1)
+                 AND name = $2",
+                &[&namespace_name, &name],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -459,7 +429,7 @@ impl CatalogStore for PgCatalogStore {
     async fn rename_asset(
         &self,
         namespace_name: &str,
-        format: AssetFormat,
+        _format: AssetFormat,
         name: &str,
         new_name: &str,
     ) -> Result<(), StoreError> {
@@ -469,9 +439,9 @@ impl CatalogStore for PgCatalogStore {
         let updated = client
             .execute(
                 "UPDATE assets SET name = $1
-                 WHERE namespace_id = (SELECT id FROM namespaces WHERE name = $2 AND format = $3)
-                 AND name = $4",
-                &[&new_name, &namespace_name, &format.as_str(), &name],
+                 WHERE namespace_id = (SELECT id FROM namespaces WHERE name = $2)
+                 AND name = $3",
+                &[&new_name, &namespace_name, &name],
             )
             .await
             .map_err(|e| match e.code() {
@@ -497,7 +467,7 @@ impl CatalogStore for PgCatalogStore {
     async fn load_version(
         &self,
         namespace_name: &str,
-        format: AssetFormat,
+        _format: AssetFormat,
         asset_name: &str,
         version_id: i64,
     ) -> Result<AssetVersion, StoreError> {
@@ -509,8 +479,8 @@ impl CatalogStore for PgCatalogStore {
                 "SELECT av.* FROM asset_versions av
                  JOIN assets a ON av.asset_id = a.id
                  JOIN namespaces n ON a.namespace_id = n.id
-                 WHERE n.name = $1 AND n.format = $2 AND a.name = $3 AND av.version_id = $4",
-                &[&namespace_name, &format.as_str(), &asset_name, &version_id],
+                 WHERE n.name = $1 AND a.name = $2 AND av.version_id = $3",
+                &[&namespace_name, &asset_name, &version_id],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -527,7 +497,7 @@ impl CatalogStore for PgCatalogStore {
     async fn load_current_version(
         &self,
         namespace_name: &str,
-        format: AssetFormat,
+        _format: AssetFormat,
         asset_name: &str,
     ) -> Result<AssetVersion, StoreError> {
         let client = self.get_client().await?;
@@ -538,9 +508,9 @@ impl CatalogStore for PgCatalogStore {
                 "SELECT av.* FROM asset_versions av
                  JOIN assets a ON av.asset_id = a.id
                  JOIN namespaces n ON a.namespace_id = n.id
-                 WHERE n.name = $1 AND n.format = $2 AND a.name = $3
+                 WHERE n.name = $1 AND a.name = $2
                  ORDER BY av.version_id DESC LIMIT 1",
-                &[&namespace_name, &format.as_str(), &asset_name],
+                &[&namespace_name, &asset_name],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -557,7 +527,7 @@ impl CatalogStore for PgCatalogStore {
     async fn list_versions(
         &self,
         namespace_name: &str,
-        format: AssetFormat,
+        _format: AssetFormat,
         asset_name: &str,
     ) -> Result<Vec<AssetVersion>, StoreError> {
         let client = self.get_client().await?;
@@ -568,9 +538,9 @@ impl CatalogStore for PgCatalogStore {
                 "SELECT av.* FROM asset_versions av
                  JOIN assets a ON av.asset_id = a.id
                  JOIN namespaces n ON a.namespace_id = n.id
-                 WHERE n.name = $1 AND n.format = $2 AND a.name = $3
+                 WHERE n.name = $1 AND a.name = $2
                  ORDER BY av.version_id ASC",
-                &[&namespace_name, &format.as_str(), &asset_name],
+                &[&namespace_name, &asset_name],
             )
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -581,7 +551,7 @@ impl CatalogStore for PgCatalogStore {
     async fn create_version(
         &self,
         namespace_name: &str,
-        format: AssetFormat,
+        _format: AssetFormat,
         asset_name: &str,
         version_id: i64,
         metadata_location: String,
@@ -599,9 +569,9 @@ impl CatalogStore for PgCatalogStore {
                 .query_opt(
                     "SELECT a.* FROM assets a
                      JOIN namespaces n ON a.namespace_id = n.id
-                     WHERE n.name = $1 AND n.format = $2 AND a.name = $3
+                     WHERE n.name = $1 AND a.name = $2
                      FOR UPDATE OF a",
-                    &[&namespace_name, &format.as_str(), &asset_name],
+                    &[&namespace_name, &asset_name],
                 )
                 .await
                 .map_err(|e| StoreError::Internal(format!("asset query: {}", e)))?;
@@ -670,13 +640,12 @@ impl CatalogStore for PgCatalogStore {
             let row = client
                 .query_opt(
                     "INSERT INTO asset_versions (asset_id, version_id, metadata_location)
-                     SELECT a.id, $4, $5 FROM assets a
+                     SELECT a.id, $3, $4 FROM assets a
                      JOIN namespaces n ON a.namespace_id = n.id
-                     WHERE n.name = $1 AND n.format = $2 AND a.name = $3
+                     WHERE n.name = $1 AND a.name = $2
                      RETURNING *",
                     &[
                         &namespace_name,
-                        &format.as_str(),
                         &asset_name,
                         &version_id,
                         &metadata_location,
@@ -707,7 +676,7 @@ impl CatalogStore for PgCatalogStore {
         &self,
         namespace_name: &str,
         asset_name: &str,
-        format: AssetFormat,
+        _format: AssetFormat,
         expected_location: &str,
         new_location: &str,
         new_schema_snapshot: Option<serde_json::Value>,
@@ -719,14 +688,13 @@ impl CatalogStore for PgCatalogStore {
                 "UPDATE assets
                  SET metadata_location = $1,
                      schema_snapshot = COALESCE($2, schema_snapshot)
-                 WHERE namespace_id = (SELECT id FROM namespaces WHERE name = $3 AND format = $4)
-                   AND name = $5
-                   AND metadata_location = $6",
+                 WHERE namespace_id = (SELECT id FROM namespaces WHERE name = $3)
+                   AND name = $4
+                   AND metadata_location = $5",
                 &[
                     &new_location,
                     &new_schema_snapshot,
                     &namespace_name,
-                    &format.as_str(),
                     &asset_name,
                     &expected_location,
                 ],

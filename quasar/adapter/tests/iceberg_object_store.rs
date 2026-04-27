@@ -8,7 +8,7 @@ use http_body_util::BodyExt;
 use object_store::memory::InMemory;
 use postgresql_embedded::PostgreSQL;
 use quasar_adapter::iceberg;
-use quasar_core::{AssetFormat, CatalogStore};
+use quasar_core::CatalogStore;
 use quasar_storage::PgCatalogStore;
 use serde_json::Value;
 use serial_test::serial;
@@ -89,7 +89,7 @@ async fn body_json(response: axum::response::Response) -> Value {
 
 async fn create_namespace(store: &PgCatalogStore, name: &str) {
     store
-        .create_namespace(name, AssetFormat::Iceberg, std::collections::HashMap::new())
+        .create_namespace(name, std::collections::HashMap::new())
         .await
         .unwrap();
 }

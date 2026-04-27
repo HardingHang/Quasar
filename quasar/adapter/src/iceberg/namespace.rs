@@ -27,7 +27,7 @@ pub async fn list_namespaces(
         .unwrap_or(0);
 
     let namespaces = store
-        .list_namespaces(AssetFormat::Iceberg, offset, limit)
+        .list_namespaces(offset, limit)
         .await
         .map_err(store_error_to_iceberg_namespace)?;
 
@@ -61,7 +61,7 @@ pub async fn create_namespace(
     validate_name(name).map_err(store_error_to_iceberg_namespace)?;
 
     let ns = store
-        .create_namespace(name, AssetFormat::Iceberg, req.properties)
+        .create_namespace(name, req.properties)
         .await
         .map_err(store_error_to_iceberg_namespace)?;
 
@@ -80,7 +80,7 @@ pub async fn get_namespace(
     Path(ns): Path<String>,
 ) -> Result<impl IntoResponse, IcebergError> {
     let namespace = store
-        .get_namespace(&ns, AssetFormat::Iceberg)
+        .get_namespace(&ns)
         .await
         .map_err(store_error_to_iceberg_namespace)?;
 
@@ -110,7 +110,7 @@ pub async fn drop_namespace(
     }
 
     store
-        .drop_namespace(&ns, AssetFormat::Iceberg)
+        .drop_namespace(&ns)
         .await
         .map_err(store_error_to_iceberg_namespace)?;
 
@@ -125,12 +125,12 @@ pub async fn update_namespace_properties(
 ) -> Result<impl IntoResponse, IcebergError> {
     // Read pre-update namespace to distinguish removed vs missing keys.
     let before = store
-        .get_namespace(&ns, AssetFormat::Iceberg)
+        .get_namespace(&ns)
         .await
         .map_err(store_error_to_iceberg_namespace)?;
 
     let updated_ns = store
-        .update_namespace_properties(&ns, AssetFormat::Iceberg, &req.removals, &req.updates)
+        .update_namespace_properties(&ns, &req.removals, &req.updates)
         .await
         .map_err(store_error_to_iceberg_namespace)?;
 

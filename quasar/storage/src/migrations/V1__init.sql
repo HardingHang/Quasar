@@ -1,7 +1,6 @@
 CREATE TABLE IF NOT EXISTS namespaces (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL UNIQUE,
-    format TEXT NOT NULL CHECK (format IN ('iceberg', 'lance')),
     properties JSONB NOT NULL DEFAULT '{}',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

@@ -83,7 +83,7 @@ async fn body_json(response: axum::response::Response) -> Value {
 
 async fn create_namespace(store: &PgCatalogStore, name: &str) {
     store
-        .create_namespace(name, AssetFormat::Lance, HashMap::new())
+        .create_namespace(name, HashMap::new())
         .await
         .unwrap();
 }
@@ -704,7 +704,7 @@ async fn test_exists_table_not_found_in_existing_namespace() {
 
 #[tokio::test]
 #[serial]
-async fn test_exists_namespace_not_found_returns_404() {
+async fn test_exists_namespace_not_found_returns_false() {
     let app = test_app(setup().await);
 
     let response = app
@@ -718,8 +718,7 @@ async fn test_exists_namespace_not_found_returns_404() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response).await;
-    assert_eq!(json["error"], "TableNotFound");
-    assert_eq!(json["code"], 404);
+    assert_eq!(json["exists"], false);
 }

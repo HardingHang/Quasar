@@ -83,7 +83,7 @@ async fn body_json(response: axum::response::Response) -> Value {
 
 async fn create_namespace(store: &PgCatalogStore, name: &str) {
     store
-        .create_namespace(name, AssetFormat::Iceberg, HashMap::new())
+        .create_namespace(name, HashMap::new())
         .await
         .unwrap();
 }
@@ -277,7 +277,7 @@ async fn test_update_namespace_properties() {
     props.insert("owner".to_string(), "team-a".to_string());
     props.insert("env".to_string(), "prod".to_string());
     store
-        .create_namespace("prod", AssetFormat::Iceberg, props)
+        .create_namespace("prod", props)
         .await
         .unwrap();
 
@@ -326,38 +326,6 @@ async fn test_update_namespace_properties() {
     assert_eq!(props.get("owner").unwrap(), "team-b");
     assert_eq!(props.get("region").unwrap(), "us-west");
     assert!(!props.contains_key("env"));
-}
-
-#[tokio::test]
-#[serial]
-async fn test_format_isolation() {
-    let store = setup().await;
-    store
-        .create_namespace("prod", AssetFormat::Lance, HashMap::new())
-        .await
-        .unwrap();
-    store
-        .create_namespace("prod", AssetFormat::Iceberg, HashMap::new())
-        .await
-        .unwrap();
-    let app = test_app(store);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/iceberg/v1/namespaces")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_json(response).await;
-    let namespaces = json["namespaces"].as_array().unwrap();
-    assert_eq!(namespaces.len(), 1);
-    assert_eq!(namespaces[0], serde_json::json!(["prod"]));
 }
 
 #[tokio::test]

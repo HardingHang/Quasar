@@ -24,7 +24,6 @@ impl AssetFormat {
 pub struct Namespace {
     pub id: Uuid,
     pub name: String,
-    pub format: AssetFormat,
     pub properties: HashMap<String, String>,
     pub created_at: DateTime<Utc>,
 }
@@ -96,7 +95,6 @@ mod tests {
         let ns = Namespace {
             id: Uuid::new_v4(),
             name: "prod".to_string(),
-            format: AssetFormat::Lance,
             properties: props.clone(),
             created_at: now,
         };
@@ -105,7 +103,6 @@ mod tests {
         let decoded: Namespace = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded.name, "prod");
-        assert_eq!(decoded.format, AssetFormat::Lance);
         assert_eq!(decoded.properties.get("team"), Some(&"data".to_string()));
     }
 
