@@ -52,6 +52,7 @@ macro_rules! try_get {
     };
 }
 
+#[allow(dead_code)]
 fn row_to_namespace(row: &Row) -> Result<Namespace, StoreError> {
     let props: serde_json::Value = try_get!(row, "properties");
     let properties: HashMap<String, String> = serde_json::from_value(props)
@@ -66,6 +67,7 @@ fn row_to_namespace(row: &Row) -> Result<Namespace, StoreError> {
     })
 }
 
+#[allow(dead_code)]
 fn row_to_asset(row: &Row) -> Result<Asset, StoreError> {
     let props: serde_json::Value = try_get!(row, "properties");
     let properties: HashMap<String, String> = serde_json::from_value(props)
@@ -94,6 +96,7 @@ fn row_to_asset(row: &Row) -> Result<Asset, StoreError> {
     })
 }
 
+#[allow(dead_code)]
 fn row_to_tabular_asset(row: &Row) -> Result<TabularAsset, StoreError> {
     let schema_snapshot: Option<serde_json::Value> = row.try_get("schema_snapshot").ok();
 
@@ -105,6 +108,7 @@ fn row_to_tabular_asset(row: &Row) -> Result<TabularAsset, StoreError> {
     })
 }
 
+#[allow(dead_code)]
 fn row_to_asset_version(row: &Row) -> Result<AssetVersion, StoreError> {
     let props: serde_json::Value = try_get!(row, "properties");
     let properties: HashMap<String, String> = serde_json::from_value(props)
@@ -120,6 +124,7 @@ fn row_to_asset_version(row: &Row) -> Result<AssetVersion, StoreError> {
     })
 }
 
+#[allow(dead_code)]
 fn row_to_tabular_version(row: &Row) -> Result<TabularAssetVersion, StoreError> {
     Ok(TabularAssetVersion {
         asset_version_id: try_get!(row, "asset_version_id"),
@@ -128,6 +133,7 @@ fn row_to_tabular_version(row: &Row) -> Result<TabularAssetVersion, StoreError> 
     })
 }
 
+#[allow(dead_code)]
 fn props_to_json(props: &HashMap<String, String>) -> Result<serde_json::Value, StoreError> {
     serde_json::to_value(props)
         .map_err(|e| StoreError::Internal(format!("properties serialization: {}", e)))

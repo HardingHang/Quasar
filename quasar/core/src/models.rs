@@ -40,17 +40,12 @@ impl AssetType {
 /// - Missing: field not present in request body, no change
 /// - Null: field explicitly set to null, clear the value
 /// - Value(T): field set to a specific value, set/overwrite
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum PatchField<T> {
+    #[default]
     Missing,
     Null,
     Value(T),
-}
-
-impl<T> Default for PatchField<T> {
-    fn default() -> Self {
-        Self::Missing
-    }
 }
 
 impl<'de, T> Deserialize<'de> for PatchField<T>
