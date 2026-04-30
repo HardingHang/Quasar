@@ -129,7 +129,6 @@ fn row_to_tabular_version(row: &Row) -> Result<TabularAssetVersion, StoreError> 
     })
 }
 
-#[allow(dead_code)]
 fn props_to_json(props: &HashMap<String, String>) -> Result<serde_json::Value, StoreError> {
     serde_json::to_value(props)
         .map_err(|e| StoreError::Internal(format!("properties serialization: {}", e)))
@@ -576,57 +575,306 @@ impl CatalogStore for PgCatalogStore {
 
     async fn load_version(
         &self,
-        _namespace_name: &str,
-        _format: AssetFormat,
-        _asset_name: &str,
-        _version_id: i64,
+        namespace_name: &str,
+        format: AssetFormat,
+        asset_name: &str,
+        version_id: i64,
     ) -> Result<AssetVersionWithTabular, StoreError> {
-        todo!()
+        let client = self.get_client().await?;
+        let format_str = format.as_str();
+        let version_key = version_id.to_string();
+
+        let row = client
+            .query_opt(
+                "SELECT av.id, av.asset_id, av.version_key, av.version_order, av.properties, av.created_at, tav.asset_version_id, tav.metadata_location, tav.previous_asset_version_id FROM asset_versions av JOIN tabular_asset_versions tav ON av.id = tav.asset_version_id JOIN assets a ON av.asset_id = a.id JOIN namespaces n ON a.namespace_id = n.id WHERE n.name = $1 AND a.asset_type = 'table' AND a.asset_subtype = $2 AND a.name = $3 AND av.version_key = $4",
+                &[&namespace_name, &format_str, &asset_name, &version_key],
+            )
+            .await
+            .map_err(|e| StoreError::Internal(format!("load_version failed: {}", e)))?
+            .ok_or_else(|| StoreError::NotFound(format!("asset '{}'", asset_name)))?;
+
+        let version = row_to_asset_version(&row)?;
+        let tabular_version = row_to_tabular_version(&row)?;
+        Ok(AssetVersionWithTabular {
+            version,
+            tabular_version,
+        })
     }
 
     async fn load_current_version(
         &self,
-        _namespace_name: &str,
-        _format: AssetFormat,
-        _asset_name: &str,
+        namespace_name: &str,
+        format: AssetFormat,
+        asset_name: &str,
     ) -> Result<Option<AssetVersionWithTabular>, StoreError> {
-        todo!()
+        let client = self.get_client().await?;
+        let format_str = format.as_str();
+
+        // Resolve asset_id
+        let asset_row = client
+            .query_opt(
+                "SELECT a.id FROM assets a JOIN namespaces n ON a.namespace_id = n.id WHERE n.name = $1 AND a.asset_type = 'table' AND a.asset_subtype = $2 AND a.name = $3",
+                &[&namespace_name, &format_str, &asset_name],
+            )
+            .await
+            .map_err(|e| StoreError::Internal(format!("load_current_version failed: {}", e)))?;
+
+        let asset_id: uuid::Uuid = match asset_row {
+            Some(row) => try_get!(row, "id"),
+            None => return Ok(None),
+        };
+
+        // Fetch latest version
+        let version_row = client
+            .query_opt(
+                "SELECT av.id, av.asset_id, av.version_key, av.version_order, av.properties, av.created_at, tav.asset_version_id, tav.metadata_location, tav.previous_asset_version_id FROM asset_versions av JOIN tabular_asset_versions tav ON av.id = tav.asset_version_id WHERE av.asset_id = $1 ORDER BY av.version_order DESC NULLS LAST LIMIT 1",
+                &[&asset_id],
+            )
+            .await
+            .map_err(|e| StoreError::Internal(format!("load_current_version query failed: {}", e)))?;
+
+        match version_row {
+            Some(row) => {
+                let version = row_to_asset_version(&row)?;
+                let tabular_version = row_to_tabular_version(&row)?;
+                Ok(Some(AssetVersionWithTabular {
+                    version,
+                    tabular_version,
+                }))
+            }
+            None => Ok(None),
+        }
     }
 
     async fn list_versions(
         &self,
-        _namespace_name: &str,
-        _format: AssetFormat,
-        _asset_name: &str,
+        namespace_name: &str,
+        format: AssetFormat,
+        asset_name: &str,
     ) -> Result<Vec<AssetVersionWithTabular>, StoreError> {
-        todo!()
+        let client = self.get_client().await?;
+        let format_str = format.as_str();
+
+        // Resolve asset_id
+        let asset_row = client
+            .query_opt(
+                "SELECT a.id FROM assets a JOIN namespaces n ON a.namespace_id = n.id WHERE n.name = $1 AND a.asset_type = 'table' AND a.asset_subtype = $2 AND a.name = $3",
+                &[&namespace_name, &format_str, &asset_name],
+            )
+            .await
+            .map_err(|e| StoreError::Internal(format!("list_versions failed: {}", e)))?;
+
+        let asset_id: uuid::Uuid = match asset_row {
+            Some(row) => try_get!(row, "id"),
+            None => return Err(StoreError::NotFound(format!("asset '{}'", asset_name))),
+        };
+
+        // Fetch all versions
+        let rows = client
+            .query(
+                "SELECT av.id, av.asset_id, av.version_key, av.version_order, av.properties, av.created_at, tav.asset_version_id, tav.metadata_location, tav.previous_asset_version_id FROM asset_versions av JOIN tabular_asset_versions tav ON av.id = tav.asset_version_id WHERE av.asset_id = $1 ORDER BY av.version_order ASC NULLS LAST",
+                &[&asset_id],
+            )
+            .await
+            .map_err(|e| StoreError::Internal(format!("list_versions query failed: {}", e)))?;
+
+        rows.iter()
+            .map(|row| {
+                let version = row_to_asset_version(row)?;
+                let tabular_version = row_to_tabular_version(row)?;
+                Ok(AssetVersionWithTabular {
+                    version,
+                    tabular_version,
+                })
+            })
+            .collect()
     }
 
     async fn create_version(
         &self,
-        _namespace_name: &str,
-        _format: AssetFormat,
-        _asset_name: &str,
-        _version_id: i64,
-        _metadata_location: String,
-        _previous_version_id: Option<i64>,
+        namespace_name: &str,
+        format: AssetFormat,
+        asset_name: &str,
+        version_id: i64,
+        metadata_location: String,
+        previous_version_id: Option<i64>,
     ) -> Result<AssetVersionWithTabular, StoreError> {
-        todo!()
+        let mut client = self.get_client().await?;
+        let format_str = format.as_str();
+        let version_key = version_id.to_string();
+        let empty_props = serde_json::json!({});
+
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|e| StoreError::Internal(format!("transaction start failed: {}", e)))?;
+
+        // Step 1: resolve asset_id
+        let asset_row = tx
+            .query_opt(
+                "SELECT a.id FROM assets a JOIN namespaces n ON a.namespace_id = n.id WHERE n.name = $1 AND a.asset_type = 'table' AND a.asset_subtype = $2 AND a.name = $3",
+                &[&namespace_name, &format_str, &asset_name],
+            )
+            .await
+            .map_err(|e| StoreError::Internal(format!("asset lookup failed: {}", e)))?
+            .ok_or_else(|| StoreError::NotFound(format!("asset '{}'", asset_name)))?;
+        let asset_id: uuid::Uuid = try_get!(asset_row, "id");
+
+        // Step 2: optionally resolve previous_version_id
+        let previous_version_uuid: Option<uuid::Uuid> = match previous_version_id {
+            Some(prev_id) => {
+                let prev_row = tx
+                    .query_opt(
+                        "SELECT id FROM asset_versions WHERE asset_id = $1 AND version_order = $2",
+                        &[&asset_id, &prev_id],
+                    )
+                    .await
+                    .map_err(|e| {
+                        StoreError::Internal(format!("previous version lookup failed: {}", e))
+                    })?
+                    .ok_or_else(|| {
+                        StoreError::Conflict(format!("previous version {} not found", prev_id))
+                    })?;
+                Some(try_get!(prev_row, "id"))
+            }
+            None => None,
+        };
+
+        // Step 3: insert asset_versions
+        let version_row = tx
+            .query_one(
+                "INSERT INTO asset_versions (asset_id, version_key, version_order, properties) VALUES ($1, $2, $3, $4) RETURNING id, asset_id, version_key, version_order, properties, created_at",
+                &[&asset_id, &version_key, &version_id, &empty_props],
+            )
+            .await
+            .map_err(|e| {
+                if let Some(db_err) = e.as_db_error() {
+                    if db_err.code() == &SqlState::UNIQUE_VIOLATION {
+                        return StoreError::AlreadyExists(format!("version {} already exists", version_id));
+                    }
+                }
+                StoreError::Internal(format!("create_version failed: {}", e))
+            })?;
+        let version_uuid: uuid::Uuid = try_get!(version_row, "id");
+
+        // Step 4: insert tabular_asset_versions
+        tx.execute(
+            "INSERT INTO tabular_asset_versions (asset_version_id, metadata_location, previous_asset_version_id) VALUES ($1, $2, $3)",
+            &[&version_uuid, &metadata_location, &previous_version_uuid],
+        )
+        .await
+        .map_err(|e| StoreError::Internal(format!("create tabular_asset_version failed: {}", e)))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| StoreError::Internal(format!("transaction commit failed: {}", e)))?;
+
+        let version = row_to_asset_version(&version_row)?;
+        let tabular_version = TabularAssetVersion {
+            asset_version_id: version_uuid,
+            metadata_location,
+            previous_asset_version_id: previous_version_uuid,
+        };
+        Ok(AssetVersionWithTabular {
+            version,
+            tabular_version,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
     async fn cas_update_metadata_location(
         &self,
-        _namespace_name: &str,
-        _asset_name: &str,
-        _format: AssetFormat,
-        _expected_location: &str,
-        _new_location: &str,
-        _new_schema_snapshot: Option<serde_json::Value>,
-        _property_removals: &[String],
-        _property_updates: &HashMap<String, String>,
+        namespace_name: &str,
+        asset_name: &str,
+        format: AssetFormat,
+        expected_location: &str,
+        new_location: &str,
+        new_schema_snapshot: Option<serde_json::Value>,
+        property_removals: &[String],
+        property_updates: &HashMap<String, String>,
     ) -> Result<(), StoreError> {
-        todo!()
+        let mut client = self.get_client().await?;
+        let format_str = format.as_str();
+
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|e| StoreError::Internal(format!("transaction start failed: {}", e)))?;
+
+        // Step 1: Lock and fetch asset
+        let asset_row = tx
+            .query_opt(
+                "SELECT a.id, a.properties FROM assets a JOIN namespaces n ON a.namespace_id = n.id WHERE n.name = $1 AND a.name = $2 AND a.asset_type = 'table' AND a.asset_subtype = $3 FOR UPDATE",
+                &[&namespace_name, &asset_name, &format_str],
+            )
+            .await
+            .map_err(|e| StoreError::Internal(format!("cas lock asset failed: {}", e)))?;
+
+        let (asset_id, mut properties): (uuid::Uuid, HashMap<String, String>) = match asset_row {
+            Some(row) => {
+                let id: uuid::Uuid = try_get!(row, "id");
+                let props_json: serde_json::Value = try_get!(row, "properties");
+                let props: HashMap<String, String> = serde_json::from_value(props_json)
+                    .map_err(|e| StoreError::Internal(format!("properties JSON: {}", e)))?;
+                (id, props)
+            }
+            None => return Err(StoreError::NotFound(format!("asset '{}'", asset_name))),
+        };
+
+        // Step 2: Fetch current metadata_location
+        let tabular_row = tx
+            .query_opt(
+                "SELECT metadata_location FROM tabular_assets WHERE asset_id = $1",
+                &[&asset_id],
+            )
+            .await
+            .map_err(|e| {
+                StoreError::Internal(format!("cas fetch metadata_location failed: {}", e))
+            })?;
+
+        let current_location: Option<String> = match tabular_row {
+            Some(row) => row.try_get("metadata_location").ok(),
+            None => return Err(StoreError::Internal("tabular asset missing".to_string())),
+        };
+
+        // Step 3: CAS check
+        if current_location.as_deref() != Some(expected_location) {
+            return Err(StoreError::Conflict(format!(
+                "metadata location has been modified by another commit (expected '{}', found '{:?}')",
+                expected_location, current_location
+            )));
+        }
+
+        // Step 4: Apply property changes
+        for key in property_removals {
+            properties.remove(key);
+        }
+        for (key, value) in property_updates {
+            properties.insert(key.clone(), value.clone());
+        }
+
+        // Step 5: Update tabular_assets
+        tx.execute(
+            "UPDATE tabular_assets SET metadata_location = $1, schema_snapshot = $2 WHERE asset_id = $3",
+            &[&new_location, &new_schema_snapshot, &asset_id],
+        )
+        .await
+        .map_err(|e| StoreError::Internal(format!("cas update tabular_assets failed: {}", e)))?;
+
+        // Step 6: Update assets properties
+        let props_json = props_to_json(&properties)?;
+        tx.execute(
+            "UPDATE assets SET properties = $1 WHERE id = $2",
+            &[&props_json, &asset_id],
+        )
+        .await
+        .map_err(|e| StoreError::Internal(format!("cas update assets properties failed: {}", e)))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| StoreError::Internal(format!("transaction commit failed: {}", e)))?;
+
+        Ok(())
     }
 
     async fn list_assets_unified(
