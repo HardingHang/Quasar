@@ -208,7 +208,20 @@ impl CatalogStore for PgCatalogStore {
         let n = client
             .execute("DELETE FROM namespaces WHERE name = $1", &[&name])
             .await
-            .map_err(|e| StoreError::Internal(format!("drop_namespace failed: {}", e)))?;
+            .map_err(|e| match e.code() {
+                Some(code)
+                    if code == &tokio_postgres::error::SqlState::RESTRICT_VIOLATION
+                        || code == &tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION =>
+                {
+                    StoreError::Conflict(format!("namespace '{}' is not empty", name))
+                }
+                Some(code) => StoreError::Internal(format!(
+                    "drop_namespace failed: {} (sqlstate: {})",
+                    e,
+                    code.code()
+                )),
+                None => StoreError::Internal(format!("drop_namespace failed: {}", e)),
+            })?;
 
         if n == 0 {
             return Err(StoreError::NotFound(format!("namespace '{}'", name)));
