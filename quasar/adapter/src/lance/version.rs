@@ -64,8 +64,8 @@ pub async fn create_version(
     Ok((
         StatusCode::OK,
         Json(VersionResponse {
-            version: version.version_id,
-            manifest_path: version.metadata_location,
+            version: version.version.version_order.unwrap_or(0),
+            manifest_path: version.tabular_version.metadata_location,
         }),
     ))
 }
@@ -86,7 +86,10 @@ pub async fn list_versions(
     Ok((
         StatusCode::OK,
         Json(ListVersionsResponse {
-            versions: versions.into_iter().map(|v| v.version_id).collect(),
+            versions: versions
+                .into_iter()
+                .map(|v| v.version.version_order.unwrap_or(0))
+                .collect(),
         }),
     ))
 }
@@ -108,8 +111,8 @@ pub async fn describe_version(
     Ok((
         StatusCode::OK,
         Json(VersionResponse {
-            version: version.version_id,
-            manifest_path: version.metadata_location,
+            version: version.version.version_order.unwrap_or(0),
+            manifest_path: version.tabular_version.metadata_location,
         }),
     ))
 }

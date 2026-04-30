@@ -190,7 +190,7 @@ pub async fn list_tables(
                 .into_iter()
                 .map(|a| TableIdentifier {
                     namespace: vec![ns.clone()],
-                    name: a.name,
+                    name: a.asset.name,
                 })
                 .collect(),
             next_page_token: None,
@@ -264,13 +264,13 @@ pub async fn load_table(
     Extension(config): Extension<IcebergConfig>,
     Path((ns, table)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, IcebergError> {
-    let asset = store
-        .get_asset(&ns, AssetFormat::Iceberg, &table)
+    let (asset, tabular) = store
+        .get_asset_with_tabular(&ns, AssetFormat::Iceberg, &table)
         .await
         .map_err(store_error_to_iceberg_table)?;
 
     // Check metadata.json exists before loading
-    if let Some(ref ml) = asset.metadata_location {
+    if let Some(ref ml) = tabular.metadata_location {
         if !check_metadata_exists(ml, &config).await {
             return Err(IcebergError::MetadataNotFoundException {
                 message: format!("metadata.json not found at {}", ml),
@@ -278,18 +278,18 @@ pub async fn load_table(
         }
     }
 
-    let metadata = if let Some(ref ml) = asset.metadata_location {
-        read_metadata_from_store(ml, asset.schema_snapshot.clone(), &config).await?
+    let metadata = if let Some(ref ml) = tabular.metadata_location {
+        read_metadata_from_store(ml, tabular.schema_snapshot.clone(), &config).await?
     } else {
-        asset
-            .schema_snapshot
-            .unwrap_or_else(|| build_initial_metadata(asset.id, &asset.name, &asset.location, None))
+        tabular.schema_snapshot.unwrap_or_else(|| {
+            build_initial_metadata(asset.id, &asset.name, &tabular.location, None)
+        })
     };
 
     Ok((
         StatusCode::OK,
         Json(LoadTableResponse {
-            metadata_location: asset.metadata_location,
+            metadata_location: tabular.metadata_location,
             metadata,
         }),
     ))
@@ -379,14 +379,14 @@ pub async fn commit_table(
     Json(req): Json<CommitTableRequest>,
 ) -> Result<impl IntoResponse, IcebergError> {
     let metrics = metrics.map(|e| e.0);
-    // 1. Load the current asset
-    let asset = store
-        .get_asset(&ns, AssetFormat::Iceberg, &table)
+    // 1. Load the current asset with tabular detail
+    let (_asset, tabular) = store
+        .get_asset_with_tabular(&ns, AssetFormat::Iceberg, &table)
         .await
         .map_err(store_error_to_iceberg_table)?;
 
     let metadata_location =
-        asset
+        tabular
             .metadata_location
             .ok_or_else(|| IcebergError::CommitFailedException {
                 message: format!("Table '{}.{}' has no metadata location", ns, table),
@@ -404,7 +404,7 @@ pub async fn commit_table(
 
     // 3. Load current metadata from object store (or fallback to schema_snapshot)
     let current_metadata_json =
-        read_metadata_from_store(&metadata_location, asset.schema_snapshot.clone(), &config)
+        read_metadata_from_store(&metadata_location, tabular.schema_snapshot.clone(), &config)
             .await?;
     let mut table_metadata = serde_json::from_value::<TableMetadata>(current_metadata_json)
         .map_err(|e| IcebergError::InternalServerError {

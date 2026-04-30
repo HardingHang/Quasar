@@ -92,6 +92,12 @@ impl From<quasar_core::Asset> for TableResponse {
     }
 }
 
+impl From<quasar_core::AssetWithTabular> for TableResponse {
+    fn from(awt: quasar_core::AssetWithTabular) -> Self {
+        Self::from(awt.asset)
+    }
+}
+
 #[derive(Serialize)]
 pub struct ListTablesResponse {
     pub tables: Vec<TableResponse>,
@@ -110,7 +116,7 @@ pub async fn create_namespace(
     let instance = format!("/lance/v1/namespace/{}/create", id);
     validate_name(&id).map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
     let ns = store
-        .create_namespace(&id, req.properties)
+        .create_namespace(&id, None, req.properties)
         .await
         .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
 

@@ -128,7 +128,7 @@ pub async fn describe_table(
     let (namespace, table) = parse_table_id(&id)?;
 
     // Use single query to get asset and current version
-    let (asset, current_version) = store
+    let (asset, tabular, current_version) = store
         .get_asset_with_current_version(namespace, AssetFormat::Lance, table)
         .await
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
@@ -137,8 +137,8 @@ pub async fn describe_table(
         StatusCode::OK,
         Json(DescribeTableResponse {
             name: asset.name,
-            location: asset.location,
-            current_version: current_version.map(|v| v.version_id),
+            location: tabular.location,
+            current_version: current_version.and_then(|v| v.version.version_order),
             created_at: asset.created_at.to_rfc3339(),
         }),
     ))

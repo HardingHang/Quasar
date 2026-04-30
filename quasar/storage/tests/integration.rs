@@ -2,7 +2,7 @@
 
 use deadpool_postgres::{Pool, Runtime};
 use postgresql_embedded::PostgreSQL;
-use quasar_storage::{AssetFormat, CatalogStore, PgCatalogStore, StoreError};
+use quasar_storage::{AssetFormat, CatalogStore, PatchField, PgCatalogStore, StoreError};
 use serial_test::serial;
 use std::collections::HashMap;
 use tokio::sync::OnceCell;
@@ -24,11 +24,11 @@ impl PgInstance {
                 postgresql.start().await.expect("PostgreSQL start failed");
 
                 postgresql
-                    .create_database("quasar_test")
+                    .create_database("quasar_test_v2")
                     .await
                     .expect("create database failed");
 
-                let url = postgresql.settings().url("quasar_test");
+                let url = postgresql.settings().url("quasar_test_v2");
                 PgInstance { postgresql, url }
             })
             .await
@@ -52,13 +52,19 @@ async fn setup() -> PgCatalogStore {
     let pool = test_pool(&instance.url);
     let store = PgCatalogStore::new(pool.clone());
 
-    store.migrate().await.expect("migration failed");
-
     let client = pool.get().await.expect("failed to get client");
-    client
-        .execute("TRUNCATE asset_versions, assets, namespaces CASCADE", &[])
-        .await
-        .expect("failed to truncate tables");
+
+    // Clean slate: drop any existing V1 or V2 tables and refinery history.
+    // This is necessary because the embedded PostgreSQL instance may be
+    // reused across test runs (cached by OnceCell).
+    let _ = client
+        .execute(
+            "DROP TABLE IF EXISTS refinery_schema_history, tabular_asset_versions, asset_versions, tabular_assets, assets, namespaces CASCADE",
+            &[],
+        )
+        .await;
+
+    store.migrate().await.expect("migration failed");
 
     store
 }
@@ -69,7 +75,7 @@ async fn test_namespace_crud() {
     let store = setup().await;
 
     let ns = store
-        .create_namespace("test_ns", HashMap::new())
+        .create_namespace("test_ns", None, HashMap::new())
         .await
         .unwrap();
     assert_eq!(ns.name, "test_ns");
@@ -85,7 +91,7 @@ async fn test_namespace_crud() {
     assert!(!store.namespace_exists("missing").await.unwrap());
 
     let err = store
-        .create_namespace("test_ns", HashMap::new())
+        .create_namespace("test_ns", None, HashMap::new())
         .await
         .unwrap_err();
     assert!(matches!(err, StoreError::AlreadyExists(_)));
@@ -102,7 +108,10 @@ async fn test_namespace_crud() {
 async fn test_asset_crud() {
     let store = setup().await;
 
-    store.create_namespace("ns1", HashMap::new()).await.unwrap();
+    store
+        .create_namespace("ns1", None, HashMap::new())
+        .await
+        .unwrap();
 
     let asset = store
         .create_asset(
@@ -199,7 +208,10 @@ async fn test_asset_crud() {
 async fn test_version_commit_and_load() {
     let store = setup().await;
 
-    store.create_namespace("ns1", HashMap::new()).await.unwrap();
+    store
+        .create_namespace("ns1", None, HashMap::new())
+        .await
+        .unwrap();
     store
         .create_asset(
             "ns1",
@@ -224,8 +236,8 @@ async fn test_version_commit_and_load() {
         )
         .await
         .unwrap();
-    assert_eq!(v1.version_id, 1);
-    assert_eq!(v1.metadata_location, "s3://bucket/v1");
+    assert_eq!(v1.version.version_key, "1");
+    assert_eq!(v1.tabular_version.metadata_location, "s3://bucket/v1");
 
     let v2 = store
         .create_version(
@@ -238,29 +250,30 @@ async fn test_version_commit_and_load() {
         )
         .await
         .unwrap();
-    assert_eq!(v2.version_id, 2);
-    assert_eq!(v2.previous_version_id, Some(1));
+    assert_eq!(v2.version.version_key, "2");
+    assert!(v2.tabular_version.previous_asset_version_id.is_some());
 
     let current = store
         .load_current_version("ns1", AssetFormat::Lance, "tbl")
         .await
         .unwrap();
-    assert_eq!(current.version_id, 2);
+    assert!(current.is_some());
+    assert_eq!(current.unwrap().version.version_key, "2");
 
     let loaded = store
         .load_version("ns1", AssetFormat::Lance, "tbl", 1)
         .await
         .unwrap();
-    assert_eq!(loaded.version_id, 1);
-    assert_eq!(loaded.metadata_location, "s3://bucket/v1");
+    assert_eq!(loaded.version.version_key, "1");
+    assert_eq!(loaded.tabular_version.metadata_location, "s3://bucket/v1");
 
     let versions = store
         .list_versions("ns1", AssetFormat::Lance, "tbl")
         .await
         .unwrap();
     assert_eq!(versions.len(), 2);
-    assert_eq!(versions[0].version_id, 1);
-    assert_eq!(versions[1].version_id, 2);
+    assert_eq!(versions[0].version.version_key, "1");
+    assert_eq!(versions[1].version.version_key, "2");
 }
 
 #[tokio::test]
@@ -268,7 +281,10 @@ async fn test_version_commit_and_load() {
 async fn test_version_conflict() {
     let store = setup().await;
 
-    store.create_namespace("ns1", HashMap::new()).await.unwrap();
+    store
+        .create_namespace("ns1", None, HashMap::new())
+        .await
+        .unwrap();
     store
         .create_asset(
             "ns1",
@@ -322,18 +338,21 @@ async fn test_not_found_errors() {
         .unwrap_err();
     assert!(matches!(err, StoreError::NotFound(_)));
 
-    store.create_namespace("ns1", HashMap::new()).await.unwrap();
+    store
+        .create_namespace("ns1", None, HashMap::new())
+        .await
+        .unwrap();
     let err = store
         .get_asset("ns1", AssetFormat::Lance, "tbl")
         .await
         .unwrap_err();
     assert!(matches!(err, StoreError::NotFound(_)));
 
-    let err = store
+    let current = store
         .load_current_version("ns1", AssetFormat::Lance, "tbl")
         .await
-        .unwrap_err();
-    assert!(matches!(err, StoreError::NotFound(_)));
+        .unwrap();
+    assert!(current.is_none());
 }
 
 #[tokio::test]
@@ -345,7 +364,7 @@ async fn test_update_namespace_properties() {
     props.insert("owner".to_string(), "team-a".to_string());
     props.insert("env".to_string(), "prod".to_string());
 
-    store.create_namespace("ns1", props).await.unwrap();
+    store.create_namespace("ns1", None, props).await.unwrap();
 
     // Add new property and update existing
     let mut updates = HashMap::new();
@@ -353,7 +372,7 @@ async fn test_update_namespace_properties() {
     updates.insert("region".to_string(), "us-west".to_string());
 
     let updated = store
-        .update_namespace_properties("ns1", &["env".to_string()], &updates)
+        .update_namespace("ns1", PatchField::Missing, &["env".to_string()], &updates)
         .await
         .unwrap();
 
@@ -366,7 +385,7 @@ async fn test_update_namespace_properties() {
 
     // Not found
     let err = store
-        .update_namespace_properties("missing", &[], &HashMap::new())
+        .update_namespace("missing", PatchField::Missing, &[], &HashMap::new())
         .await
         .unwrap_err();
     assert!(matches!(err, StoreError::NotFound(_)));

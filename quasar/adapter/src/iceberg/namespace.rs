@@ -4,7 +4,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use quasar_core::{AssetFormat, CatalogStore};
+use quasar_core::{AssetFormat, CatalogStore, PatchField};
 use std::sync::Arc;
 
 use super::dto::{
@@ -61,7 +61,7 @@ pub async fn create_namespace(
     validate_name(name).map_err(store_error_to_iceberg_namespace)?;
 
     let ns = store
-        .create_namespace(name, req.properties)
+        .create_namespace(name, None, req.properties)
         .await
         .map_err(store_error_to_iceberg_namespace)?;
 
@@ -130,7 +130,7 @@ pub async fn update_namespace_properties(
         .map_err(store_error_to_iceberg_namespace)?;
 
     let updated_ns = store
-        .update_namespace_properties(&ns, &req.removals, &req.updates)
+        .update_namespace(&ns, PatchField::Missing, &req.removals, &req.updates)
         .await
         .map_err(store_error_to_iceberg_namespace)?;
 
