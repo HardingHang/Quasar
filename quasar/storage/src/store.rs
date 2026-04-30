@@ -6,6 +6,7 @@ use quasar_core::{
 };
 use serde_json;
 use std::collections::HashMap;
+use tokio_postgres::error::SqlState;
 use tokio_postgres::Row;
 
 pub struct PgCatalogStore {
@@ -52,7 +53,6 @@ macro_rules! try_get {
     };
 }
 
-#[allow(dead_code)]
 fn row_to_namespace(row: &Row) -> Result<Namespace, StoreError> {
     let props: serde_json::Value = try_get!(row, "properties");
     let properties: HashMap<String, String> = serde_json::from_value(props)
@@ -143,41 +143,133 @@ fn props_to_json(props: &HashMap<String, String>) -> Result<serde_json::Value, S
 impl CatalogStore for PgCatalogStore {
     async fn create_namespace(
         &self,
-        _name: &str,
-        _comment: Option<String>,
-        _properties: HashMap<String, String>,
+        name: &str,
+        comment: Option<String>,
+        properties: HashMap<String, String>,
     ) -> Result<Namespace, StoreError> {
-        todo!()
+        let client = self.get_client().await?;
+        let props_json = props_to_json(&properties)?;
+
+        let row = client
+            .query_one(
+                "INSERT INTO namespaces (name, comment, properties) VALUES ($1, $2, $3) RETURNING id, name, comment, properties, created_at",
+                &[&name, &comment, &props_json],
+            )
+            .await
+            .map_err(|e| {
+                if let Some(db_err) = e.as_db_error() {
+                    if db_err.code() == &SqlState::UNIQUE_VIOLATION {
+                        return StoreError::AlreadyExists(format!("namespace '{}'", name));
+                    }
+                }
+                StoreError::Internal(format!("create_namespace failed: {}", e))
+            })?;
+
+        row_to_namespace(&row)
     }
 
-    async fn list_namespaces(
-        &self,
-        _offset: i64,
-        _limit: i32,
-    ) -> Result<Vec<Namespace>, StoreError> {
-        todo!()
+    async fn list_namespaces(&self, offset: i64, limit: i32) -> Result<Vec<Namespace>, StoreError> {
+        let client = self.get_client().await?;
+        let rows = client
+            .query(
+                "SELECT id, name, comment, properties, created_at FROM namespaces ORDER BY name LIMIT $1 OFFSET $2",
+                &[&(limit as i64), &offset],
+            )
+            .await
+            .map_err(|e| StoreError::Internal(format!("list_namespaces failed: {}", e)))?;
+
+        rows.iter().map(row_to_namespace).collect()
     }
 
-    async fn get_namespace(&self, _name: &str) -> Result<Namespace, StoreError> {
-        todo!()
+    async fn get_namespace(&self, name: &str) -> Result<Namespace, StoreError> {
+        let client = self.get_client().await?;
+        let row = client
+            .query_opt(
+                "SELECT id, name, comment, properties, created_at FROM namespaces WHERE name = $1",
+                &[&name],
+            )
+            .await
+            .map_err(|e| StoreError::Internal(format!("get_namespace failed: {}", e)))?
+            .ok_or_else(|| StoreError::NotFound(format!("namespace '{}'", name)))?;
+
+        row_to_namespace(&row)
     }
 
-    async fn namespace_exists(&self, _name: &str) -> Result<bool, StoreError> {
-        todo!()
+    async fn namespace_exists(&self, name: &str) -> Result<bool, StoreError> {
+        let client = self.get_client().await?;
+        let row = client
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM namespaces WHERE name = $1)",
+                &[&name],
+            )
+            .await
+            .map_err(|e| StoreError::Internal(format!("namespace_exists failed: {}", e)))?;
+
+        Ok(row.get(0))
     }
 
-    async fn drop_namespace(&self, _name: &str) -> Result<(), StoreError> {
-        todo!()
+    async fn drop_namespace(&self, name: &str) -> Result<(), StoreError> {
+        let client = self.get_client().await?;
+        let n = client
+            .execute("DELETE FROM namespaces WHERE name = $1", &[&name])
+            .await
+            .map_err(|e| StoreError::Internal(format!("drop_namespace failed: {}", e)))?;
+
+        if n == 0 {
+            return Err(StoreError::NotFound(format!("namespace '{}'", name)));
+        }
+        Ok(())
     }
 
     async fn update_namespace(
         &self,
-        _name: &str,
-        _comment: PatchField<String>,
-        _removals: &[String],
-        _updates: &HashMap<String, String>,
+        name: &str,
+        comment: PatchField<String>,
+        removals: &[String],
+        updates: &HashMap<String, String>,
     ) -> Result<Namespace, StoreError> {
-        todo!()
+        let client = self.get_client().await?;
+
+        // Fetch existing
+        let row = client
+            .query_opt(
+                "SELECT id, name, comment, properties, created_at FROM namespaces WHERE name = $1",
+                &[&name],
+            )
+            .await
+            .map_err(|e| StoreError::Internal(format!("update_namespace failed: {}", e)))?
+            .ok_or_else(|| StoreError::NotFound(format!("namespace '{}'", name)))?;
+
+        let mut namespace = row_to_namespace(&row)?;
+
+        // Apply comment patch
+        match comment {
+            PatchField::Missing => {}
+            PatchField::Null => namespace.comment = None,
+            PatchField::Value(c) => namespace.comment = Some(c),
+        }
+
+        // Apply property removals
+        for key in removals {
+            namespace.properties.remove(key);
+        }
+
+        // Apply property updates
+        for (key, value) in updates {
+            namespace.properties.insert(key.clone(), value.clone());
+        }
+
+        // Write back
+        let props_json = props_to_json(&namespace.properties)?;
+        let row = client
+            .query_one(
+                "UPDATE namespaces SET comment = $1, properties = $2 WHERE name = $3 RETURNING id, name, comment, properties, created_at",
+                &[&namespace.comment, &props_json, &name],
+            )
+            .await
+            .map_err(|e| StoreError::Internal(format!("update_namespace write failed: {}", e)))?;
+
+        row_to_namespace(&row)
     }
 
     #[allow(clippy::too_many_arguments)]
