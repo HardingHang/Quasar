@@ -73,13 +73,15 @@ pub async fn track_requests(
 }
 
 /// Request ID injection middleware.
-pub async fn request_id(req: Request, next: Next) -> Response {
+pub async fn request_id(mut req: Request, next: Next) -> Response {
     let request_id = req
         .headers()
         .get("x-request-id")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    req.extensions_mut().insert(request_id.clone());
 
     let mut response = next.run(req).await;
     if let Ok(val) = request_id.parse() {
