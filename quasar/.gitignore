@@ -15,3 +15,10 @@ Cargo.lock
 # OS
 .DS_Store
 quasar-server-bin
+
+# Claude Code
+/.codex
+
+# Python
+__pycache__/
+*.pyc
