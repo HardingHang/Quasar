@@ -4,9 +4,10 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-default = ["lance", "iceberg"]
+default = ["lance", "iceberg", "unified"]
 lance = []
 iceberg = ["dep:object_store"]
+unified = []
 
 [dependencies]
 quasar-core = { workspace = true }

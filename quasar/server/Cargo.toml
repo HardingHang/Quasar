@@ -8,9 +8,10 @@ name = "quasar-server"
 path = "src/main.rs"
 
 [features]
-default = ["lance", "iceberg"]
+default = ["lance", "iceberg", "unified"]
 lance = ["quasar-adapter/lance"]
 iceberg = ["quasar-adapter/iceberg", "dep:object_store"]
+unified = ["quasar-adapter/unified"]
 
 [dependencies]
 quasar-core = { workspace = true }

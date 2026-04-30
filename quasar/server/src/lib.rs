@@ -12,6 +12,8 @@ use tower_http::trace::TraceLayer;
 use quasar_adapter::iceberg::IcebergConfig;
 #[cfg(feature = "lance")]
 use quasar_adapter::lance::LanceConfig;
+#[cfg(feature = "unified")]
+use quasar_adapter::unified::UnifiedConfig;
 
 /// Application configuration that controls which catalog protocols are enabled.
 ///
@@ -23,6 +25,8 @@ pub struct AppConfig {
     pub lance: LanceConfig,
     #[cfg(feature = "iceberg")]
     pub iceberg: IcebergConfig,
+    #[cfg(feature = "unified")]
+    pub unified: UnifiedConfig,
 }
 
 pub fn create_app(pool: Pool) -> Router {
@@ -51,6 +55,13 @@ pub fn create_app_with_config(pool: Pool, #[allow(unused_variables)] config: App
         router = router
             .merge(quasar_adapter::iceberg::routes())
             .layer(Extension(config.iceberg));
+    }
+
+    #[cfg(feature = "unified")]
+    {
+        router = router
+            .merge(quasar_adapter::unified::routes())
+            .layer(Extension(config.unified));
     }
 
     router
