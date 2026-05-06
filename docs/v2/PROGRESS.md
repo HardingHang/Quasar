@@ -16,7 +16,7 @@
 | V2-S3 | 标准协议适配器格式隔离 | 已完成 | `1943a31` | - |
 | **V2-S4** | **Unified API 骨架 + Namespace** | **已完成** | - | **2026/04/30** |
 | V2-S5 | Unified Asset | 已完成 | - | 2026/05/06 |
-| V2-S6 | 版本查看 | 待开始 | - | - |
+| V2-S6 | 版本查看 | 已完成 | - | 2026/05/06 |
 | V2-S7 | Feature 与集成 | 待开始 | - | - |
 
 ---
@@ -165,6 +165,64 @@
 - [x] `cargo clippy --all-features` 零警告
 - [x] Problem Details 格式: Content-Type = `application/problem+json`
 - [x] format 参数验证正确: 缺失 → 400 InvalidInput, 非法值 → 400 InvalidFormat
+
+### V2-S6: 版本查看
+
+**前置依赖**: V2-S5
+
+**新增文件**:
+
+| 文件 | 说明 |
+|------|------|
+| `adapter/src/unified/version.rs` | `get_current_version` 函数：Lance 查询 + Iceberg metadata.json 解析 |
+
+**修改文件**:
+
+| 文件 | 修改内容 |
+|------|---------|
+| `core/src/models.rs` | `TabularAssetVersion` 新增 `previous_version_order: Option<i64>` |
+| `storage/src/store.rs` | `get_asset_with_current_version` / `load_current_version` SQL JOIN `asset_versions prev`；`row_to_tabular_version` 读取 `previous_version_order`；`create_version` 设置 `previous_version_order` |
+| `adapter/src/unified/mod.rs` | 注册 `version` 模块；`UnifiedConfig` 扩展 `object_store` + `s3_bucket`（iceberg feature 下） |
+| `adapter/src/unified/asset.rs` | `asset_pair_to_response` 接受 `Option<CurrentVersionResponse>`；`get_asset` / `update_asset` handler 调用 `version::get_current_version` |
+| `adapter/tests/unified_asset.rs` | 新增 5 个版本测试 |
+| `server/src/main.rs` | unified feature block 中将 `IcebergConfig.object_store/s3_bucket` 克隆到 `UnifiedConfig` |
+
+**实现的功能**:
+
+| 格式 | 数据来源 | 字段 |
+|------|---------|------|
+| Iceberg | `metadata.json`（对象存储） | `sequence_number`, `snapshot_id`, `timestamp_ms` |
+| Lance | `asset_versions` + `tabular_asset_versions`（DB） | `version_id`, `metadata_location`, `previous_version_id`, `timestamp` |
+
+**关键设计决策**:
+
+- S3 不可用或 `metadata.json` 不存在时，`current_version` 返回 `null`，请求不失败（log warning）
+- `UnifiedConfig` 通过 `#[cfg(feature = "iceberg")]` 条件编译 `object_store` 字段，适配器层面不强制 iceberg 依赖
+- Lance `previous_version_id` 通过 SQL LEFT JOIN `asset_versions prev` 一次查询获取，避免额外 round-trip
+
+**集成测试覆盖** (新增 5 tests，总计 21 tests):
+
+- Lance 无版本: `current_version` = null
+- Lance 有版本: `version_id` / `metadata_location` / `previous_version_id` 正确
+- Iceberg 无 metadata: `current_version` = null
+- Iceberg 有 metadata: `sequence_number` / `snapshot_id` / `timestamp_ms` 正确
+- Iceberg 无 snapshot: `snapshot_id` = null, `timestamp_ms` = null
+
+**验收状态**:
+
+- [x] `cargo build --all-features` 编译通过
+- [x] `cargo build --no-default-features --features "lance,iceberg"` 编译通过
+- [x] 21 个 Unified Asset 集成测试全部通过（16 原 + 5 新增）
+- [x] 13 个 Unified Namespace 集成测试全部通过（无回归）
+- [x] 全部 adapter 回归测试通过
+- [x] Storage 回归测试通过
+- [x] Server 回归测试通过
+- [x] `cargo fmt --check` 通过
+- [x] `cargo clippy --all-features` 零警告
+- [x] Lance asset 无版本时 `current_version` = null
+- [x] Lance asset 有版本时 `current_version` 字段正确
+- [x] Iceberg asset metadata.json 不可用时 `current_version` = null（不报错）
+- [x] Iceberg asset metadata.json 可解析时 `current_version` 字段正确
 
 ---
 
