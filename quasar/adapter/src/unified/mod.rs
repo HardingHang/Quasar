@@ -1,8 +1,9 @@
+pub mod asset;
 pub mod dto;
 pub mod error;
 pub mod namespace;
 
-use axum::{routing::get, Router};
+use axum::{routing::get, routing::post, Router};
 use std::sync::Arc;
 
 use quasar_core::CatalogStore;
@@ -23,5 +24,19 @@ pub fn routes() -> Router<Arc<dyn CatalogStore>> {
             get(namespace::get_namespace)
                 .delete(namespace::drop_namespace)
                 .patch(namespace::update_namespace),
+        )
+        .route(
+            "/unified/v1/namespaces/{ns}/assets",
+            get(asset::list_assets),
+        )
+        .route(
+            "/unified/v1/namespaces/{ns}/assets/{name}",
+            get(asset::get_asset)
+                .delete(asset::drop_asset)
+                .patch(asset::update_asset),
+        )
+        .route(
+            "/unified/v1/namespaces/{ns}/assets/{name}/rename",
+            post(asset::rename_asset),
         )
 }

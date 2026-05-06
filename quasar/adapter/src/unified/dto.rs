@@ -2,6 +2,8 @@ use quasar_core::PatchField;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// ── Asset DTOs ──────────────────────────────────────────────────
+
 // ── Namespace DTOs ──────────────────────────────────────────────
 
 /// POST /unified/v1/namespaces
@@ -77,4 +79,106 @@ impl PaginationQuery {
     pub fn encode_token(offset: i64) -> String {
         offset.to_string()
     }
+}
+
+/// Current version response (tagged union by format).
+#[derive(Debug, Serialize)]
+#[serde(tag = "format", rename_all = "snake_case")]
+pub enum CurrentVersionResponse {
+    Iceberg {
+        sequence_number: i64,
+        snapshot_id: Option<i64>,
+        timestamp_ms: Option<i64>,
+    },
+    Lance {
+        version_id: i64,
+        metadata_location: String,
+        previous_version_id: Option<i64>,
+        timestamp: String,
+    },
+}
+
+/// Asset list item (without current_version).
+#[derive(Debug, Serialize)]
+pub struct AssetListItem {
+    pub id: String,
+    pub name: String,
+    pub asset_type: String,
+    pub format: String,
+    pub location: String,
+    pub metadata_location: Option<String>,
+    pub comment: Option<String>,
+    pub properties: HashMap<String, String>,
+    pub created_at: String,
+}
+
+/// Asset detail response (with current_version).
+#[derive(Debug, Serialize)]
+pub struct AssetResponse {
+    pub id: String,
+    pub name: String,
+    pub asset_type: String,
+    pub format: String,
+    pub location: String,
+    pub metadata_location: Option<String>,
+    pub comment: Option<String>,
+    pub properties: HashMap<String, String>,
+    pub current_version: Option<CurrentVersionResponse>,
+    pub created_at: String,
+}
+
+/// PATCH /unified/v1/namespaces/{ns}/assets/{name}
+#[derive(Debug, Deserialize)]
+pub struct UpdateAssetRequest {
+    #[serde(default)]
+    pub comment: PatchField<String>,
+    #[serde(default)]
+    pub removals: Vec<String>,
+    #[serde(default)]
+    pub updates: HashMap<String, String>,
+}
+
+/// POST /unified/v1/namespaces/{ns}/assets/{name}/rename
+#[derive(Debug, Deserialize)]
+pub struct RenameAssetRequest {
+    pub new_name: String,
+}
+
+/// List assets response body.
+#[derive(Debug, Serialize)]
+pub struct ListAssetsResponse {
+    pub assets: Vec<AssetListItem>,
+    pub next_page_token: Option<String>,
+}
+
+/// Query parameters for asset list endpoint.
+#[derive(Debug, Deserialize)]
+pub struct AssetListQuery {
+    pub format: Option<String>,
+    pub name: Option<String>,
+    #[serde(rename = "pageToken")]
+    pub page_token: Option<String>,
+    #[serde(rename = "pageSize")]
+    pub page_size: Option<i32>,
+}
+
+impl AssetListQuery {
+    pub fn resolved_page_size(&self) -> i32 {
+        self.page_size
+            .unwrap_or(PaginationQuery::DEFAULT_PAGE_SIZE)
+            .clamp(1, PaginationQuery::MAX_PAGE_SIZE)
+    }
+
+    pub fn resolved_offset(&self) -> Result<i64, &'static str> {
+        match &self.page_token {
+            None => Ok(0),
+            Some(token) => token.parse::<i64>().map_err(|_| "invalid page token"),
+        }
+    }
+}
+
+/// Query parameters for single-asset operations (get/delete/patch/rename).
+#[derive(Debug, Deserialize)]
+pub struct AssetDetailQuery {
+    pub format: Option<String>,
 }
