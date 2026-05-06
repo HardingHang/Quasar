@@ -2,15 +2,21 @@ pub mod asset;
 pub mod dto;
 pub mod error;
 pub mod namespace;
+pub mod version;
 
 use axum::{routing::get, routing::post, Router};
 use std::sync::Arc;
 
 use quasar_core::CatalogStore;
 
-/// Unified API configuration (empty for now, reserved for future extensions).
+/// Unified API configuration.
 #[derive(Clone, Default)]
-pub struct UnifiedConfig;
+pub struct UnifiedConfig {
+    #[cfg(feature = "iceberg")]
+    pub object_store: Option<Arc<dyn object_store::ObjectStore>>,
+    #[cfg(feature = "iceberg")]
+    pub s3_bucket: Option<String>,
+}
 
 /// Register Unified API routes.
 pub fn routes() -> Router<Arc<dyn CatalogStore>> {

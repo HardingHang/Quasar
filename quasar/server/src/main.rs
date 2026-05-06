@@ -86,6 +86,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
     }
 
+    #[cfg(feature = "unified")]
+    {
+        let mut unified_config = quasar_adapter::unified::UnifiedConfig::default();
+        #[cfg(feature = "iceberg")]
+        {
+            unified_config.object_store = app_config.iceberg.object_store.clone();
+            unified_config.s3_bucket = app_config.iceberg.s3_bucket.clone();
+        }
+        app_config.unified = unified_config;
+    }
+
     let app = quasar_server::create_app_with_config(pool, app_config);
 
     let addr = SocketAddr::from((cfg.host.parse::<std::net::IpAddr>()?, cfg.port));

@@ -9,8 +9,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use super::dto::{
-    AssetDetailQuery, AssetListItem, AssetListQuery, AssetResponse, ListAssetsResponse,
-    RenameAssetRequest, UpdateAssetRequest,
+    AssetDetailQuery, AssetListItem, AssetListQuery, AssetResponse, CurrentVersionResponse,
+    ListAssetsResponse, RenameAssetRequest, UpdateAssetRequest,
 };
 use super::error::{map_asset_error, UnifiedError, UnifiedErrorCode};
 
@@ -61,10 +61,10 @@ fn asset_pair_to_list_item(
     }
 }
 
-/// Convert (Asset, TabularAsset) to AssetResponse.
-/// S5: current_version is always None; V2-S6 will populate it.
+/// Convert (Asset, TabularAsset) to AssetResponse with current version.
 fn asset_pair_to_response(
     (asset, tabular): (quasar_core::Asset, quasar_core::TabularAsset),
+    current_version: Option<CurrentVersionResponse>,
 ) -> AssetResponse {
     AssetResponse {
         id: asset.id.to_string(),
@@ -75,7 +75,7 @@ fn asset_pair_to_response(
         metadata_location: tabular.metadata_location,
         comment: asset.comment,
         properties: asset.properties,
-        current_version: None,
+        current_version,
         created_at: asset.created_at.to_rfc3339(),
     }
 }
@@ -150,6 +150,7 @@ pub async fn get_asset(
     Extension(request_id): Extension<String>,
     Path((ns, name)): Path<(String, String)>,
     Query(query): Query<AssetDetailQuery>,
+    Extension(config): Extension<super::UnifiedConfig>,
 ) -> Result<impl IntoResponse, UnifiedError> {
     let instance = format!("/unified/v1/namespaces/{}/assets/{}", ns, name);
     let format = parse_format(query.format, &instance, &request_id)?;
@@ -159,7 +160,22 @@ pub async fn get_asset(
         .await
         .map_err(|e| map_asset_error(e, &instance, &request_id))?;
 
-    Ok((StatusCode::OK, Json(asset_pair_to_response(pair))))
+    let current_version = super::version::get_current_version(
+        store.as_ref(),
+        &config,
+        &ns,
+        &name,
+        format,
+        pair.1.metadata_location.as_deref(),
+        &instance,
+        &request_id,
+    )
+    .await?;
+
+    Ok((
+        StatusCode::OK,
+        Json(asset_pair_to_response(pair, current_version)),
+    ))
 }
 
 /// DELETE /unified/v1/namespaces/{ns}/assets/{name}
@@ -186,6 +202,7 @@ pub async fn update_asset(
     Extension(request_id): Extension<String>,
     Path((ns, name)): Path<(String, String)>,
     Query(query): Query<AssetDetailQuery>,
+    Extension(config): Extension<super::UnifiedConfig>,
     Json(req): Json<UpdateAssetRequest>,
 ) -> Result<impl IntoResponse, UnifiedError> {
     let instance = format!("/unified/v1/namespaces/{}/assets/{}", ns, name);
@@ -202,7 +219,22 @@ pub async fn update_asset(
         .await
         .map_err(|e| map_asset_error(e, &instance, &request_id))?;
 
-    Ok((StatusCode::OK, Json(asset_pair_to_response(pair))))
+    let current_version = super::version::get_current_version(
+        store.as_ref(),
+        &config,
+        &ns,
+        &name,
+        format,
+        pair.1.metadata_location.as_deref(),
+        &instance,
+        &request_id,
+    )
+    .await?;
+
+    Ok((
+        StatusCode::OK,
+        Json(asset_pair_to_response(pair, current_version)),
+    ))
 }
 
 /// POST /unified/v1/namespaces/{ns}/assets/{name}/rename
