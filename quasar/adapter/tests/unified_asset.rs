@@ -91,10 +91,17 @@ async fn inject_request_id(
 }
 
 fn test_app(store: Arc<PgCatalogStore>) -> axum::Router {
+    test_app_with_config(store, unified::UnifiedConfig::default())
+}
+
+fn test_app_with_config(
+    store: Arc<PgCatalogStore>,
+    config: unified::UnifiedConfig,
+) -> axum::Router {
     use axum::Extension;
     let store: Arc<dyn quasar_core::CatalogStore> = store;
     unified::routes()
-        .layer(Extension(unified::UnifiedConfig::default()))
+        .layer(Extension(config))
         .layer(axum::middleware::from_fn(inject_request_id))
         .with_state(store)
 }
@@ -612,4 +619,202 @@ async fn test_list_assets_invalid_format() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let json = body_json(response).await;
     assert_eq!(json["code"], "InvalidFormat");
+}
+
+// ── Version Tests ───────────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn test_get_lance_asset_no_version() {
+    let store = setup().await;
+    create_test_namespace(&store, "prod").await;
+    create_test_asset(&store, "prod", AssetFormat::Lance, "items").await;
+
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/unified/v1/namespaces/prod/assets/items?format=lance")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["name"], "items");
+    assert_eq!(json["format"], "lance");
+    assert!(json["current_version"].is_null());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_get_lance_asset_with_version() {
+    let store = setup().await;
+    create_test_namespace(&store, "prod").await;
+    create_test_asset(&store, "prod", AssetFormat::Lance, "items").await;
+
+    store
+        .create_version(
+            "prod",
+            AssetFormat::Lance,
+            "items",
+            1,
+            "s3://bucket/v1.manifest".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/unified/v1/namespaces/prod/assets/items?format=lance")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["name"], "items");
+    assert_eq!(json["format"], "lance");
+    let cv = json["current_version"].as_object().unwrap();
+    assert_eq!(cv.get("format").unwrap(), "lance");
+    assert_eq!(cv.get("version_id").unwrap(), 1);
+    assert_eq!(
+        cv.get("metadata_location").unwrap(),
+        "s3://bucket/v1.manifest"
+    );
+    assert!(cv.get("previous_version_id").unwrap().is_null());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_get_iceberg_asset_no_metadata() {
+    let store = setup().await;
+    create_test_namespace(&store, "prod").await;
+    create_test_asset(&store, "prod", AssetFormat::Iceberg, "users").await;
+
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/unified/v1/namespaces/prod/assets/users?format=iceberg")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert!(json["current_version"].is_null());
+}
+
+#[cfg(feature = "iceberg")]
+#[tokio::test]
+#[serial]
+async fn test_get_iceberg_asset_with_metadata() {
+    let store = setup().await;
+    create_test_namespace(&store, "prod").await;
+    create_test_asset(&store, "prod", AssetFormat::Iceberg, "users").await;
+
+    let mem_store =
+        Arc::new(object_store::memory::InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+    let metadata = serde_json::json!({
+        "format-version": 2,
+        "table-uuid": "uuid",
+        "location": "s3://bucket/prod/users",
+        "last-sequence-number": 1,
+        "current-snapshot-id": 123,
+        "snapshots": [
+            {
+                "snapshot-id": 123,
+                "timestamp-ms": 1700000000000i64
+            }
+        ]
+    });
+
+    let path = object_store::path::Path::from("prod/users/metadata.json");
+    let payload = object_store::PutPayload::from(serde_json::to_vec(&metadata).unwrap());
+    mem_store.put(&path, payload).await.unwrap();
+
+    let mut config = unified::UnifiedConfig::default();
+    config.object_store = Some(mem_store);
+    config.s3_bucket = Some("bucket".to_string());
+
+    let app = test_app_with_config(store, config);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/unified/v1/namespaces/prod/assets/users?format=iceberg")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let cv = json["current_version"].as_object().unwrap();
+    assert_eq!(cv.get("format").unwrap(), "iceberg");
+    assert_eq!(cv.get("sequence_number").unwrap(), 1);
+    assert_eq!(cv.get("snapshot_id").unwrap(), 123);
+    assert_eq!(cv.get("timestamp_ms").unwrap(), 1700000000000i64);
+}
+
+#[cfg(feature = "iceberg")]
+#[tokio::test]
+#[serial]
+async fn test_get_iceberg_asset_no_snapshot() {
+    let store = setup().await;
+    create_test_namespace(&store, "prod").await;
+    create_test_asset(&store, "prod", AssetFormat::Iceberg, "users").await;
+
+    let mem_store =
+        Arc::new(object_store::memory::InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+    let metadata = serde_json::json!({
+        "format-version": 2,
+        "last-sequence-number": 0,
+    });
+
+    let path = object_store::path::Path::from("prod/users/metadata.json");
+    let payload = object_store::PutPayload::from(serde_json::to_vec(&metadata).unwrap());
+    mem_store.put(&path, payload).await.unwrap();
+
+    let mut config = unified::UnifiedConfig::default();
+    config.object_store = Some(mem_store);
+    config.s3_bucket = Some("bucket".to_string());
+
+    let app = test_app_with_config(store, config);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/unified/v1/namespaces/prod/assets/users?format=iceberg")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let cv = json["current_version"].as_object().unwrap();
+    assert_eq!(cv.get("sequence_number").unwrap(), 0);
+    assert!(cv.get("snapshot_id").unwrap().is_null());
+    assert!(cv.get("timestamp_ms").unwrap().is_null());
 }
