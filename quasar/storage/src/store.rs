@@ -126,6 +126,7 @@ fn row_to_tabular_version(row: &Row) -> Result<TabularAssetVersion, StoreError> 
         asset_version_id: try_get!(row, "asset_version_id"),
         metadata_location: try_get!(row, "metadata_location"),
         previous_asset_version_id: row.try_get("previous_asset_version_id").ok(),
+        previous_version_order: row.try_get("previous_version_order").ok(),
     })
 }
 
@@ -437,7 +438,7 @@ impl CatalogStore for PgCatalogStore {
         // Fetch latest version
         let version_row = client
             .query_opt(
-                "SELECT av.id, av.asset_id, av.version_key, av.version_order, av.properties, av.created_at, tav.asset_version_id, tav.metadata_location, tav.previous_asset_version_id FROM asset_versions av JOIN tabular_asset_versions tav ON av.id = tav.asset_version_id WHERE av.asset_id = $1 ORDER BY av.version_order DESC NULLS LAST LIMIT 1",
+                "SELECT av.id, av.asset_id, av.version_key, av.version_order, av.properties, av.created_at, tav.asset_version_id, tav.metadata_location, tav.previous_asset_version_id, prev.version_order as previous_version_order FROM asset_versions av JOIN tabular_asset_versions tav ON av.id = tav.asset_version_id LEFT JOIN asset_versions prev ON tav.previous_asset_version_id = prev.id WHERE av.asset_id = $1 ORDER BY av.version_order DESC NULLS LAST LIMIT 1",
                 &[&asset.id],
             )
             .await
@@ -640,7 +641,7 @@ impl CatalogStore for PgCatalogStore {
         // Fetch latest version
         let version_row = client
             .query_opt(
-                "SELECT av.id, av.asset_id, av.version_key, av.version_order, av.properties, av.created_at, tav.asset_version_id, tav.metadata_location, tav.previous_asset_version_id FROM asset_versions av JOIN tabular_asset_versions tav ON av.id = tav.asset_version_id WHERE av.asset_id = $1 ORDER BY av.version_order DESC NULLS LAST LIMIT 1",
+                "SELECT av.id, av.asset_id, av.version_key, av.version_order, av.properties, av.created_at, tav.asset_version_id, tav.metadata_location, tav.previous_asset_version_id, prev.version_order as previous_version_order FROM asset_versions av JOIN tabular_asset_versions tav ON av.id = tav.asset_version_id LEFT JOIN asset_versions prev ON tav.previous_asset_version_id = prev.id WHERE av.asset_id = $1 ORDER BY av.version_order DESC NULLS LAST LIMIT 1",
                 &[&asset_id],
             )
             .await
@@ -787,6 +788,7 @@ impl CatalogStore for PgCatalogStore {
             asset_version_id: version_uuid,
             metadata_location,
             previous_asset_version_id: previous_version_uuid,
+            previous_version_order: previous_version_id,
         };
         Ok(AssetVersionWithTabular {
             version,

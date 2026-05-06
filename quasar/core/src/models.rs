@@ -121,6 +121,7 @@ pub struct TabularAssetVersion {
     pub asset_version_id: Uuid,
     pub metadata_location: String,
     pub previous_asset_version_id: Option<Uuid>,
+    pub previous_version_order: Option<i64>,
 }
 
 /// AssetVersion + TabularAssetVersion combination.
@@ -356,6 +357,7 @@ mod tests {
             asset_version_id: Uuid::new_v4(),
             metadata_location: "s3://bucket/v42.manifest".to_string(),
             previous_asset_version_id: Some(Uuid::new_v4()),
+            previous_version_order: Some(1),
         };
 
         let json = serde_json::to_string(&tv).unwrap();
@@ -363,6 +365,7 @@ mod tests {
 
         assert_eq!(decoded.metadata_location, "s3://bucket/v42.manifest");
         assert!(decoded.previous_asset_version_id.is_some());
+        assert_eq!(decoded.previous_version_order, Some(1));
     }
 
     #[test]
@@ -371,11 +374,13 @@ mod tests {
             asset_version_id: Uuid::new_v4(),
             metadata_location: "s3://bucket/first.manifest".to_string(),
             previous_asset_version_id: None,
+            previous_version_order: None,
         };
 
         let json = serde_json::to_string(&tv).unwrap();
         let decoded: TabularAssetVersion = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.previous_asset_version_id, None);
+        assert_eq!(decoded.previous_version_order, None);
     }
 
     #[test]
@@ -392,6 +397,7 @@ mod tests {
             asset_version_id: version.id,
             metadata_location: "s3://bucket/v3.manifest".to_string(),
             previous_asset_version_id: None,
+            previous_version_order: None,
         };
 
         let combined = AssetVersionWithTabular {
