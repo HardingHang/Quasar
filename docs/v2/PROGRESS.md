@@ -17,7 +17,7 @@
 | **V2-S4** | **Unified API 骨架 + Namespace** | **已完成** | - | **2026/04/30** |
 | V2-S5 | Unified Asset | 已完成 | - | 2026/05/06 |
 | V2-S6 | 版本查看 | 已完成 | - | 2026/05/06 |
-| V2-S7 | Feature 与集成 | 待开始 | - | - |
+| V2-S7 | Feature 与集成 | 已完成 | - | 2026/05/06 |
 
 ---
 
@@ -224,24 +224,46 @@
 - [x] Iceberg asset metadata.json 不可用时 `current_version` = null（不报错）
 - [x] Iceberg asset metadata.json 可解析时 `current_version` 字段正确
 
----
-
-## 待开始阶段
-
-### V2-S6: 版本查看
-
-**前置依赖**: V2-S5
-
-**目标**: Iceberg/Lance `current_version` 嵌入 Asset 详情
-
-### V2-S6: 版本查看
-
-**前置依赖**: V2-S5
-
-**目标**: Iceberg/Lance `current_version` 嵌入 Asset 详情
-
 ### V2-S7: Feature 与集成
 
 **前置依赖**: V2-S6
 
-**目标**: 条件编译验证、无状态 smoke test
+**新增文件**:
+
+| 文件 | 说明 |
+|------|------|
+| `server/tests/smoke.rs` | 双实例无状态 smoke test |
+
+**S7 验证内容**:
+
+| # | 验证项 | 结果 |
+|---|--------|------|
+| 1 | 关闭 `unified` feature 编译通过 | 通过 |
+| 2 | 关闭 unified 后标准协议回归测试通过 | 通过（Iceberg 40+ / Lance 29+） |
+| 3 | unified 测试被 `#[cfg(feature = "unified")]` 正确排除 | 通过（0 tests） |
+| 4 | 全量测试（含 unified）通过 | 通过 |
+| 5 | 双实例无状态 smoke test | 通过 |
+
+**Smoke test 场景**:
+
+- App1 (Unified API) 创建 namespace "prod" → App2 (Unified API) 读取确认
+- App1 (Lance API) declare table "users" → App2 (Lance API) list 确认
+- App1 (Iceberg API) 创建 namespace "staging" → App2 (Iceberg API) list 确认
+- App2 (Unified API) 跨格式发现 "users" → App1 (Unified API) 删除 → App2 (Lance API) 确认已删除
+
+**验收状态**:
+
+- [x] `cargo build --all-features` 编译通过
+- [x] `cargo build --no-default-features --features "lance,iceberg"` 编译通过
+- [x] 全量 adapter 回归测试通过（含 unified 测试）
+- [x] Storage 回归测试通过
+- [x] Server 回归测试通过（含 smoke test）
+- [x] `cargo fmt --check` 通过
+- [x] `cargo clippy --all-features` 零警告
+- [x] 关闭 unified feature 后 unified 测试被正确排除
+- [x] 关闭 unified feature 后标准协议测试无回归
+- [x] 双实例共享 PostgreSQL 数据一致
+
+---
+
+## 待开始阶段
