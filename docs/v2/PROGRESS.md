@@ -15,7 +15,7 @@
 | V2-S2c | Storage Version + CAS | 已完成 | - | - |
 | V2-S3 | 标准协议适配器格式隔离 | 已完成 | `1943a31` | - |
 | **V2-S4** | **Unified API 骨架 + Namespace** | **已完成** | - | **2026/04/30** |
-| V2-S5 | Unified Asset | 待开始 | - | - |
+| V2-S5 | Unified Asset | 已完成 | - | 2026/05/06 |
 | V2-S6 | 版本查看 | 待开始 | - | - |
 | V2-S7 | Feature 与集成 | 待开始 | - | - |
 
@@ -111,22 +111,70 @@
 - [x] Problem Details 格式: Content-Type = `application/problem+json`
 - [x] X-Request-Id header 透传正确
 
----
-
-## 待开始阶段
-
 ### V2-S5: Unified Asset
 
 **前置依赖**: V2-S4, V2-S3
 
-**目标**: Asset 发现（跨格式 list）+ 管理（get/delete/patch/rename）
+**新增文件**:
 
-**端点**:
-- GET `/unified/v1/namespaces/{ns}/assets`
-- GET `/unified/v1/namespaces/{ns}/assets/{name}?format={format}`
-- DELETE `/unified/v1/namespaces/{ns}/assets/{name}?format={format}`
-- PATCH `/unified/v1/namespaces/{ns}/assets/{name}?format={format}`
-- POST `/unified/v1/namespaces/{ns}/assets/{name}/rename?format={format}`
+| 文件 | 说明 |
+|------|------|
+| `adapter/src/unified/asset.rs` | 5 个 Asset handler（list/get/delete/patch/rename） |
+| `adapter/tests/unified_asset.rs` | 16 个集成测试 |
+
+**修改文件**:
+
+| 文件 | 修改内容 |
+|------|---------|
+| `adapter/src/unified/dto.rs` | 新增 AssetListItem、AssetResponse、CurrentVersionResponse、UpdateAssetRequest、RenameAssetRequest、ListAssetsResponse、AssetListQuery、AssetDetailQuery |
+| `adapter/src/unified/mod.rs` | 注册 Asset 端点路由（保留 Namespace 路由） |
+
+**实现的端点**:
+
+| 方法 | 路径 | 状态码 |
+|------|------|--------|
+| GET | `/unified/v1/namespaces/{ns}/assets` | 200 |
+| GET | `/unified/v1/namespaces/{ns}/assets/{name}` | 200 |
+| DELETE | `/unified/v1/namespaces/{ns}/assets/{name}` | 204 |
+| PATCH | `/unified/v1/namespaces/{ns}/assets/{name}` | 200 |
+| POST | `/unified/v1/namespaces/{ns}/assets/{name}/rename` | 200 |
+
+**集成测试覆盖** (16 tests):
+
+- 正向: list 跨格式、list format 过滤、list name 过滤、list 分页、get detail、delete、patch comment、patch properties、rename
+- 负向: get 缺 format (400 InvalidInput)、get 非法 format (400 InvalidFormat)、get not found (404)、delete not found (404)、rename 目标名已存在 (409)
+- 格式验证: list 非法 format (400 InvalidFormat)
+
+**关键设计决策**:
+
+- `format` 查询参数对单资产操作 **必需**（同名 asset 可跨格式共存），对 list 操作可选
+- 不暴露 `POST /assets`（Unified 不处理 Asset 创建）
+- `current_version` 字段在 S5 中始终返回 `null`（V2-S6 实现版本读取）
+- `#[serde(flatten)]` 与 URL 编码查询参数不兼容，改为在 `AssetListQuery` 中内联分页字段
+
+**验收状态**:
+
+- [x] `cargo build --all-features` 编译通过
+- [x] `cargo build --no-default-features --features "lance,iceberg"` 编译通过
+- [x] 16 个 Unified Asset 集成测试全部通过
+- [x] 13 个 Unified Namespace 集成测试全部通过（无回归）
+- [x] 全部 adapter 回归测试通过
+- [x] Storage 回归测试通过
+- [x] Server 回归测试通过
+- [x] `cargo fmt --check` 通过
+- [x] `cargo clippy --all-features` 零警告
+- [x] Problem Details 格式: Content-Type = `application/problem+json`
+- [x] format 参数验证正确: 缺失 → 400 InvalidInput, 非法值 → 400 InvalidFormat
+
+---
+
+## 待开始阶段
+
+### V2-S6: 版本查看
+
+**前置依赖**: V2-S5
+
+**目标**: Iceberg/Lance `current_version` 嵌入 Asset 详情
 
 ### V2-S6: 版本查看
 
