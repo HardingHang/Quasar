@@ -67,5 +67,5 @@ CREATE UNIQUE INDEX idx_asset_versions_asset_order
 CREATE TABLE IF NOT EXISTS tabular_asset_versions (
     asset_version_id UUID PRIMARY KEY REFERENCES asset_versions(id) ON DELETE CASCADE,
     metadata_location TEXT NOT NULL,
-    previous_asset_version_id UUID REFERENCES asset_versions(id)
+    previous_asset_version_id UUID REFERENCES asset_versions(id) ON DELETE SET NULL
 );

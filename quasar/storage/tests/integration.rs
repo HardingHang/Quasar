@@ -48,6 +48,11 @@ fn test_pool(url: &str) -> Pool {
 }
 
 async fn setup() -> PgCatalogStore {
+    let (store, _) = setup_with_pool().await;
+    store
+}
+
+async fn setup_with_pool() -> (PgCatalogStore, Pool) {
     let instance = PgInstance::get().await;
     let pool = test_pool(&instance.url);
     let store = PgCatalogStore::new(pool.clone());
@@ -66,7 +71,7 @@ async fn setup() -> PgCatalogStore {
 
     store.migrate().await.expect("migration failed");
 
-    store
+    (store, pool)
 }
 
 #[tokio::test]
@@ -322,6 +327,134 @@ async fn test_version_conflict() {
         .await
         .unwrap_err();
     assert!(matches!(err, StoreError::Conflict(_)));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_previous_version_must_belong_to_same_asset() {
+    let store = setup().await;
+
+    store
+        .create_namespace("ns1", None, HashMap::new())
+        .await
+        .unwrap();
+    store
+        .create_asset(
+            "ns1",
+            AssetFormat::Lance,
+            "tbl1",
+            "lance://ns1/tbl1",
+            None,
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    store
+        .create_asset(
+            "ns1",
+            AssetFormat::Lance,
+            "tbl2",
+            "lance://ns1/tbl2",
+            None,
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    store
+        .create_version(
+            "ns1",
+            AssetFormat::Lance,
+            "tbl1",
+            1,
+            "s3://bucket/tbl1/v1".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let err = store
+        .create_version(
+            "ns1",
+            AssetFormat::Lance,
+            "tbl2",
+            2,
+            "s3://bucket/tbl2/v2".to_string(),
+            Some(1),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, StoreError::Conflict(_)));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_drop_asset_cascades_tabular_and_versions() {
+    let (store, pool) = setup_with_pool().await;
+
+    store
+        .create_namespace("ns1", None, HashMap::new())
+        .await
+        .unwrap();
+    store
+        .create_asset(
+            "ns1",
+            AssetFormat::Lance,
+            "tbl",
+            "lance://ns1/tbl",
+            None,
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    store
+        .create_version(
+            "ns1",
+            AssetFormat::Lance,
+            "tbl",
+            1,
+            "s3://bucket/v1".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .create_version(
+            "ns1",
+            AssetFormat::Lance,
+            "tbl",
+            2,
+            "s3://bucket/v2".to_string(),
+            Some(1),
+        )
+        .await
+        .unwrap();
+
+    store
+        .drop_asset("ns1", AssetFormat::Lance, "tbl")
+        .await
+        .unwrap();
+
+    let client = pool.get().await.expect("failed to get client");
+    for table in [
+        "assets",
+        "tabular_assets",
+        "asset_versions",
+        "tabular_asset_versions",
+    ] {
+        let row = client
+            .query_one(
+                &format!("SELECT COUNT(*)::BIGINT AS count FROM {}", table),
+                &[],
+            )
+            .await
+            .unwrap();
+        let count: i64 = row.get("count");
+        assert_eq!(count, 0, "{} should be empty after cascade", table);
+    }
 }
 
 #[tokio::test]
