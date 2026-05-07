@@ -904,7 +904,7 @@ impl CatalogStore for PgCatalogStore {
         let format_str = format.map(|f| f.as_str());
         let rows = client
             .query(
-                "SELECT a.id, a.namespace_id, a.name, a.asset_type, a.asset_subtype, a.comment, a.properties, a.created_at, ta.asset_id, ta.location, ta.metadata_location, ta.schema_snapshot FROM assets a JOIN tabular_assets ta ON a.id = ta.asset_id JOIN namespaces n ON a.namespace_id = n.id WHERE n.name = $1 AND ($2::TEXT IS NULL OR a.asset_subtype = $2) AND ($3::TEXT IS NULL OR a.name = $3) ORDER BY a.name LIMIT $4 OFFSET $5",
+                "SELECT a.id, a.namespace_id, a.name, a.asset_type, a.asset_subtype, a.comment, a.properties, a.created_at, ta.asset_id, ta.location, ta.metadata_location, ta.schema_snapshot FROM assets a JOIN tabular_assets ta ON a.id = ta.asset_id JOIN namespaces n ON a.namespace_id = n.id WHERE n.name = $1 AND ($2::TEXT IS NULL OR a.asset_subtype = $2) AND ($3::TEXT IS NULL OR a.name = $3) ORDER BY a.name, a.asset_subtype LIMIT $4 OFFSET $5",
                 &[&namespace_name, &format_str, &name, &(limit as i64), &offset],
             )
             .await

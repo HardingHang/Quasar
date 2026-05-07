@@ -4,13 +4,13 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use quasar_core::{AssetFormat, CatalogStore};
+use quasar_core::{validate_name, AssetFormat, CatalogStore};
 use std::str::FromStr;
 use std::sync::Arc;
 
 use super::dto::{
     AssetDetailQuery, AssetListItem, AssetListQuery, AssetResponse, CurrentVersionResponse,
-    ListAssetsResponse, RenameAssetRequest, UpdateAssetRequest,
+    ListAssetsResponse, PageSizeError, PaginationQuery, RenameAssetRequest, UpdateAssetRequest,
 };
 use super::error::{map_asset_error, UnifiedError, UnifiedErrorCode};
 
@@ -34,6 +34,31 @@ fn parse_format(
             request_id,
         )),
         Some(s) => AssetFormat::from_str(&s).map_err(|_| {
+            UnifiedError::new(
+                UnifiedErrorCode::InvalidFormat,
+                format!("invalid format '{}', expected 'iceberg' or 'lance'", s),
+                instance,
+                request_id,
+            )
+        }),
+    }
+}
+
+/// Parse and validate the optional `format` query parameter for list endpoints.
+fn parse_optional_format(
+    format: Option<String>,
+    instance: &str,
+    request_id: &str,
+) -> Result<Option<AssetFormat>, UnifiedError> {
+    match format {
+        None => Ok(None),
+        Some(ref s) if s.is_empty() => Err(UnifiedError::new(
+            UnifiedErrorCode::InvalidFormat,
+            "format query parameter cannot be empty",
+            instance,
+            request_id,
+        )),
+        Some(s) => AssetFormat::from_str(&s).map(Some).map_err(|_| {
             UnifiedError::new(
                 UnifiedErrorCode::InvalidFormat,
                 format!("invalid format '{}', expected 'iceberg' or 'lance'", s),
@@ -87,45 +112,35 @@ pub async fn list_assets(
     Path(ns): Path<String>,
     Query(query): Query<AssetListQuery>,
 ) -> Result<impl IntoResponse, UnifiedError> {
-    let page_size = query.resolved_page_size();
+    let instance = format!("/unified/v1/namespaces/{}/assets", ns);
+    validate_name(&ns).map_err(|e| map_asset_error(e, &instance, &request_id))?;
+
+    let page_size = query
+        .resolved_page_size()
+        .map_err(|e| map_page_size_error(e, &instance, request_id.as_str()))?;
     let offset = query.resolved_offset().map_err(|_| {
         UnifiedError::new(
             UnifiedErrorCode::InvalidPageToken,
             "invalid page token",
-            format!("/unified/v1/namespaces/{}/assets", ns),
+            instance.clone(),
             request_id.clone(),
         )
     })?;
 
-    let format = query
-        .format
-        .and_then(|s| if s.is_empty() { None } else { Some(s) })
-        .map(|s| {
-            AssetFormat::from_str(&s).map_err(|_| {
-                UnifiedError::new(
-                    UnifiedErrorCode::InvalidFormat,
-                    format!("invalid format '{}', expected 'iceberg' or 'lance'", s),
-                    format!("/unified/v1/namespaces/{}/assets", ns),
-                    request_id.clone(),
-                )
-            })
-        })
-        .transpose()?;
+    let format = parse_optional_format(query.format, &instance, &request_id)?;
 
-    let name_filter = query
-        .name
-        .and_then(|s| if s.is_empty() { None } else { Some(s) });
+    let name_filter = match query.name {
+        Some(name) => {
+            validate_name(&name).map_err(|e| map_asset_error(e, &instance, &request_id))?;
+            Some(name)
+        }
+        None => None,
+    };
 
     let assets = store
         .list_assets_unified(&ns, format, name_filter.as_deref(), offset, page_size)
         .await
-        .map_err(|e| {
-            map_asset_error(
-                e,
-                &format!("/unified/v1/namespaces/{}/assets", ns),
-                &request_id,
-            )
-        })?;
+        .map_err(|e| map_asset_error(e, &instance, &request_id))?;
 
     let next_page_token = if assets.len() as i32 >= page_size {
         Some(super::dto::PaginationQuery::encode_token(
@@ -153,6 +168,8 @@ pub async fn get_asset(
     Extension(config): Extension<super::UnifiedConfig>,
 ) -> Result<impl IntoResponse, UnifiedError> {
     let instance = format!("/unified/v1/namespaces/{}/assets/{}", ns, name);
+    validate_name(&ns).map_err(|e| map_asset_error(e, &instance, &request_id))?;
+    validate_name(&name).map_err(|e| map_asset_error(e, &instance, &request_id))?;
     let format = parse_format(query.format, &instance, &request_id)?;
 
     let pair = store
@@ -186,6 +203,8 @@ pub async fn drop_asset(
     Query(query): Query<AssetDetailQuery>,
 ) -> Result<impl IntoResponse, UnifiedError> {
     let instance = format!("/unified/v1/namespaces/{}/assets/{}", ns, name);
+    validate_name(&ns).map_err(|e| map_asset_error(e, &instance, &request_id))?;
+    validate_name(&name).map_err(|e| map_asset_error(e, &instance, &request_id))?;
     let format = parse_format(query.format, &instance, &request_id)?;
 
     store
@@ -206,6 +225,8 @@ pub async fn update_asset(
     Json(req): Json<UpdateAssetRequest>,
 ) -> Result<impl IntoResponse, UnifiedError> {
     let instance = format!("/unified/v1/namespaces/{}/assets/{}", ns, name);
+    validate_name(&ns).map_err(|e| map_asset_error(e, &instance, &request_id))?;
+    validate_name(&name).map_err(|e| map_asset_error(e, &instance, &request_id))?;
     let format = parse_format(query.format, &instance, &request_id)?;
 
     store
@@ -246,6 +267,9 @@ pub async fn rename_asset(
     Json(req): Json<RenameAssetRequest>,
 ) -> Result<impl IntoResponse, UnifiedError> {
     let instance = format!("/unified/v1/namespaces/{}/assets/{}/rename", ns, name);
+    validate_name(&ns).map_err(|e| map_asset_error(e, &instance, &request_id))?;
+    validate_name(&name).map_err(|e| map_asset_error(e, &instance, &request_id))?;
+    validate_name(&req.new_name).map_err(|e| map_asset_error(e, &instance, &request_id))?;
     let format = parse_format(query.format, &instance, &request_id)?;
 
     store
@@ -254,4 +278,38 @@ pub async fn rename_asset(
         .map_err(|e| map_asset_error(e, &instance, &request_id))?;
 
     Ok(StatusCode::OK)
+}
+
+/// POST /unified/v1/namespaces/{ns}/assets is intentionally not supported in V2.
+pub async fn create_asset_not_allowed(
+    Extension(request_id): Extension<String>,
+    Path(ns): Path<String>,
+) -> Result<StatusCode, UnifiedError> {
+    let instance = format!("/unified/v1/namespaces/{}/assets", ns);
+    Err(UnifiedError::new(
+        UnifiedErrorCode::MethodNotAllowed,
+        "Unified Asset creation is not supported in V2",
+        instance,
+        request_id,
+    ))
+}
+
+fn map_page_size_error(err: PageSizeError, instance: &str, request_id: &str) -> UnifiedError {
+    match err {
+        PageSizeError::Invalid => UnifiedError::new(
+            UnifiedErrorCode::InvalidInput,
+            "pageSize must be greater than 0",
+            instance,
+            request_id,
+        ),
+        PageSizeError::TooLarge => UnifiedError::new(
+            UnifiedErrorCode::PageSizeTooLarge,
+            format!(
+                "pageSize must not exceed {}",
+                PaginationQuery::MAX_PAGE_SIZE
+            ),
+            instance,
+            request_id,
+        ),
+    }
 }

@@ -59,11 +59,9 @@ impl PaginationQuery {
     pub const DEFAULT_PAGE_SIZE: i32 = 100;
     pub const MAX_PAGE_SIZE: i32 = 1000;
 
-    /// Resolve page_size with default and clamp.
-    pub fn resolved_page_size(&self) -> i32 {
-        self.page_size
-            .unwrap_or(Self::DEFAULT_PAGE_SIZE)
-            .clamp(1, Self::MAX_PAGE_SIZE)
+    /// Resolve page_size with default and validation.
+    pub fn resolved_page_size(&self) -> Result<i32, PageSizeError> {
+        resolve_page_size(self.page_size)
     }
 
     /// Decode page_token as offset (S4 MVP: offset encoded in token).
@@ -163,10 +161,8 @@ pub struct AssetListQuery {
 }
 
 impl AssetListQuery {
-    pub fn resolved_page_size(&self) -> i32 {
-        self.page_size
-            .unwrap_or(PaginationQuery::DEFAULT_PAGE_SIZE)
-            .clamp(1, PaginationQuery::MAX_PAGE_SIZE)
+    pub fn resolved_page_size(&self) -> Result<i32, PageSizeError> {
+        resolve_page_size(self.page_size)
     }
 
     pub fn resolved_offset(&self) -> Result<i64, &'static str> {
@@ -181,4 +177,19 @@ impl AssetListQuery {
 #[derive(Debug, Deserialize)]
 pub struct AssetDetailQuery {
     pub format: Option<String>,
+}
+
+/// Page size validation error for Unified list endpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageSizeError {
+    Invalid,
+    TooLarge,
+}
+
+fn resolve_page_size(page_size: Option<i32>) -> Result<i32, PageSizeError> {
+    match page_size.unwrap_or(PaginationQuery::DEFAULT_PAGE_SIZE) {
+        size if size <= 0 => Err(PageSizeError::Invalid),
+        size if size > PaginationQuery::MAX_PAGE_SIZE => Err(PageSizeError::TooLarge),
+        size => Ok(size),
+    }
 }

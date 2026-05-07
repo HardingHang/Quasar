@@ -33,7 +33,7 @@ pub fn routes() -> Router<Arc<dyn CatalogStore>> {
         )
         .route(
             "/unified/v1/namespaces/{ns}/assets",
-            get(asset::list_assets),
+            get(asset::list_assets).post(asset::create_asset_not_allowed),
         )
         .route(
             "/unified/v1/namespaces/{ns}/assets/{name}",
