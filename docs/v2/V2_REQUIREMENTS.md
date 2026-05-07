@@ -204,7 +204,7 @@ CREATE TABLE asset_versions (
 CREATE TABLE tabular_asset_versions (
     asset_version_id UUID PRIMARY KEY REFERENCES asset_versions(id) ON DELETE CASCADE,
     metadata_location TEXT NOT NULL,
-    previous_asset_version_id UUID REFERENCES asset_versions(id)
+    previous_asset_version_id UUID REFERENCES asset_versions(id) ON DELETE SET NULL
 );
 
 CREATE INDEX idx_assets_namespace ON assets(namespace_id);
@@ -929,6 +929,10 @@ enum CurrentVersionResponse {
 - **补充**：验收标准明确 Iceberg/Lance 标准协议错误格式与 Unified Problem Details 错误格式隔离。
 - **补充**：验收标准明确 `assets` 通用注册表、`tabular_assets` 表资产明细表、`asset_versions` 通用版本注册表、`tabular_asset_versions` 表版本明细表的字段边界与约束。
 - **修正**：V2 核心动机与新增范围中残留的 `assets.format` 表述，统一改为 `asset_type` / `asset_subtype` 与表资产明细表拆分。
+
+### V1.11
+
+- **修正**：`tabular_asset_versions.previous_asset_version_id` 外键增加 `ON DELETE SET NULL`，避免 Asset 删除时自引用前驱版本阻塞版本表级联清理。
 
 ---
 

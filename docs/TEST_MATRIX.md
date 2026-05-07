@@ -3,7 +3,7 @@
 > 本文档集中维护所有测试用例的描述，作为测试覆盖的权威目录。
 > 每个测试函数对应一行：名称、类型、场景、验证点。
 >
-> **运行全部测试：** `cd quasar && cargo test`
+> **运行全部测试：** `cargo test --all-features --manifest-path quasar/Cargo.toml`
 
 ---
 
@@ -11,13 +11,13 @@
 
 | Crate | 单元测试 | 集成测试 | 合计 |
 |-------|---------|---------|------|
-| quasar-core | 13 | 0 | 13 |
-| quasar-server | 7 | 4 | 11 |
-| quasar-adapter | 41 | 59 | 100 |
-| quasar-storage | 0 | 6 | 6 |
-| **合计** | **61** | **69** | **130** |
+| quasar-core | 27 | 0 | 27 |
+| quasar-server | 9 | 5 | 14 |
+| quasar-adapter | 54 | 131 | 185 |
+| quasar-storage | 0 | 8 | 8 |
+| **合计** | **90** | **144** | **234** |
 
-> 注：实际运行 `cargo test` 报告 158 个测试通过，差异来自 doc-tests 和部分测试的重复统计方式。
+> 注：统计基于 `cargo test --all-features --manifest-path quasar/Cargo.toml` 的测试函数数量，不含 doc-tests（当前为 0）。
 
 ---
 
@@ -42,12 +42,31 @@
 |---------|------|--------|
 | `test_asset_format_as_str` | AssetFormat 字符串映射 | `Iceberg` → `"iceberg"`, `Lance` → `"lance"` |
 | `test_asset_format_serde_roundtrip` | AssetFormat 序列化/反序列化 | `snake_case` 序列化，完整往返正确 |
+| `test_asset_type_as_str` | AssetType 字符串映射 | `Table` → `"table"` |
+| `test_asset_type_serde_roundtrip` | AssetType 序列化/反序列化 | `snake_case` 序列化，完整往返正确 |
+| `test_patch_field_deserialize` | PatchField 三态反序列化 | missing/null/value 分别映射为 Missing/Null/Value |
+| `test_patch_field_default` | PatchField 默认值 | 默认值为 Missing |
 | `test_namespace_serde_roundtrip` | Namespace 序列化/反序列化 | 所有字段（含 HashMap properties）往返正确 |
+| `test_namespace_without_comment` | Namespace 无 comment | `comment: None` 往返正确 |
 | `test_asset_serde_roundtrip` | Asset 序列化/反序列化 | 所有字段（含 namespace_id 关联）往返正确 |
-| `test_asset_version_serde_roundtrip` | AssetVersion 序列化/反序列化 | 所有字段（含 previous_version_id: Some）往返正确 |
-| `test_asset_version_without_previous` | AssetVersion 无前驱版本 | `previous_version_id: None` 序列化/反序列化正确 |
-| `test_asset_commit_update_serde` | AssetCommitUpdate 序列化 | 含 previous_version_id 的完整字段往返 |
-| `test_asset_commit_update_without_previous` | AssetCommitUpdate 无 previous | `previous_version_id: None` 序列化/反序列化正确 |
+| `test_tabular_asset_serde_roundtrip` | TabularAsset 序列化/反序列化 | location/metadata_location 往返正确 |
+| `test_asset_with_tabular_serde_roundtrip` | AssetWithTabular 组合结构 | asset 与 tabular 子结构往返正确 |
+| `test_asset_version_serde_roundtrip` | AssetVersion 序列化/反序列化 | version_key/version_order 往返正确 |
+| `test_asset_version_without_order` | AssetVersion 无排序号 | `version_order: None` 往返正确 |
+| `test_tabular_asset_version_serde_roundtrip` | TabularAssetVersion 序列化/反序列化 | metadata_location/previous 字段往返正确 |
+| `test_tabular_asset_version_without_previous` | TabularAssetVersion 无前驱 | previous 字段为 None 时往返正确 |
+| `test_asset_version_with_tabular_serde_roundtrip` | AssetVersionWithTabular 组合结构 | version 与 tabular_version 子结构往返正确 |
+
+### 名称校验 (`src/validation.rs`)
+
+| 测试函数 | 场景 | 验证点 |
+|---------|------|--------|
+| `test_valid_names` | 合法名称集合 | 字母、数字、下划线、短横线、点号、斜杠均可通过 |
+| `test_empty_name_fails` | 空名称 | 返回 InvalidInput，提示 empty |
+| `test_too_long_name_fails` | 超过 256 字符 | 返回 InvalidInput，提示 exceeds |
+| `test_max_length_ok` | 正好 256 字符 | 校验通过 |
+| `test_dot_prefix_fails` | 点号开头 | 返回 InvalidInput，提示 dot |
+| `test_invalid_characters_fails` | 空格、换行、美元符等非法字符 | 返回 InvalidInput，提示 invalid character |
 
 ---
 
@@ -67,6 +86,8 @@
 | `test_config_invalid_port_uses_default` | 单元 | QUASAR_PORT 为非法字符串 | parse 失败后回退默认值 8080 |
 | `test_config_s3_allow_http_numeric_true` | 单元 | QUASAR_S3_ALLOW_HTTP = "1" | 解析为 true |
 | `test_config_s3_allow_http_false` | 单元 | QUASAR_S3_ALLOW_HTTP = "false" | 解析为 false |
+| `test_config_db_max_connections_default` | 单元 | 未设置 QUASAR_DB_MAX_CONNECTIONS | 使用默认连接数 10 |
+| `test_config_db_max_connections_custom` | 单元 | 自定义 QUASAR_DB_MAX_CONNECTIONS | 正确解析连接池最大连接数 |
 
 ### 健康检查 (`tests/health.rs`)
 
@@ -76,6 +97,12 @@
 | `test_readyz` | 集成 | GET /readyz（DB 正常） | 返回 200，`{"status": "ready", "checks": {"database": "ok"}}` |
 | `test_lance_routes_still_work` | 集成 | Lance 路由与 health 共存 | GET /lance/v1/namespace/$/list 返回 200 空列表 |
 | `test_iceberg_routes_are_mounted` | 集成 | Iceberg 路由挂载 | GET /iceberg/v1/config 返回 200 |
+
+### 无状态烟雾测试 (`tests/smoke.rs`)
+
+| 测试函数 | 类型 | 场景 | 验证点 |
+|---------|------|------|--------|
+| `test_dual_instance_stateless_smoke` | 集成 | 两个 server 实例共享同一 PostgreSQL | Unified/Lance/Iceberg 跨实例读写一致，删除后可见性一致 |
 
 ---
 
@@ -110,14 +137,11 @@
 |---------|------|------|--------|
 | `test_create_and_describe_namespace` | 集成 | POST create → POST describe | 返回 name/properties/id，数据持久化 |
 | `test_create_duplicate_returns_409` | 集成 | 重复创建同名 Namespace | 返回 409，error="NamespaceAlreadyExists" |
-| `test_list_namespaces` | 集成 | 创建多个 Namespace 后列表 | 返回全部 Lance format 的 Namespace |
+| `test_list_namespaces` | 集成 | 创建多个 Namespace 后列表 | 返回全部共享 Namespace |
 | `test_namespace_exists` | 集成 | 对已存在/不存在的 Namespace exists | true → 200, false → 200 |
 | `test_drop_namespace` | 集成 | POST drop 后再次 drop | 首次 200，重复 404 |
 | `test_describe_not_found` | 集成 | describe 不存在的 Namespace | 返回 404，error="NamespaceNotFound" |
-| `test_list_namespaces_empty` | 集成 | 无 Namespace 时列表 | 返回空数组，next_page_token=null |
-| `test_list_namespaces_pagination_offset_beyond_total` | 集成 | offset 大于总数 | 返回空数组，不报错 |
 | `test_list_namespaces_pagination_with_limit` | 集成 | limit 限制返回数量 | 返回数量 <= limit |
-| `test_list_namespaces_format_isolation` | 集成 | Iceberg/Lance Namespace 共存 | 只返回 Lance format 的 Namespace |
 
 ### Lance Table 端点 (`tests/lance_table.rs`)
 
@@ -139,7 +163,7 @@
 | `test_rename_table_not_found` | 集成 | rename 不存在的 Table | 返回 404，error="TableNotFound" |
 | `test_list_tables_empty_namespace` | 集成 | 无 Table 的 Namespace 列表 | 返回空数组，next_page_token=null |
 | `test_exists_table_not_found_in_existing_namespace` | 集成 | exists 不存在的 Table（ns 存在） | 返回 200，`{"exists": false}` |
-| `test_exists_namespace_not_found_returns_404` | 集成 | exists 时 Namespace 不存在 | 返回 404，error="TableNotFound" |
+| `test_exists_namespace_not_found_returns_false` | 集成 | exists 时 Namespace 不存在 | 返回 200，`{"exists": false}` |
 
 ### Lance Version 端点 (`tests/lance_version.rs`)
 
@@ -163,6 +187,7 @@
 | `test_iceberg_error_bad_request_to_response` | 单元 | BadRequestException → ErrorResponse | code=400, type="BadRequestException" |
 | `test_iceberg_error_commit_failed_to_response` | 单元 | CommitFailedException → ErrorResponse | code=409, type="CommitFailedException" |
 | `test_iceberg_error_internal_to_response` | 单元 | InternalServerError → ErrorResponse | code=500, type="InternalServerError" |
+| `test_iceberg_error_metadata_not_found_to_response` | 单元 | MetadataNotFoundException → ErrorResponse | code=404, type="MetadataNotFoundException" |
 | `test_error_response_serde` | 单元 | ErrorResponse 序列化 | JSON 包含 error/message/type/code 字段 |
 | `test_store_error_to_iceberg_namespace_mapping` | 单元 | StoreError → IcebergError（namespace） | 5 种 StoreError 全变体正确映射 |
 | `test_store_error_to_iceberg_table_mapping` | 单元 | StoreError → IcebergError（table） | 5 种 StoreError 全变体正确映射 |
@@ -216,7 +241,6 @@
 | `test_drop_namespace` | 集成 | DELETE 后再次 GET | 首次 204，再次 404 |
 | `test_drop_non_empty_namespace` | 集成 | DELETE 含 Table 的 Namespace | 返回 400，type="BadRequestException" |
 | `test_update_namespace_properties` | 集成 | POST properties 更新 | removed/updated/missing 正确，properties 持久化 |
-| `test_format_isolation` | 集成 | Iceberg/Lance Namespace 共存 | 只返回 Iceberg format 的 Namespace |
 | `test_update_namespace_properties_namespace_not_found` | 集成 | 对不存在的 Namespace 更新 properties | 返回 404，type="NoSuchNamespaceException" |
 | `test_list_namespaces_empty` | 集成 | 无 Namespace 时列表 | 返回空数组，nextPageToken=null |
 | `test_list_namespaces_pagination_offset_beyond_total` | 集成 | pageToken 超出总数 | 返回空数组，不报错 |
@@ -262,11 +286,90 @@
 | `test_commit_empty_updates` | 集成 | requirements有但updates空 | 空updates → 200 OK（no-op） |
 | `test_remove_properties_commit` | 集成 | RemoveProperties端到端 | 属性删除持久化验证 |
 
+### Iceberg Object Store 端点 (`tests/iceberg_object_store.rs`)
+
+| 测试函数 | 类型 | 场景 | 验证点 |
+|---------|------|------|--------|
+| `test_create_table_writes_metadata_to_object_store` | 集成 | 创建 Table 时启用 ObjectStore | metadata.json 写入对象存储，内容与响应一致 |
+| `test_commit_table_writes_new_metadata_to_object_store` | 集成 | Commit 后生成新 metadata | 新旧 metadata 均存在，新 metadata 包含 snapshot/ref 更新 |
+| `test_load_table_reads_from_object_store` | 集成 | Load Table 从 ObjectStore 读取 | 返回对象存储中的最新 metadata 内容 |
+| `test_load_table_metadata_not_found` | 集成 | load 时 metadata 缺失 | 返回 404 MetadataNotFoundException |
+| `test_commit_table_metadata_not_found` | 集成 | commit 时 metadata 缺失 | 返回 409 CommitFailedException |
+
 ### Iceberg Config 端点 (`tests/iceberg_config.rs`)
 
 | 测试函数 | 类型 | 场景 | 验证点 |
 |---------|------|------|--------|
 | `test_get_config` | 集成 | GET /iceberg/v1/config | 返回 defaults + overrides 对象 |
+
+### 跨格式隔离 (`tests/format_isolation.rs`)
+
+| 测试函数 | 类型 | 场景 | 验证点 |
+|---------|------|------|--------|
+| `test_cross_format_list_isolation` | 集成 | 同名 Iceberg/Lance 表共存后分别 list | 标准协议只返回本格式表 |
+| `test_cross_format_load_isolation` | 集成 | Iceberg load Lance-only 表 | 返回 NoSuchTableException |
+| `test_cross_format_describe_isolation` | 集成 | Lance describe Iceberg-only 表 | 返回 TableNotFound |
+| `test_cross_format_drop_isolation` | 集成 | Iceberg drop 同名表 | Lance 同名表仍存在 |
+| `test_cross_format_rename_isolation` | 集成 | Iceberg rename 同名表 | Lance 同名表仍存在 |
+| `test_cross_format_exists_isolation` | 集成 | Lance exists Iceberg-only 表 | 返回 exists=false |
+| `test_cross_format_commit_isolation` | 集成 | Iceberg commit Lance-only 表 | 返回 NoSuchTableException |
+| `test_standard_protocol_errors_do_not_use_unified_problem_details` | 集成 | 标准协议错误响应 | 不使用 Unified Problem Details 格式 |
+
+### Unified Namespace 端点 (`tests/unified_namespace.rs`)
+
+| 测试函数 | 类型 | 场景 | 验证点 |
+|---------|------|------|--------|
+| `test_create_namespace` | 集成 | POST 创建 Namespace | comment/properties/id 正确返回 |
+| `test_list_namespaces` | 集成 | 列出 Namespace | 返回列表与 next_page_token |
+| `test_list_namespaces_pagination` | 集成 | pageSize/pageToken 分页 | 分页 token 生效 |
+| `test_list_namespaces_page_size_too_large` | 集成 | pageSize 超上限 | 400 PageSizeTooLarge |
+| `test_list_namespaces_page_size_zero` | 集成 | pageSize=0 | 400 InvalidInput |
+| `test_get_namespace` | 集成 | GET Namespace 详情 | comment 可读回 |
+| `test_get_namespace_not_found` | 集成 | GET 不存在 Namespace | 404 NamespaceNotFound |
+| `test_delete_namespace` | 集成 | 删除空 Namespace | 204 No Content |
+| `test_delete_non_empty_namespace` | 集成 | 删除非空 Namespace | 409 NamespaceNotEmpty |
+| `test_duplicate_create_returns_409` | 集成 | 重复创建 Namespace | 409 NamespaceAlreadyExists |
+| `test_create_namespace_invalid_name` | 集成 | 创建非法名称 Namespace | 400 InvalidInput |
+| `test_patch_comment_value` | 集成 | PATCH comment 字符串 | comment 被覆盖 |
+| `test_patch_comment_null` | 集成 | PATCH comment=null | comment 被清空 |
+| `test_patch_properties` | 集成 | PATCH properties 增量更新 | removals/updates 生效 |
+| `test_problem_details_content_type` | 集成 | Unified 错误响应 | Content-Type 为 application/problem+json |
+| `test_request_id_propagation` | 集成 | 传入 X-Request-Id | header 与错误体复用请求 ID |
+| `test_generated_request_id_is_uuid` | 集成 | 未传 X-Request-Id | 服务端生成 UUID 请求 ID |
+
+### Unified Asset 端点 (`tests/unified_asset.rs`)
+
+| 测试函数 | 类型 | 场景 | 验证点 |
+|---------|------|------|--------|
+| `test_list_assets_cross_format` | 集成 | 跨格式列出 Asset | Iceberg/Lance 均可发现 |
+| `test_list_assets_filter_by_format_iceberg` | 集成 | format=iceberg | 只返回 Iceberg Asset |
+| `test_list_assets_filter_by_format_lance` | 集成 | format=lance | 只返回 Lance Asset |
+| `test_list_assets_filter_by_name` | 集成 | name 精确过滤 | 只返回匹配名称 |
+| `test_list_assets_pagination` | 集成 | Asset 分页 | pageSize/pageToken 生效 |
+| `test_list_assets_page_size_too_large` | 集成 | pageSize 超上限 | 400 PageSizeTooLarge |
+| `test_list_assets_page_size_zero` | 集成 | pageSize=0 | 400 InvalidInput |
+| `test_list_assets_empty_format_returns_invalid_format` | 集成 | format= 空字符串 | 400 InvalidFormat |
+| `test_list_assets_order_by_name_then_format` | 集成 | 同名跨格式排序 | 按 name、format 稳定排序 |
+| `test_create_asset_not_allowed` | 集成 | POST /assets | 405 MethodNotAllowed 且不创建记录 |
+| `test_get_asset_detail` | 集成 | GET Asset 详情 | 返回 tabular 字段与 current_version |
+| `test_get_asset_missing_format` | 集成 | 单资源缺 format | 400 InvalidInput |
+| `test_get_asset_invalid_format` | 集成 | 单资源非法 format | 400 InvalidFormat |
+| `test_get_asset_not_found` | 集成 | GET 不存在 Asset | 404 AssetNotFound |
+| `test_delete_asset` | 集成 | DELETE Asset | 204 No Content |
+| `test_delete_asset_not_found` | 集成 | DELETE 不存在 Asset | 404 AssetNotFound |
+| `test_patch_asset_comment` | 集成 | PATCH comment 字符串 | comment 被覆盖 |
+| `test_patch_asset_comment_null` | 集成 | PATCH comment=null | comment 被清空 |
+| `test_patch_asset_comment_missing_keeps_existing` | 集成 | PATCH 缺省 comment | 原 comment 保持不变 |
+| `test_patch_asset_properties` | 集成 | PATCH properties | removals/updates 生效 |
+| `test_rename_asset` | 集成 | rename Asset | 旧名不存在，新名存在 |
+| `test_rename_asset_to_existing_name` | 集成 | rename 到冲突名 | 409 AssetAlreadyExists |
+| `test_rename_asset_invalid_new_name` | 集成 | rename 到非法名称 | 400 InvalidInput |
+| `test_list_assets_invalid_format` | 集成 | 列表非法 format | 400 InvalidFormat |
+| `test_get_lance_asset_no_version` | 集成 | Lance 无版本 | current_version=null |
+| `test_get_lance_asset_with_version` | 集成 | Lance 有版本 | version_id/metadata_location 正确 |
+| `test_get_iceberg_asset_no_metadata` | 集成 | Iceberg 无对象存储 metadata | current_version=null |
+| `test_get_iceberg_asset_with_metadata` | 集成 | Iceberg metadata 可读 | sequence/snapshot/timestamp 正确 |
+| `test_get_iceberg_asset_no_snapshot` | 集成 | Iceberg 无 snapshot | snapshot_id/timestamp_ms 为 null |
 
 ---
 
@@ -284,10 +387,26 @@
 | `test_version_commit_and_load` | 集成 | 版本提交与查询 | 顺序提交 v1→v2，load_version/load_current/list_versions 正确 |
 | `test_version_conflict` | 集成 | CAS 乐观锁冲突 | previous_version_id 不匹配返回 Conflict |
 | `test_not_found_errors` | 集成 | NotFound 场景 | namespace 不存在、asset 不存在、无版本记录 |
+| `test_update_namespace_properties` | 集成 | Namespace properties 更新 | removals/updates 生效，缺失 Namespace 返回 NotFound |
+| `test_previous_version_must_belong_to_same_asset` | 集成 | previous_version_id 跨 Asset 使用 | 返回 Conflict，防止版本链串表 |
+| `test_drop_asset_cascades_tabular_and_versions` | 集成 | 删除含版本 Asset | assets/tabular_assets/asset_versions/tabular_asset_versions 全部级联清理 |
 
 ---
 
 ## 修订记录
+
+### V4.0（2026-05-07）
+
+- 更新：测试统计总览表（90 单元 + 144 集成 = 234 合计）
+- 补齐：quasar-core 模型结构体与名称校验测试矩阵（27 个单元测试）
+- 新增：Lance Namespace 端点测试矩阵恢复为 7 个集成测试
+- 补齐：Iceberg 错误映射测试矩阵（11 个单元测试）
+- 补齐：Iceberg Object Store 测试矩阵（5 个集成测试）
+- 新增：跨格式隔离测试矩阵（8 个集成测试）
+- 新增：Unified Namespace 端点测试矩阵（17 个集成测试）
+- 新增：Unified Asset 端点测试矩阵（29 个集成测试）
+- 新增：server 无状态烟雾测试矩阵（1 个集成测试）
+- 更新：storage 集成测试矩阵补齐到 8 个测试
 
 ### V3.0（2026-04-22）
 

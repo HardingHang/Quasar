@@ -191,7 +191,7 @@ CREATE UNIQUE INDEX idx_asset_versions_asset_order
 CREATE TABLE tabular_asset_versions (
     asset_version_id UUID PRIMARY KEY REFERENCES asset_versions(id) ON DELETE CASCADE,
     metadata_location TEXT NOT NULL,
-    previous_asset_version_id UUID REFERENCES asset_versions(id)
+    previous_asset_version_id UUID REFERENCES asset_versions(id) ON DELETE SET NULL
 );
 ```
 
@@ -358,7 +358,7 @@ pub struct AssetVersionWithTabular {
 | `assets` | `tabular_assets` | `ON DELETE CASCADE` | 删除 Asset 自动清理表明细 |
 | `assets` | `asset_versions` | `ON DELETE CASCADE` | 删除 Asset 自动清理版本记录 |
 | `asset_versions` | `tabular_asset_versions` | `ON DELETE CASCADE` | 删除版本自动清理表版本明细 |
-| `asset_versions` | `tabular_asset_versions.previous_asset_version_id` | `REFERENCES asset_versions(id)` | 存储层需校验指向同一 Asset |
+| `asset_versions` | `tabular_asset_versions.previous_asset_version_id` | `REFERENCES asset_versions(id) ON DELETE SET NULL` | 存储层需校验指向同一 Asset；Asset 删除时不阻塞版本级联清理 |
 
 ---
 
@@ -2260,6 +2260,10 @@ cargo fmt --all --manifest-path quasar/Cargo.toml -- --check
 - **优化**：V2-S5（Unified Asset 发现）与 V2-S6（Unified Asset 管理）合并为单一阶段 V2-S5，减少阶段碎片化。
 - **显式化**：V2-S5 明确声明前置依赖包含 V2-S3（需要原生 API 创建测试资产），消除隐含依赖。
 - **前置**：标准协议回归验证从最终阶段（原 S8）前置到 V2-S3 验收，缩短问题反馈循环。
+
+### V1.3
+
+- **修正**：`tabular_asset_versions.previous_asset_version_id` 外键增加 `ON DELETE SET NULL`，避免 Asset 删除时自引用前驱版本阻塞 `asset_versions` 与 `tabular_asset_versions` 的级联清理。
 
 ---
 
