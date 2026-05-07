@@ -79,7 +79,7 @@ async fn inject_request_id(
         .get("x-request-id")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
-        .unwrap_or_else(|| "test-request-id".to_string());
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     req.extensions_mut().insert(request_id.clone());
     let mut response = next.run(req).await;
@@ -214,6 +214,51 @@ async fn test_list_namespaces_pagination() {
     let namespaces = json["namespaces"].as_array().unwrap();
     assert_eq!(namespaces.len(), 2);
     assert!(!json["next_page_token"].is_null());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_list_namespaces_page_size_too_large() {
+    let store = setup().await;
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/unified/v1/namespaces?pageSize=1001")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(json["code"], "PageSizeTooLarge");
+    assert_eq!(json["status"], 400);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_list_namespaces_page_size_zero() {
+    let store = setup().await;
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/unified/v1/namespaces?pageSize=0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(json["code"], "InvalidInput");
 }
 
 #[tokio::test]
@@ -367,6 +412,29 @@ async fn test_duplicate_create_returns_409() {
 
 #[tokio::test]
 #[serial]
+async fn test_create_namespace_invalid_name() {
+    let store = setup().await;
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/unified/v1/namespaces")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"name": "bad name"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(json["code"], "InvalidInput");
+}
+
+#[tokio::test]
+#[serial]
 async fn test_patch_comment_value() {
     let store = setup().await;
     store
@@ -507,4 +575,34 @@ async fn test_request_id_propagation() {
 
     let json = body_json(response).await;
     assert_eq!(json["request_id"], "test-req-42");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_generated_request_id_is_uuid() {
+    let store = setup().await;
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/unified/v1/namespaces/missing")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let req_id_header = response
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_string();
+    uuid::Uuid::parse_str(&req_id_header).unwrap();
+
+    let json = body_json(response).await;
+    assert_eq!(json["request_id"], req_id_header);
 }

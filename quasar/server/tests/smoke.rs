@@ -1,3 +1,4 @@
+#![cfg(all(feature = "unified", feature = "lance", feature = "iceberg"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use axum::body::Body;

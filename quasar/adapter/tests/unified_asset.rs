@@ -7,7 +7,7 @@ use deadpool_postgres::{Pool, Runtime};
 use http_body_util::BodyExt;
 use postgresql_embedded::PostgreSQL;
 use quasar_adapter::{unified, CatalogStore};
-use quasar_core::AssetFormat;
+use quasar_core::{AssetFormat, PatchField};
 use quasar_storage::PgCatalogStore;
 use serde_json::Value;
 use serial_test::serial;
@@ -80,7 +80,7 @@ async fn inject_request_id(
         .get("x-request-id")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
-        .unwrap_or_else(|| "test-request-id".to_string());
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     req.extensions_mut().insert(request_id.clone());
     let mut response = next.run(req).await;
@@ -303,6 +303,152 @@ async fn test_list_assets_pagination() {
     assert!(!json["next_page_token"].is_null());
 }
 
+#[tokio::test]
+#[serial]
+async fn test_list_assets_page_size_too_large() {
+    let store = setup().await;
+    create_test_namespace(&store, "prod").await;
+
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/unified/v1/namespaces/prod/assets?pageSize=1001")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(json["code"], "PageSizeTooLarge");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_list_assets_page_size_zero() {
+    let store = setup().await;
+    create_test_namespace(&store, "prod").await;
+
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/unified/v1/namespaces/prod/assets?pageSize=0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(json["code"], "InvalidInput");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_list_assets_empty_format_returns_invalid_format() {
+    let store = setup().await;
+    create_test_namespace(&store, "prod").await;
+
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/unified/v1/namespaces/prod/assets?format=")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(json["code"], "InvalidFormat");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_list_assets_order_by_name_then_format() {
+    let store = setup().await;
+    create_test_namespace(&store, "prod").await;
+    create_test_asset(&store, "prod", AssetFormat::Lance, "users").await;
+    create_test_asset(&store, "prod", AssetFormat::Iceberg, "users").await;
+
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/unified/v1/namespaces/prod/assets?name=users")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let assets = json["assets"].as_array().unwrap();
+    assert_eq!(assets.len(), 2);
+    assert_eq!(assets[0]["format"], "iceberg");
+    assert_eq!(assets[1]["format"], "lance");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_create_asset_not_allowed() {
+    let store = setup().await;
+    create_test_namespace(&store, "prod").await;
+
+    let app = test_app(store);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/unified/v1/namespaces/prod/assets")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"name":"users"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap();
+    assert_eq!(content_type, "application/problem+json");
+    let json = body_json(response).await;
+    assert_eq!(json["code"], "MethodNotAllowed");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/unified/v1/namespaces/prod/assets")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let json = body_json(response).await;
+    assert_eq!(json["assets"].as_array().unwrap().len(), 0);
+}
+
 // ── Get Tests ───────────────────────────────────────────────────
 
 #[tokio::test]
@@ -487,6 +633,81 @@ async fn test_patch_asset_comment() {
 
 #[tokio::test]
 #[serial]
+async fn test_patch_asset_comment_null() {
+    let store = setup().await;
+    create_test_namespace(&store, "prod").await;
+    create_test_asset(&store, "prod", AssetFormat::Iceberg, "users").await;
+    store
+        .update_asset_properties(
+            "prod",
+            AssetFormat::Iceberg,
+            "users",
+            PatchField::Value("before".to_string()),
+            &[],
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/unified/v1/namespaces/prod/assets/users?format=iceberg")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"comment": null}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert!(json["comment"].is_null());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_patch_asset_comment_missing_keeps_existing() {
+    let store = setup().await;
+    create_test_namespace(&store, "prod").await;
+    create_test_asset(&store, "prod", AssetFormat::Iceberg, "users").await;
+    store
+        .update_asset_properties(
+            "prod",
+            AssetFormat::Iceberg,
+            "users",
+            PatchField::Value("before".to_string()),
+            &[],
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/unified/v1/namespaces/prod/assets/users?format=iceberg")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"updates": {"owner": "platform"}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["comment"], "before");
+    assert_eq!(json["properties"]["owner"], "platform");
+}
+
+#[tokio::test]
+#[serial]
 async fn test_patch_asset_properties() {
     let store = setup().await;
     create_test_namespace(&store, "prod").await;
@@ -595,6 +816,32 @@ async fn test_rename_asset_to_existing_name() {
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let json = body_json(response).await;
     assert_eq!(json["code"], "AssetAlreadyExists");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_rename_asset_invalid_new_name() {
+    let store = setup().await;
+    create_test_namespace(&store, "prod").await;
+    create_test_asset(&store, "prod", AssetFormat::Iceberg, "users").await;
+
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/unified/v1/namespaces/prod/assets/users/rename?format=iceberg")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"new_name": "bad name"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(json["code"], "InvalidInput");
 }
 
 #[tokio::test]

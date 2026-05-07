@@ -437,3 +437,52 @@ async fn test_cross_format_commit_isolation() {
     assert_eq!(json["error"]["type"], "NoSuchTableException");
     assert_eq!(json["error"]["code"], 404);
 }
+
+#[tokio::test]
+#[serial]
+async fn test_standard_protocol_errors_do_not_use_unified_problem_details() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+
+    let ice_response = iceberg_app(store.clone())
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/namespaces/prod/tables/missing")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ice_response.status(), StatusCode::NOT_FOUND);
+    let ice_content_type = ice_response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap();
+    assert_ne!(ice_content_type, "application/problem+json");
+    let json = body_json(ice_response).await;
+    assert_eq!(json["error"]["type"], "NoSuchTableException");
+    assert!(json["request_id"].is_null());
+
+    let lance_response = lance_app(store)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/lance/v1/table/prod%24missing/describe")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(lance_response.status(), StatusCode::NOT_FOUND);
+    let lance_content_type = lance_response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap();
+    assert_ne!(lance_content_type, "application/problem+json");
+    let json = body_json(lance_response).await;
+    assert_eq!(json["error"], "TableNotFound");
+    assert!(json["request_id"].is_null());
+}
