@@ -3,6 +3,7 @@
 //! Provides `PgCatalogStore`, a PostgreSQL-backed implementation of the
 //! `CatalogStore` trait defined in `quasar-core`.
 
+pub(crate) mod queries;
 pub mod schema;
 pub mod store;
 
