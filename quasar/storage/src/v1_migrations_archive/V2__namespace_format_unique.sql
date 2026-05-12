@@ -1,3 +1,0 @@
--- No-op: namespace no longer binds to format.
--- Original migration changed unique constraint from (name) to (name, format).
--- This was reverted: namespace is now a format-agnostic organization unit.
