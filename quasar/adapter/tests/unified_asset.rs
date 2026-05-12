@@ -286,7 +286,7 @@ async fn test_list_assets_pagination() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(&format!(
+                .uri(format!(
                     "/unified/v1/namespaces/prod/assets?pageSize=2&pageToken={}",
                     token
                 ))
@@ -996,9 +996,10 @@ async fn test_get_iceberg_asset_with_metadata() {
     let payload = object_store::PutPayload::from(serde_json::to_vec(&metadata).unwrap());
     mem_store.put(&path, payload).await.unwrap();
 
-    let mut config = unified::UnifiedConfig::default();
-    config.object_store = Some(mem_store);
-    config.s3_bucket = Some("bucket".to_string());
+    let config = unified::UnifiedConfig {
+        object_store: Some(mem_store),
+        s3_bucket: Some("bucket".to_string()),
+    };
 
     let app = test_app_with_config(store, config);
 
@@ -1041,9 +1042,10 @@ async fn test_get_iceberg_asset_no_snapshot() {
     let payload = object_store::PutPayload::from(serde_json::to_vec(&metadata).unwrap());
     mem_store.put(&path, payload).await.unwrap();
 
-    let mut config = unified::UnifiedConfig::default();
-    config.object_store = Some(mem_store);
-    config.s3_bucket = Some("bucket".to_string());
+    let config = unified::UnifiedConfig {
+        object_store: Some(mem_store),
+        s3_bucket: Some("bucket".to_string()),
+    };
 
     let app = test_app_with_config(store, config);
 

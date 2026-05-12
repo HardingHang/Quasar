@@ -199,7 +199,7 @@ async fn test_list_namespaces_pagination() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(&format!(
+                .uri(format!(
                     "/unified/v1/namespaces?pageSize=2&pageToken={}",
                     token
                 ))
