@@ -8,7 +8,6 @@ quasar-core = { workspace = true }
 tokio = { workspace = true }
 tokio-postgres = { workspace = true }
 deadpool-postgres = { workspace = true }
-refinery = { workspace = true }
 uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

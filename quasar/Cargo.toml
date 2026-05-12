@@ -36,9 +36,6 @@ strum = { version = "0.26", features = ["derive"] }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
 deadpool-postgres = "0.14"
 
-# migration
-refinery = { version = "0.8", features = ["tokio-postgres"] }
-
 # web framework
 axum = "0.8"
 tower = "0.5"
