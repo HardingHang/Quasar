@@ -471,7 +471,7 @@ async fn test_commit_cas_conflict_simulated() {
         .await
         .unwrap_err();
 
-    assert!(matches!(err, quasar_core::StoreError::Conflict(_)));
+    assert!(matches!(err, quasar_core::StoreError::Conflict { .. }));
     let msg = format!("{}", err);
     assert!(msg.contains("modified by another commit"));
 }

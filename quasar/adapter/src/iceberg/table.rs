@@ -461,7 +461,7 @@ pub async fn commit_table(
         )
         .await
         .map_err(|e| match e {
-            StoreError::Conflict(msg) => {
+            StoreError::Conflict { msg } => {
                 if let Some(ref m) = metrics {
                     m.registry.record_iceberg_commit_conflict();
                 }

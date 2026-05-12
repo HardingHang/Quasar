@@ -156,19 +156,37 @@ pub fn map_namespace_error(err: StoreError, instance: &str, request_id: &str) ->
             instance,
             request_id,
         ),
-        StoreError::Conflict(msg) if msg.contains("not empty") => UnifiedError::new(
+        StoreError::NamespaceNotEmpty { namespace } => UnifiedError::new(
             UnifiedErrorCode::NamespaceNotEmpty,
-            msg,
+            format!("namespace '{}' is not empty", namespace),
             instance,
             request_id,
         ),
-        StoreError::Conflict(msg) => {
+        StoreError::DomainNotEmpty { domain } => UnifiedError::new(
+            UnifiedErrorCode::NamespaceNotEmpty,
+            format!("domain '{}' is not empty", domain),
+            instance,
+            request_id,
+        ),
+        StoreError::Conflict { msg } => {
             UnifiedError::new(UnifiedErrorCode::Conflict, msg, instance, request_id)
         }
         StoreError::InvalidInput(msg) => {
             UnifiedError::new(UnifiedErrorCode::InvalidInput, msg, instance, request_id)
         }
-        StoreError::Internal(msg) => {
+        StoreError::DatabaseUnavailable { .. } => UnifiedError::new(
+            UnifiedErrorCode::ServiceUnavailable,
+            "service temporarily unavailable",
+            instance,
+            request_id,
+        ),
+        StoreError::Timeout { operation } => UnifiedError::new(
+            UnifiedErrorCode::ServiceUnavailable,
+            format!("operation '{}' timed out", operation),
+            instance,
+            request_id,
+        ),
+        StoreError::Internal { msg, .. } => {
             UnifiedError::new(UnifiedErrorCode::InternalError, msg, instance, request_id)
         }
     }
@@ -186,13 +204,37 @@ pub fn map_asset_error(err: StoreError, instance: &str, request_id: &str) -> Uni
             instance,
             request_id,
         ),
-        StoreError::Conflict(msg) => {
+        StoreError::NamespaceNotEmpty { namespace } => UnifiedError::new(
+            UnifiedErrorCode::NamespaceNotEmpty,
+            format!("namespace '{}' is not empty", namespace),
+            instance,
+            request_id,
+        ),
+        StoreError::DomainNotEmpty { domain } => UnifiedError::new(
+            UnifiedErrorCode::NamespaceNotEmpty,
+            format!("domain '{}' is not empty", domain),
+            instance,
+            request_id,
+        ),
+        StoreError::Conflict { msg } => {
             UnifiedError::new(UnifiedErrorCode::Conflict, msg, instance, request_id)
         }
         StoreError::InvalidInput(msg) => {
             UnifiedError::new(UnifiedErrorCode::InvalidInput, msg, instance, request_id)
         }
-        StoreError::Internal(msg) => {
+        StoreError::DatabaseUnavailable { .. } => UnifiedError::new(
+            UnifiedErrorCode::ServiceUnavailable,
+            "service temporarily unavailable",
+            instance,
+            request_id,
+        ),
+        StoreError::Timeout { operation } => UnifiedError::new(
+            UnifiedErrorCode::ServiceUnavailable,
+            format!("operation '{}' timed out", operation),
+            instance,
+            request_id,
+        ),
+        StoreError::Internal { msg, .. } => {
             UnifiedError::new(UnifiedErrorCode::InternalError, msg, instance, request_id)
         }
     }

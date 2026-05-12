@@ -24,10 +24,10 @@ impl PgCatalogStore {
     }
 
     async fn get_client(&self) -> Result<deadpool_postgres::Client, StoreError> {
-        self.pool
-            .get()
-            .await
-            .map_err(|e| StoreError::Internal(format!("connection pool error: {}", e)))
+        self.pool.get().await.map_err(|e| StoreError::Internal {
+            msg: format!("connection pool error: {}", &e),
+            source: Some(Box::new(e)),
+        })
     }
 
     pub async fn migrate(&self) -> Result<(), StoreError> {
@@ -36,7 +36,10 @@ impl PgCatalogStore {
         let report = embedded::migrations::runner()
             .run_async(&mut **client)
             .await
-            .map_err(|e| StoreError::Internal(format!("migration failed: {}", e)))?;
+            .map_err(|e| StoreError::Internal {
+                msg: format!("migration failed: {}", &e),
+                source: Some(Box::new(e)),
+            })?;
 
         for migration in report.applied_migrations() {
             tracing::info!("applied migration: {}", migration.name());
@@ -48,15 +51,20 @@ impl PgCatalogStore {
 
 macro_rules! try_get {
     ($row:expr, $col:expr) => {
-        $row.try_get($col)
-            .map_err(|e| StoreError::Internal(format!("column '{}': {}", $col, e)))?
+        $row.try_get($col).map_err(|e| StoreError::Internal {
+            msg: format!("column '{}': {}", $col, &e),
+            source: Some(Box::new(e)),
+        })?
     };
 }
 
 fn row_to_namespace(row: &Row) -> Result<Namespace, StoreError> {
     let props: serde_json::Value = try_get!(row, "properties");
-    let properties: HashMap<String, String> = serde_json::from_value(props)
-        .map_err(|e| StoreError::Internal(format!("properties JSON: {}", e)))?;
+    let properties: HashMap<String, String> =
+        serde_json::from_value(props).map_err(|e| StoreError::Internal {
+            msg: format!("properties JSON: {}", &e),
+            source: Some(Box::new(e)),
+        })?;
 
     Ok(Namespace {
         id: try_get!(row, "id"),
@@ -69,17 +77,20 @@ fn row_to_namespace(row: &Row) -> Result<Namespace, StoreError> {
 
 fn row_to_asset(row: &Row) -> Result<Asset, StoreError> {
     let props: serde_json::Value = try_get!(row, "properties");
-    let properties: HashMap<String, String> = serde_json::from_value(props)
-        .map_err(|e| StoreError::Internal(format!("properties JSON: {}", e)))?;
+    let properties: HashMap<String, String> =
+        serde_json::from_value(props).map_err(|e| StoreError::Internal {
+            msg: format!("properties JSON: {}", &e),
+            source: Some(Box::new(e)),
+        })?;
 
     let asset_type_str: String = try_get!(row, "asset_type");
     let asset_type = match asset_type_str.as_str() {
         "table" => AssetType::Table,
         _ => {
-            return Err(StoreError::Internal(format!(
-                "unknown asset_type: {}",
-                asset_type_str
-            )))
+            return Err(StoreError::Internal {
+                msg: format!("unknown asset_type: {}", asset_type_str),
+                source: None,
+            })
         }
     };
 
@@ -108,8 +119,11 @@ fn row_to_tabular_asset(row: &Row) -> Result<TabularAsset, StoreError> {
 
 fn row_to_asset_version(row: &Row) -> Result<AssetVersion, StoreError> {
     let props: serde_json::Value = try_get!(row, "properties");
-    let properties: HashMap<String, String> = serde_json::from_value(props)
-        .map_err(|e| StoreError::Internal(format!("properties JSON: {}", e)))?;
+    let properties: HashMap<String, String> =
+        serde_json::from_value(props).map_err(|e| StoreError::Internal {
+            msg: format!("properties JSON: {}", &e),
+            source: Some(Box::new(e)),
+        })?;
 
     Ok(AssetVersion {
         id: try_get!(row, "id"),
@@ -131,8 +145,10 @@ fn row_to_tabular_version(row: &Row) -> Result<TabularAssetVersion, StoreError> 
 }
 
 fn props_to_json(props: &HashMap<String, String>) -> Result<serde_json::Value, StoreError> {
-    serde_json::to_value(props)
-        .map_err(|e| StoreError::Internal(format!("properties serialization: {}", e)))
+    serde_json::to_value(props).map_err(|e| StoreError::Internal {
+        msg: format!("properties serialization: {}", &e),
+        source: Some(Box::new(e)),
+    })
 }
 
 #[async_trait]
@@ -158,7 +174,7 @@ impl CatalogStore for PgCatalogStore {
                         return StoreError::AlreadyExists(format!("namespace '{}'", name));
                     }
                 }
-                StoreError::Internal(format!("create_namespace failed: {}", e))
+                StoreError::Internal { msg: format!("create_namespace failed: {}", &e), source: Some(Box::new(e)) }
             })?;
 
         row_to_namespace(&row)
@@ -172,7 +188,7 @@ impl CatalogStore for PgCatalogStore {
                 &[&(limit as i64), &offset],
             )
             .await
-            .map_err(|e| StoreError::Internal(format!("list_namespaces failed: {}", e)))?;
+            .map_err(|e| StoreError::Internal { msg: format!("list_namespaces failed: {}", &e), source: Some(Box::new(e)) })?;
 
         rows.iter().map(row_to_namespace).collect()
     }
@@ -185,7 +201,10 @@ impl CatalogStore for PgCatalogStore {
                 &[&name],
             )
             .await
-            .map_err(|e| StoreError::Internal(format!("get_namespace failed: {}", e)))?
+            .map_err(|e| StoreError::Internal {
+                msg: format!("get_namespace failed: {}", &e),
+                source: Some(Box::new(e)),
+            })?
             .ok_or_else(|| StoreError::NotFound(format!("namespace '{}'", name)))?;
 
         row_to_namespace(&row)
@@ -199,7 +218,10 @@ impl CatalogStore for PgCatalogStore {
                 &[&name],
             )
             .await
-            .map_err(|e| StoreError::Internal(format!("namespace_exists failed: {}", e)))?;
+            .map_err(|e| StoreError::Internal {
+                msg: format!("namespace_exists failed: {}", &e),
+                source: Some(Box::new(e)),
+            })?;
 
         Ok(row.get(0))
     }
@@ -214,14 +236,18 @@ impl CatalogStore for PgCatalogStore {
                     if code == &tokio_postgres::error::SqlState::RESTRICT_VIOLATION
                         || code == &tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION =>
                 {
-                    StoreError::Conflict(format!("namespace '{}' is not empty", name))
+                    StoreError::NamespaceNotEmpty {
+                        namespace: name.to_string(),
+                    }
                 }
-                Some(code) => StoreError::Internal(format!(
-                    "drop_namespace failed: {} (sqlstate: {})",
-                    e,
-                    code.code()
-                )),
-                None => StoreError::Internal(format!("drop_namespace failed: {}", e)),
+                Some(code) => StoreError::Internal {
+                    msg: format!("drop_namespace failed: {} (sqlstate: {})", &e, code.code()),
+                    source: Some(Box::new(e)),
+                },
+                None => StoreError::Internal {
+                    msg: format!("drop_namespace failed: {}", &e),
+                    source: Some(Box::new(e)),
+                },
             })?;
 
         if n == 0 {
@@ -246,7 +272,10 @@ impl CatalogStore for PgCatalogStore {
                 &[&name],
             )
             .await
-            .map_err(|e| StoreError::Internal(format!("update_namespace failed: {}", e)))?
+            .map_err(|e| StoreError::Internal {
+                msg: format!("update_namespace failed: {}", &e),
+                source: Some(Box::new(e)),
+            })?
             .ok_or_else(|| StoreError::NotFound(format!("namespace '{}'", name)))?;
 
         let mut namespace = row_to_namespace(&row)?;
@@ -276,7 +305,7 @@ impl CatalogStore for PgCatalogStore {
                 &[&namespace.comment, &props_json, &name],
             )
             .await
-            .map_err(|e| StoreError::Internal(format!("update_namespace write failed: {}", e)))?;
+            .map_err(|e| StoreError::Internal { msg: format!("update_namespace write failed: {}", &e), source: Some(Box::new(e)) })?;
 
         row_to_namespace(&row)
     }
@@ -299,7 +328,10 @@ impl CatalogStore for PgCatalogStore {
         let tx = client
             .transaction()
             .await
-            .map_err(|e| StoreError::Internal(format!("transaction start failed: {}", e)))?;
+            .map_err(|e| StoreError::Internal {
+                msg: format!("transaction start failed: {}", &e),
+                source: Some(Box::new(e)),
+            })?;
 
         // Resolve namespace_id
         let ns_row = tx
@@ -308,7 +340,10 @@ impl CatalogStore for PgCatalogStore {
                 &[&namespace_name],
             )
             .await
-            .map_err(|e| StoreError::Internal(format!("namespace lookup failed: {}", e)))?
+            .map_err(|e| StoreError::Internal {
+                msg: format!("namespace lookup failed: {}", &e),
+                source: Some(Box::new(e)),
+            })?
             .ok_or_else(|| StoreError::NotFound(format!("namespace '{}'", namespace_name)))?;
         let ns_id: uuid::Uuid = try_get!(ns_row, "id");
 
@@ -328,7 +363,7 @@ impl CatalogStore for PgCatalogStore {
                         ));
                     }
                 }
-                StoreError::Internal(format!("create_asset failed: {}", e))
+                StoreError::Internal { msg: format!("create_asset failed: {}", &e), source: Some(Box::new(e)) }
             })?;
         let asset_id: uuid::Uuid = try_get!(asset_row, "id");
 
@@ -338,11 +373,12 @@ impl CatalogStore for PgCatalogStore {
             &[&asset_id, &location, &metadata_location, &schema_snapshot],
         )
         .await
-        .map_err(|e| StoreError::Internal(format!("create tabular_asset failed: {}", e)))?;
+        .map_err(|e| StoreError::Internal { msg: format!("create tabular_asset failed: {}", &e), source: Some(Box::new(e)) })?;
 
-        tx.commit()
-            .await
-            .map_err(|e| StoreError::Internal(format!("transaction commit failed: {}", e)))?;
+        tx.commit().await.map_err(|e| StoreError::Internal {
+            msg: format!("transaction commit failed: {}", &e),
+            source: Some(Box::new(e)),
+        })?;
 
         row_to_asset(&asset_row)
     }
@@ -360,7 +396,7 @@ impl CatalogStore for PgCatalogStore {
                 &[&namespace_name, &format_str],
             )
             .await
-            .map_err(|e| StoreError::Internal(format!("list_assets failed: {}", e)))?;
+            .map_err(|e| StoreError::Internal { msg: format!("list_assets failed: {}", &e), source: Some(Box::new(e)) })?;
 
         rows.iter()
             .map(|row| {
@@ -385,7 +421,7 @@ impl CatalogStore for PgCatalogStore {
                 &[&namespace_name, &format_str, &name],
             )
             .await
-            .map_err(|e| StoreError::Internal(format!("get_asset failed: {}", e)))?
+            .map_err(|e| StoreError::Internal { msg: format!("get_asset failed: {}", &e), source: Some(Box::new(e)) })?
             .ok_or_else(|| StoreError::NotFound(format!("asset '{}'", name)))?;
 
         row_to_asset(&row)
@@ -405,7 +441,7 @@ impl CatalogStore for PgCatalogStore {
                 &[&namespace_name, &format_str, &name],
             )
             .await
-            .map_err(|e| StoreError::Internal(format!("get_asset_with_tabular failed: {}", e)))?
+            .map_err(|e| StoreError::Internal { msg: format!("get_asset_with_tabular failed: {}", &e), source: Some(Box::new(e)) })?
             .ok_or_else(|| StoreError::NotFound(format!("asset '{}'", name)))?;
 
         let asset = row_to_asset(&row)?;
@@ -429,7 +465,7 @@ impl CatalogStore for PgCatalogStore {
                 &[&namespace_name, &format_str, &name],
             )
             .await
-            .map_err(|e| StoreError::Internal(format!("get_asset_with_current_version failed: {}", e)))?
+            .map_err(|e| StoreError::Internal { msg: format!("get_asset_with_current_version failed: {}", &e), source: Some(Box::new(e)) })?
             .ok_or_else(|| StoreError::NotFound(format!("asset '{}'", name)))?;
 
         let asset = row_to_asset(&row)?;
@@ -442,7 +478,7 @@ impl CatalogStore for PgCatalogStore {
                 &[&asset.id],
             )
             .await
-            .map_err(|e| StoreError::Internal(format!("load current version failed: {}", e)))?;
+            .map_err(|e| StoreError::Internal { msg: format!("load current version failed: {}", &e), source: Some(Box::new(e)) })?;
 
         let current_version = match version_row {
             Some(row) => {
@@ -473,7 +509,7 @@ impl CatalogStore for PgCatalogStore {
                 &[&namespace_name, &format_str, &name],
             )
             .await
-            .map_err(|e| StoreError::Internal(format!("asset_exists failed: {}", e)))?;
+            .map_err(|e| StoreError::Internal { msg: format!("asset_exists failed: {}", &e), source: Some(Box::new(e)) })?;
 
         Ok(row.get(0))
     }
@@ -492,7 +528,7 @@ impl CatalogStore for PgCatalogStore {
                 &[&namespace_name, &format_str, &name],
             )
             .await
-            .map_err(|e| StoreError::Internal(format!("drop_asset failed: {}", e)))?;
+            .map_err(|e| StoreError::Internal { msg: format!("drop_asset failed: {}", &e), source: Some(Box::new(e)) })?;
 
         if n == 0 {
             return Err(StoreError::NotFound(format!("asset '{}'", name)));
@@ -524,7 +560,7 @@ impl CatalogStore for PgCatalogStore {
                         ));
                     }
                 }
-                StoreError::Internal(format!("rename_asset failed: {}", e))
+                StoreError::Internal { msg: format!("rename_asset failed: {}", &e), source: Some(Box::new(e)) }
             })?;
 
         if n == 0 {
@@ -552,7 +588,7 @@ impl CatalogStore for PgCatalogStore {
                 &[&namespace_name, &format_str, &name],
             )
             .await
-            .map_err(|e| StoreError::Internal(format!("update_asset_properties failed: {}", e)))?
+            .map_err(|e| StoreError::Internal { msg: format!("update_asset_properties failed: {}", &e), source: Some(Box::new(e)) })?
             .ok_or_else(|| StoreError::NotFound(format!("asset '{}'", name)))?;
 
         let mut asset = row_to_asset(&row)?;
@@ -582,7 +618,7 @@ impl CatalogStore for PgCatalogStore {
                 &[&asset.comment, &props_json, &asset.id],
             )
             .await
-            .map_err(|e| StoreError::Internal(format!("update_asset_properties write failed: {}", e)))?;
+            .map_err(|e| StoreError::Internal { msg: format!("update_asset_properties write failed: {}", &e), source: Some(Box::new(e)) })?;
 
         row_to_asset(&row)
     }
@@ -604,7 +640,7 @@ impl CatalogStore for PgCatalogStore {
                 &[&namespace_name, &format_str, &asset_name, &version_key],
             )
             .await
-            .map_err(|e| StoreError::Internal(format!("load_version failed: {}", e)))?
+            .map_err(|e| StoreError::Internal { msg: format!("load_version failed: {}", &e), source: Some(Box::new(e)) })?
             .ok_or_else(|| StoreError::NotFound(format!("asset '{}'", asset_name)))?;
 
         let version = row_to_asset_version(&row)?;
@@ -631,7 +667,7 @@ impl CatalogStore for PgCatalogStore {
                 &[&namespace_name, &format_str, &asset_name],
             )
             .await
-            .map_err(|e| StoreError::Internal(format!("load_current_version failed: {}", e)))?;
+            .map_err(|e| StoreError::Internal { msg: format!("load_current_version failed: {}", &e), source: Some(Box::new(e)) })?;
 
         let asset_id: uuid::Uuid = match asset_row {
             Some(row) => try_get!(row, "id"),
@@ -645,7 +681,7 @@ impl CatalogStore for PgCatalogStore {
                 &[&asset_id],
             )
             .await
-            .map_err(|e| StoreError::Internal(format!("load_current_version query failed: {}", e)))?;
+            .map_err(|e| StoreError::Internal { msg: format!("load_current_version query failed: {}", &e), source: Some(Box::new(e)) })?;
 
         match version_row {
             Some(row) => {
@@ -676,7 +712,7 @@ impl CatalogStore for PgCatalogStore {
                 &[&namespace_name, &format_str, &asset_name],
             )
             .await
-            .map_err(|e| StoreError::Internal(format!("list_versions failed: {}", e)))?;
+            .map_err(|e| StoreError::Internal { msg: format!("list_versions failed: {}", &e), source: Some(Box::new(e)) })?;
 
         let asset_id: uuid::Uuid = match asset_row {
             Some(row) => try_get!(row, "id"),
@@ -690,7 +726,7 @@ impl CatalogStore for PgCatalogStore {
                 &[&asset_id],
             )
             .await
-            .map_err(|e| StoreError::Internal(format!("list_versions query failed: {}", e)))?;
+            .map_err(|e| StoreError::Internal { msg: format!("list_versions query failed: {}", &e), source: Some(Box::new(e)) })?;
 
         rows.iter()
             .map(|row| {
@@ -721,7 +757,10 @@ impl CatalogStore for PgCatalogStore {
         let tx = client
             .transaction()
             .await
-            .map_err(|e| StoreError::Internal(format!("transaction start failed: {}", e)))?;
+            .map_err(|e| StoreError::Internal {
+                msg: format!("transaction start failed: {}", &e),
+                source: Some(Box::new(e)),
+            })?;
 
         // Step 1: resolve asset_id
         let asset_row = tx
@@ -730,7 +769,7 @@ impl CatalogStore for PgCatalogStore {
                 &[&namespace_name, &format_str, &asset_name],
             )
             .await
-            .map_err(|e| StoreError::Internal(format!("asset lookup failed: {}", e)))?
+            .map_err(|e| StoreError::Internal { msg: format!("asset lookup failed: {}", &e), source: Some(Box::new(e)) })?
             .ok_or_else(|| StoreError::NotFound(format!("asset '{}'", asset_name)))?;
         let asset_id: uuid::Uuid = try_get!(asset_row, "id");
 
@@ -743,11 +782,12 @@ impl CatalogStore for PgCatalogStore {
                         &[&asset_id, &prev_id],
                     )
                     .await
-                    .map_err(|e| {
-                        StoreError::Internal(format!("previous version lookup failed: {}", e))
+                    .map_err(|e| StoreError::Internal {
+                        msg: format!("previous version lookup failed: {}", &e),
+                        source: Some(Box::new(e)),
                     })?
-                    .ok_or_else(|| {
-                        StoreError::Conflict(format!("previous version {} not found", prev_id))
+                    .ok_or_else(|| StoreError::Conflict {
+                        msg: format!("previous version {} not found", prev_id),
                     })?;
                 Some(try_get!(prev_row, "id"))
             }
@@ -767,7 +807,7 @@ impl CatalogStore for PgCatalogStore {
                         return StoreError::AlreadyExists(format!("version {} already exists", version_id));
                     }
                 }
-                StoreError::Internal(format!("create_version failed: {}", e))
+                StoreError::Internal { msg: format!("create_version failed: {}", &e), source: Some(Box::new(e)) }
             })?;
         let version_uuid: uuid::Uuid = try_get!(version_row, "id");
 
@@ -777,11 +817,12 @@ impl CatalogStore for PgCatalogStore {
             &[&version_uuid, &metadata_location, &previous_version_uuid],
         )
         .await
-        .map_err(|e| StoreError::Internal(format!("create tabular_asset_version failed: {}", e)))?;
+        .map_err(|e| StoreError::Internal { msg: format!("create tabular_asset_version failed: {}", &e), source: Some(Box::new(e)) })?;
 
-        tx.commit()
-            .await
-            .map_err(|e| StoreError::Internal(format!("transaction commit failed: {}", e)))?;
+        tx.commit().await.map_err(|e| StoreError::Internal {
+            msg: format!("transaction commit failed: {}", &e),
+            source: Some(Box::new(e)),
+        })?;
 
         let version = row_to_asset_version(&version_row)?;
         let tabular_version = TabularAssetVersion {
@@ -814,7 +855,10 @@ impl CatalogStore for PgCatalogStore {
         let tx = client
             .transaction()
             .await
-            .map_err(|e| StoreError::Internal(format!("transaction start failed: {}", e)))?;
+            .map_err(|e| StoreError::Internal {
+                msg: format!("transaction start failed: {}", &e),
+                source: Some(Box::new(e)),
+            })?;
 
         // Step 1: Lock and fetch asset
         let asset_row = tx
@@ -823,14 +867,17 @@ impl CatalogStore for PgCatalogStore {
                 &[&namespace_name, &asset_name, &format_str],
             )
             .await
-            .map_err(|e| StoreError::Internal(format!("cas lock asset failed: {}", e)))?;
+            .map_err(|e| StoreError::Internal { msg: format!("cas lock asset failed: {}", &e), source: Some(Box::new(e)) })?;
 
         let (asset_id, mut properties): (uuid::Uuid, HashMap<String, String>) = match asset_row {
             Some(row) => {
                 let id: uuid::Uuid = try_get!(row, "id");
                 let props_json: serde_json::Value = try_get!(row, "properties");
-                let props: HashMap<String, String> = serde_json::from_value(props_json)
-                    .map_err(|e| StoreError::Internal(format!("properties JSON: {}", e)))?;
+                let props: HashMap<String, String> =
+                    serde_json::from_value(props_json).map_err(|e| StoreError::Internal {
+                        msg: format!("properties JSON: {}", &e),
+                        source: Some(Box::new(e)),
+                    })?;
                 (id, props)
             }
             None => return Err(StoreError::NotFound(format!("asset '{}'", asset_name))),
@@ -843,21 +890,29 @@ impl CatalogStore for PgCatalogStore {
                 &[&asset_id],
             )
             .await
-            .map_err(|e| {
-                StoreError::Internal(format!("cas fetch metadata_location failed: {}", e))
+            .map_err(|e| StoreError::Internal {
+                msg: format!("cas fetch metadata_location failed: {}", &e),
+                source: Some(Box::new(e)),
             })?;
 
         let current_location: Option<String> = match tabular_row {
             Some(row) => row.try_get("metadata_location").ok(),
-            None => return Err(StoreError::Internal("tabular asset missing".to_string())),
+            None => {
+                return Err(StoreError::Internal {
+                    msg: "tabular asset missing".to_string(),
+                    source: None,
+                })
+            }
         };
 
         // Step 3: CAS check
         if current_location.as_deref() != Some(expected_location) {
-            return Err(StoreError::Conflict(format!(
-                "metadata location has been modified by another commit (expected '{}', found '{:?}')",
-                expected_location, current_location
-            )));
+            return Err(StoreError::Conflict {
+                msg: format!(
+                    "metadata location has been modified by another commit (expected '{}', found '{:?}')",
+                    expected_location, current_location
+                ),
+            });
         }
 
         // Step 4: Apply property changes
@@ -874,7 +929,7 @@ impl CatalogStore for PgCatalogStore {
             &[&new_location, &new_schema_snapshot, &asset_id],
         )
         .await
-        .map_err(|e| StoreError::Internal(format!("cas update tabular_assets failed: {}", e)))?;
+        .map_err(|e| StoreError::Internal { msg: format!("cas update tabular_assets failed: {}", &e), source: Some(Box::new(e)) })?;
 
         // Step 6: Update assets properties
         let props_json = props_to_json(&properties)?;
@@ -883,11 +938,15 @@ impl CatalogStore for PgCatalogStore {
             &[&props_json, &asset_id],
         )
         .await
-        .map_err(|e| StoreError::Internal(format!("cas update assets properties failed: {}", e)))?;
+        .map_err(|e| StoreError::Internal {
+            msg: format!("cas update assets properties failed: {}", &e),
+            source: Some(Box::new(e)),
+        })?;
 
-        tx.commit()
-            .await
-            .map_err(|e| StoreError::Internal(format!("transaction commit failed: {}", e)))?;
+        tx.commit().await.map_err(|e| StoreError::Internal {
+            msg: format!("transaction commit failed: {}", &e),
+            source: Some(Box::new(e)),
+        })?;
 
         Ok(())
     }
@@ -908,7 +967,7 @@ impl CatalogStore for PgCatalogStore {
                 &[&namespace_name, &format_str, &name, &(limit as i64), &offset],
             )
             .await
-            .map_err(|e| StoreError::Internal(format!("list_assets_unified failed: {}", e)))?;
+            .map_err(|e| StoreError::Internal { msg: format!("list_assets_unified failed: {}", &e), source: Some(Box::new(e)) })?;
 
         rows.iter()
             .map(|row| {
@@ -933,7 +992,7 @@ impl CatalogStore for PgCatalogStore {
                 &[&namespace_name, &name, &format_str],
             )
             .await
-            .map_err(|e| StoreError::Internal(format!("get_asset_unified failed: {}", e)))?
+            .map_err(|e| StoreError::Internal { msg: format!("get_asset_unified failed: {}", &e), source: Some(Box::new(e)) })?
             .ok_or_else(|| StoreError::NotFound(format!("asset '{}'", name)))?;
 
         let asset = row_to_asset(&row)?;

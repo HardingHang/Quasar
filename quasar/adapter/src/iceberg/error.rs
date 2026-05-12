@@ -95,9 +95,23 @@ pub fn store_error_to_iceberg_namespace(err: StoreError) -> IcebergError {
         StoreError::AlreadyExists(msg) => {
             IcebergError::NamespaceAlreadyExistsException { message: msg }
         }
-        StoreError::Conflict(msg) => IcebergError::NamespaceAlreadyExistsException { message: msg },
+        StoreError::NamespaceNotEmpty { namespace } => IcebergError::CommitFailedException {
+            message: format!("namespace '{}' is not empty", namespace),
+        },
+        StoreError::DomainNotEmpty { domain } => IcebergError::CommitFailedException {
+            message: format!("domain '{}' is not empty", domain),
+        },
+        StoreError::Conflict { msg } => {
+            IcebergError::NamespaceAlreadyExistsException { message: msg }
+        }
         StoreError::InvalidInput(msg) => IcebergError::BadRequestException { message: msg },
-        StoreError::Internal(msg) => IcebergError::InternalServerError { message: msg },
+        StoreError::DatabaseUnavailable { .. } => IcebergError::InternalServerError {
+            message: "service temporarily unavailable".to_string(),
+        },
+        StoreError::Timeout { operation } => IcebergError::InternalServerError {
+            message: format!("operation '{}' timed out", operation),
+        },
+        StoreError::Internal { msg, .. } => IcebergError::InternalServerError { message: msg },
     }
 }
 
@@ -107,9 +121,21 @@ pub fn store_error_to_iceberg_table(err: StoreError) -> IcebergError {
         StoreError::AlreadyExists(msg) => {
             IcebergError::TableAlreadyExistsException { message: msg }
         }
-        StoreError::Conflict(msg) => IcebergError::CommitFailedException { message: msg },
+        StoreError::NamespaceNotEmpty { namespace } => IcebergError::CommitFailedException {
+            message: format!("namespace '{}' is not empty", namespace),
+        },
+        StoreError::DomainNotEmpty { domain } => IcebergError::CommitFailedException {
+            message: format!("domain '{}' is not empty", domain),
+        },
+        StoreError::Conflict { msg } => IcebergError::CommitFailedException { message: msg },
         StoreError::InvalidInput(msg) => IcebergError::BadRequestException { message: msg },
-        StoreError::Internal(msg) => IcebergError::InternalServerError { message: msg },
+        StoreError::DatabaseUnavailable { .. } => IcebergError::InternalServerError {
+            message: "service temporarily unavailable".to_string(),
+        },
+        StoreError::Timeout { operation } => IcebergError::InternalServerError {
+            message: format!("operation '{}' timed out", operation),
+        },
+        StoreError::Internal { msg, .. } => IcebergError::InternalServerError { message: msg },
     }
 }
 
@@ -230,7 +256,7 @@ mod tests {
             IcebergError::NamespaceAlreadyExistsException { message } if message == "foo"
         ));
         assert!(matches!(
-            store_error_to_iceberg_namespace(StoreError::Conflict("foo".into())),
+            store_error_to_iceberg_namespace(StoreError::Conflict { msg: "foo".into() }),
             IcebergError::NamespaceAlreadyExistsException { message } if message == "foo"
         ));
         assert!(matches!(
@@ -238,8 +264,17 @@ mod tests {
             IcebergError::BadRequestException { message } if message == "bad"
         ));
         assert!(matches!(
-            store_error_to_iceberg_namespace(StoreError::Internal("oops".into())),
+            store_error_to_iceberg_namespace(StoreError::Internal {
+                msg: "oops".into(),
+                source: None
+            }),
             IcebergError::InternalServerError { message } if message == "oops"
+        ));
+        assert!(matches!(
+            store_error_to_iceberg_namespace(StoreError::NamespaceNotEmpty {
+                namespace: "prod".into()
+            }),
+            IcebergError::CommitFailedException { message } if message.contains("'prod'")
         ));
     }
 
@@ -254,7 +289,9 @@ mod tests {
             IcebergError::TableAlreadyExistsException { message } if message == "bar"
         ));
         assert!(matches!(
-            store_error_to_iceberg_table(StoreError::Conflict("conflict".into())),
+            store_error_to_iceberg_table(StoreError::Conflict {
+                msg: "conflict".into()
+            }),
             IcebergError::CommitFailedException { message } if message == "conflict"
         ));
         assert!(matches!(
@@ -262,7 +299,10 @@ mod tests {
             IcebergError::BadRequestException { message } if message == "bad"
         ));
         assert!(matches!(
-            store_error_to_iceberg_table(StoreError::Internal("oops".into())),
+            store_error_to_iceberg_table(StoreError::Internal {
+                msg: "oops".into(),
+                source: None
+            }),
             IcebergError::InternalServerError { message } if message == "oops"
         ));
     }

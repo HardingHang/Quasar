@@ -326,7 +326,7 @@ async fn test_version_conflict() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(err, StoreError::Conflict(_)));
+    assert!(matches!(err, StoreError::Conflict { .. }));
 }
 
 #[tokio::test]
@@ -386,7 +386,7 @@ async fn test_previous_version_must_belong_to_same_asset() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(err, StoreError::Conflict(_)));
+    assert!(matches!(err, StoreError::Conflict { .. }));
 }
 
 #[tokio::test]

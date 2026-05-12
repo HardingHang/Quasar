@@ -118,7 +118,15 @@ pub fn store_error_to_lance(err: StoreError, instance: &str) -> LanceError {
             name: msg,
             instance: instance.to_string(),
         },
-        StoreError::Conflict(msg) => LanceError::NamespaceNotEmpty {
+        StoreError::NamespaceNotEmpty { namespace } => LanceError::NamespaceNotEmpty {
+            name: namespace,
+            instance: instance.to_string(),
+        },
+        StoreError::DomainNotEmpty { domain } => LanceError::NamespaceNotEmpty {
+            name: domain,
+            instance: instance.to_string(),
+        },
+        StoreError::Conflict { msg } => LanceError::NamespaceNotEmpty {
             name: msg,
             instance: instance.to_string(),
         },
@@ -126,7 +134,15 @@ pub fn store_error_to_lance(err: StoreError, instance: &str) -> LanceError {
             detail: msg,
             instance: instance.to_string(),
         },
-        StoreError::Internal(msg) => LanceError::InternalError {
+        StoreError::DatabaseUnavailable { .. } => LanceError::InternalError {
+            detail: "service temporarily unavailable".to_string(),
+            instance: instance.to_string(),
+        },
+        StoreError::Timeout { operation } => LanceError::InternalError {
+            detail: format!("operation '{}' timed out", operation),
+            instance: instance.to_string(),
+        },
+        StoreError::Internal { msg, .. } => LanceError::InternalError {
             detail: msg,
             instance: instance.to_string(),
         },
@@ -143,7 +159,15 @@ pub fn store_error_to_lance_table(err: StoreError, instance: &str) -> LanceError
             name: msg,
             instance: instance.to_string(),
         },
-        StoreError::Conflict(msg) => LanceError::TableNotEmpty {
+        StoreError::NamespaceNotEmpty { namespace } => LanceError::NamespaceNotEmpty {
+            name: namespace,
+            instance: instance.to_string(),
+        },
+        StoreError::DomainNotEmpty { domain } => LanceError::NamespaceNotEmpty {
+            name: domain,
+            instance: instance.to_string(),
+        },
+        StoreError::Conflict { msg } => LanceError::TableNotEmpty {
             name: msg,
             instance: instance.to_string(),
         },
@@ -151,7 +175,15 @@ pub fn store_error_to_lance_table(err: StoreError, instance: &str) -> LanceError
             detail: msg,
             instance: instance.to_string(),
         },
-        StoreError::Internal(msg) => LanceError::InternalError {
+        StoreError::DatabaseUnavailable { .. } => LanceError::InternalError {
+            detail: "service temporarily unavailable".to_string(),
+            instance: instance.to_string(),
+        },
+        StoreError::Timeout { operation } => LanceError::InternalError {
+            detail: format!("operation '{}' timed out", operation),
+            instance: instance.to_string(),
+        },
+        StoreError::Internal { msg, .. } => LanceError::InternalError {
             detail: msg,
             instance: instance.to_string(),
         },
@@ -183,7 +215,15 @@ pub fn store_error_to_lance_version(err: StoreError, instance: &str) -> LanceErr
                 }
             }
         }
-        StoreError::Conflict(msg) => LanceError::TableNotEmpty {
+        StoreError::NamespaceNotEmpty { namespace } => LanceError::NamespaceNotEmpty {
+            name: namespace,
+            instance: instance.to_string(),
+        },
+        StoreError::DomainNotEmpty { domain } => LanceError::NamespaceNotEmpty {
+            name: domain,
+            instance: instance.to_string(),
+        },
+        StoreError::Conflict { msg } => LanceError::TableNotEmpty {
             name: msg,
             instance: instance.to_string(),
         },
@@ -191,7 +231,15 @@ pub fn store_error_to_lance_version(err: StoreError, instance: &str) -> LanceErr
             detail: msg,
             instance: instance.to_string(),
         },
-        StoreError::Internal(msg) => LanceError::InternalError {
+        StoreError::DatabaseUnavailable { .. } => LanceError::InternalError {
+            detail: "service temporarily unavailable".to_string(),
+            instance: instance.to_string(),
+        },
+        StoreError::Timeout { operation } => LanceError::InternalError {
+            detail: format!("operation '{}' timed out", operation),
+            instance: instance.to_string(),
+        },
+        StoreError::Internal { msg, .. } => LanceError::InternalError {
             detail: msg,
             instance: instance.to_string(),
         },
@@ -303,7 +351,7 @@ mod tests {
             LanceError::NamespaceAlreadyExists { name, .. } if name == "foo"
         ));
         assert!(matches!(
-            store_error_to_lance(StoreError::Conflict("foo".into()), "/test"),
+            store_error_to_lance(StoreError::Conflict { msg: "foo".into() }, "/test"),
             LanceError::NamespaceNotEmpty { name, .. } if name == "foo"
         ));
         assert!(matches!(
@@ -311,7 +359,7 @@ mod tests {
             LanceError::InvalidInput { detail, .. } if detail == "bad"
         ));
         assert!(matches!(
-            store_error_to_lance(StoreError::Internal("oops".into()), "/test"),
+            store_error_to_lance(StoreError::Internal { msg: "oops".into(), source: None }, "/test"),
             LanceError::InternalError { detail, .. } if detail == "oops"
         ));
     }
@@ -363,7 +411,7 @@ mod tests {
     #[test]
     fn test_store_error_to_lance_version_conflict() {
         assert!(matches!(
-            store_error_to_lance_version(StoreError::Conflict("not empty".into()), "/test"),
+            store_error_to_lance_version(StoreError::Conflict { msg: "not empty".into() }, "/test"),
             LanceError::TableNotEmpty { name, .. } if name == "not empty"
         ));
     }
@@ -379,7 +427,7 @@ mod tests {
     #[test]
     fn test_store_error_to_lance_version_internal() {
         assert!(matches!(
-            store_error_to_lance_version(StoreError::Internal("oops".into()), "/test"),
+            store_error_to_lance_version(StoreError::Internal { msg: "oops".into(), source: None }, "/test"),
             LanceError::InternalError { detail, .. } if detail == "oops"
         ));
     }
