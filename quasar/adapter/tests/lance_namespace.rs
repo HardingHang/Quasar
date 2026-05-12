@@ -6,7 +6,8 @@ use axum::http::{Request, StatusCode};
 use deadpool_postgres::{Pool, Runtime};
 use http_body_util::BodyExt;
 use postgresql_embedded::PostgreSQL;
-use quasar_adapter::{lance, CatalogStore};
+use quasar_adapter::lance;
+use quasar_core::NamespaceStore;
 use quasar_storage::PgCatalogStore;
 use serde_json::Value;
 use serial_test::serial;
@@ -127,7 +128,7 @@ async fn test_create_and_describe_namespace() {
 async fn test_create_duplicate_returns_409() {
     let store = setup().await;
     store
-        .create_namespace("prod", None, HashMap::new())
+        .create_namespace("default", "prod", None, HashMap::new())
         .await
         .unwrap();
 
@@ -155,11 +156,11 @@ async fn test_create_duplicate_returns_409() {
 async fn test_list_namespaces() {
     let store = setup().await;
     store
-        .create_namespace("dev", None, HashMap::new())
+        .create_namespace("default", "dev", None, HashMap::new())
         .await
         .unwrap();
     store
-        .create_namespace("prod", None, HashMap::new())
+        .create_namespace("default", "prod", None, HashMap::new())
         .await
         .unwrap();
 
@@ -188,7 +189,7 @@ async fn test_list_namespaces() {
 async fn test_namespace_exists() {
     let store = setup().await;
     store
-        .create_namespace("prod", None, HashMap::new())
+        .create_namespace("default", "prod", None, HashMap::new())
         .await
         .unwrap();
 
@@ -228,7 +229,7 @@ async fn test_namespace_exists() {
 async fn test_drop_namespace() {
     let store = setup().await;
     store
-        .create_namespace("prod", None, HashMap::new())
+        .create_namespace("default", "prod", None, HashMap::new())
         .await
         .unwrap();
 
@@ -288,7 +289,7 @@ async fn test_list_namespaces_pagination_with_limit() {
     let store = setup().await;
     for name in ["dev", "prod", "staging"] {
         store
-            .create_namespace(name, None, HashMap::new())
+            .create_namespace("default", name, None, HashMap::new())
             .await
             .unwrap();
     }

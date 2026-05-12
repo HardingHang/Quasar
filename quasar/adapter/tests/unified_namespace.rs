@@ -6,7 +6,8 @@ use axum::http::{Request, StatusCode};
 use deadpool_postgres::{Pool, Runtime};
 use http_body_util::BodyExt;
 use postgresql_embedded::PostgreSQL;
-use quasar_adapter::{unified, CatalogStore};
+use quasar_adapter::unified;
+use quasar_core::{NamespaceStore, TabularStore};
 use quasar_storage::PgCatalogStore;
 use serde_json::Value;
 use serial_test::serial;
@@ -136,11 +137,16 @@ async fn test_create_namespace() {
 async fn test_list_namespaces() {
     let store = setup().await;
     store
-        .create_namespace("prod", Some("production".to_string()), HashMap::new())
+        .create_namespace(
+            "default",
+            "prod",
+            Some("production".to_string()),
+            HashMap::new(),
+        )
         .await
         .unwrap();
     store
-        .create_namespace("dev", None, HashMap::new())
+        .create_namespace("default", "dev", None, HashMap::new())
         .await
         .unwrap();
 
@@ -170,7 +176,7 @@ async fn test_list_namespaces_pagination() {
     let store = setup().await;
     for i in 0..5 {
         store
-            .create_namespace(&format!("ns{}", i), None, HashMap::new())
+            .create_namespace("default", &format!("ns{}", i), None, HashMap::new())
             .await
             .unwrap();
     }
@@ -266,7 +272,12 @@ async fn test_list_namespaces_page_size_zero() {
 async fn test_get_namespace() {
     let store = setup().await;
     store
-        .create_namespace("prod", Some("production".to_string()), HashMap::new())
+        .create_namespace(
+            "default",
+            "prod",
+            Some("production".to_string()),
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -321,7 +332,7 @@ async fn test_get_namespace_not_found() {
 async fn test_delete_namespace() {
     let store = setup().await;
     store
-        .create_namespace("prod", None, HashMap::new())
+        .create_namespace("default", "prod", None, HashMap::new())
         .await
         .unwrap();
 
@@ -346,14 +357,15 @@ async fn test_delete_namespace() {
 async fn test_delete_non_empty_namespace() {
     let store = setup().await;
     store
-        .create_namespace("prod", None, HashMap::new())
+        .create_namespace("default", "prod", None, HashMap::new())
         .await
         .unwrap();
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            quasar_core::AssetFormat::Iceberg,
             "users",
+            "iceberg",
             "s3://bucket/users",
             None,
             None,
@@ -386,7 +398,7 @@ async fn test_delete_non_empty_namespace() {
 async fn test_duplicate_create_returns_409() {
     let store = setup().await;
     store
-        .create_namespace("prod", None, HashMap::new())
+        .create_namespace("default", "prod", None, HashMap::new())
         .await
         .unwrap();
 
@@ -438,7 +450,7 @@ async fn test_create_namespace_invalid_name() {
 async fn test_patch_comment_value() {
     let store = setup().await;
     store
-        .create_namespace("prod", None, HashMap::new())
+        .create_namespace("default", "prod", None, HashMap::new())
         .await
         .unwrap();
 
@@ -466,7 +478,12 @@ async fn test_patch_comment_value() {
 async fn test_patch_comment_null() {
     let store = setup().await;
     store
-        .create_namespace("prod", Some("before".to_string()), HashMap::new())
+        .create_namespace(
+            "default",
+            "prod",
+            Some("before".to_string()),
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -496,7 +513,10 @@ async fn test_patch_properties() {
     let mut props = HashMap::new();
     props.insert("team".to_string(), "data".to_string());
     props.insert("env".to_string(), "prod".to_string());
-    store.create_namespace("prod", None, props).await.unwrap();
+    store
+        .create_namespace("default", "prod", None, props)
+        .await
+        .unwrap();
 
     let app = test_app(store);
 

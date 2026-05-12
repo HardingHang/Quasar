@@ -13,6 +13,7 @@ use super::dto::{
     ListAssetsResponse, PageSizeError, PaginationQuery, RenameAssetRequest, UpdateAssetRequest,
 };
 use super::error::{map_asset_error, UnifiedError, UnifiedErrorCode};
+use crate::DEFAULT_DOMAIN;
 
 /// Parse and validate the `format` query parameter.
 fn parse_format(
@@ -105,6 +106,27 @@ fn asset_pair_to_response(
     }
 }
 
+/// Unwrap the tabular extension from a unified read. V3 unified reads
+/// return `(Asset, Option<TabularAsset>)`; today every asset is tabular,
+/// but the V2 trait surface here promises a non-optional pair, so we
+/// surface a clear NotFound when an asset has no extension row.
+fn require_tabular(
+    pair: (quasar_core::Asset, Option<quasar_core::TabularAsset>),
+    name: &str,
+    instance: &str,
+    request_id: &str,
+) -> Result<(quasar_core::Asset, quasar_core::TabularAsset), UnifiedError> {
+    match pair {
+        (asset, Some(tabular)) => Ok((asset, tabular)),
+        (_, None) => Err(UnifiedError::new(
+            UnifiedErrorCode::AssetNotFound,
+            format!("asset '{}' has no tabular extension", name),
+            instance,
+            request_id,
+        )),
+    }
+}
+
 /// GET /unified/v1/namespaces/{ns}/assets
 pub async fn list_assets(
     State(store): State<Arc<dyn CatalogStore>>,
@@ -128,6 +150,7 @@ pub async fn list_assets(
     })?;
 
     let format = parse_optional_format(query.format, &instance, &request_id)?;
+    let format_str = format.map(|f| f.as_str());
 
     let name_filter = match query.name {
         Some(name) => {
@@ -137,23 +160,39 @@ pub async fn list_assets(
         None => None,
     };
 
-    let assets = store
-        .list_assets_unified(&ns, format, name_filter.as_deref(), offset, page_size)
+    let rows = store
+        .list_assets_unified(
+            DEFAULT_DOMAIN,
+            &ns,
+            format_str,
+            name_filter.as_deref(),
+            offset,
+            page_size,
+        )
         .await
         .map_err(|e| map_asset_error(e, &instance, &request_id))?;
 
-    let next_page_token = if assets.len() as i32 >= page_size {
+    let next_page_token = if rows.len() as i32 >= page_size {
         Some(super::dto::PaginationQuery::encode_token(
-            offset + assets.len() as i64,
+            offset + rows.len() as i64,
         ))
     } else {
         None
     };
 
+    // Phase 2 keeps the V2 wire shape, which only surfaces tabular assets;
+    // non-tabular rows from the V3 LEFT JOIN are filtered out here. Phase 3
+    // can promote them once `AssetListItem` learns to encode non-tabular
+    // assets.
+    let assets: Vec<AssetListItem> = rows
+        .into_iter()
+        .filter_map(|(asset, tabular)| tabular.map(|t| asset_pair_to_list_item((asset, t))))
+        .collect();
+
     Ok((
         StatusCode::OK,
         Json(ListAssetsResponse {
-            assets: assets.into_iter().map(asset_pair_to_list_item).collect(),
+            assets,
             next_page_token,
         }),
     ))
@@ -172,10 +211,11 @@ pub async fn get_asset(
     validate_name(&name).map_err(|e| map_asset_error(e, &instance, &request_id))?;
     let format = parse_format(query.format, &instance, &request_id)?;
 
-    let pair = store
-        .get_asset_unified(&ns, &name, format)
+    let raw = store
+        .get_asset_unified(DEFAULT_DOMAIN, &ns, &name)
         .await
         .map_err(|e| map_asset_error(e, &instance, &request_id))?;
+    let pair = require_tabular(raw, &name, &instance, &request_id)?;
 
     let current_version = super::version::get_current_version(
         store.as_ref(),
@@ -205,10 +245,13 @@ pub async fn drop_asset(
     let instance = format!("/unified/v1/namespaces/{}/assets/{}", ns, name);
     validate_name(&ns).map_err(|e| map_asset_error(e, &instance, &request_id))?;
     validate_name(&name).map_err(|e| map_asset_error(e, &instance, &request_id))?;
-    let format = parse_format(query.format, &instance, &request_id)?;
+    // Phase 2 still requires the `format` query parameter for wire
+    // compatibility; the storage drop is format-agnostic, so we validate
+    // and discard. Phase 3 will drop the parameter entirely.
+    let _ = parse_format(query.format, &instance, &request_id)?;
 
     store
-        .drop_asset(&ns, format, &name)
+        .drop_asset(DEFAULT_DOMAIN, &ns, &name)
         .await
         .map_err(|e| map_asset_error(e, &instance, &request_id))?;
 
@@ -230,15 +273,23 @@ pub async fn update_asset(
     let format = parse_format(query.format, &instance, &request_id)?;
 
     store
-        .update_asset_properties(&ns, format, &name, req.comment, &req.removals, &req.updates)
+        .update_asset(
+            DEFAULT_DOMAIN,
+            &ns,
+            &name,
+            req.comment,
+            &req.removals,
+            &req.updates,
+        )
         .await
         .map_err(|e| map_asset_error(e, &instance, &request_id))?;
 
     // Re-fetch to get full asset + tabular for response
-    let pair = store
-        .get_asset_unified(&ns, &name, format)
+    let raw = store
+        .get_asset_unified(DEFAULT_DOMAIN, &ns, &name)
         .await
         .map_err(|e| map_asset_error(e, &instance, &request_id))?;
+    let pair = require_tabular(raw, &name, &instance, &request_id)?;
 
     let current_version = super::version::get_current_version(
         store.as_ref(),
@@ -270,10 +321,11 @@ pub async fn rename_asset(
     validate_name(&ns).map_err(|e| map_asset_error(e, &instance, &request_id))?;
     validate_name(&name).map_err(|e| map_asset_error(e, &instance, &request_id))?;
     validate_name(&req.new_name).map_err(|e| map_asset_error(e, &instance, &request_id))?;
-    let format = parse_format(query.format, &instance, &request_id)?;
+    // V2 wire shape requires format; storage rename is format-agnostic.
+    let _ = parse_format(query.format, &instance, &request_id)?;
 
     store
-        .rename_asset(&ns, format, &name, &req.new_name)
+        .rename_asset(DEFAULT_DOMAIN, &ns, &name, &req.new_name)
         .await
         .map_err(|e| map_asset_error(e, &instance, &request_id))?;
 

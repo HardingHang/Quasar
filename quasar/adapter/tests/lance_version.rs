@@ -7,7 +7,8 @@ use deadpool_postgres::{Pool, Runtime};
 use http_body_util::BodyExt;
 use postgresql_embedded::PostgreSQL;
 use quasar_adapter::lance;
-use quasar_core::{AssetFormat, CatalogStore};
+use quasar_core::CatalogStore;
+use quasar_core::{NamespaceStore, TabularStore, TabularVersionStore};
 use quasar_storage::PgCatalogStore;
 use serde_json::Value;
 use serial_test::serial;
@@ -83,7 +84,7 @@ async fn body_json(response: axum::response::Response) -> Value {
 
 async fn create_namespace(store: &PgCatalogStore, name: &str) {
     store
-        .create_namespace(name, None, HashMap::new())
+        .create_namespace("default", name, None, HashMap::new())
         .await
         .unwrap();
 }
@@ -94,10 +95,11 @@ async fn test_create_and_describe_version() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Lance,
             "users",
+            "lance",
             "lance://prod/users",
             None,
             None,
@@ -157,10 +159,11 @@ async fn test_create_duplicate_returns_409() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Lance,
             "users",
+            "lance",
             "lance://prod/users",
             None,
             None,
@@ -211,11 +214,12 @@ async fn test_create_duplicate_returns_409() {
 async fn test_list_versions() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
-    store
-        .create_asset(
+    let (asset, _) = store
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Lance,
             "users",
+            "lance",
             "lance://prod/users",
             None,
             None,
@@ -224,24 +228,26 @@ async fn test_list_versions() {
         .await
         .unwrap();
     store
-        .create_version(
-            "prod",
-            AssetFormat::Lance,
-            "users",
-            1,
-            "s3://bucket/v1.manifest".to_string(),
+        .create_tabular_version(
+            asset.id,
+            "1",
+            Some(1),
             None,
+            "s3://bucket/v1.manifest",
+            None,
+            HashMap::new(),
         )
         .await
         .unwrap();
     store
-        .create_version(
-            "prod",
-            AssetFormat::Lance,
-            "users",
-            2,
-            "s3://bucket/v2.manifest".to_string(),
+        .create_tabular_version(
+            asset.id,
+            "2",
+            Some(2),
             None,
+            "s3://bucket/v2.manifest",
+            None,
+            HashMap::new(),
         )
         .await
         .unwrap();
@@ -273,10 +279,11 @@ async fn test_describe_not_found() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Lance,
             "users",
+            "lance",
             "lance://prod/users",
             None,
             None,
@@ -336,11 +343,12 @@ async fn test_create_table_not_found() {
 async fn test_describe_current_version_in_describe_table() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
-    store
-        .create_asset(
+    let (asset, _) = store
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Lance,
             "users",
+            "lance",
             "lance://prod/users",
             None,
             None,
@@ -349,13 +357,14 @@ async fn test_describe_current_version_in_describe_table() {
         .await
         .unwrap();
     store
-        .create_version(
-            "prod",
-            AssetFormat::Lance,
-            "users",
-            1,
-            "s3://bucket/v1.manifest".to_string(),
+        .create_tabular_version(
+            asset.id,
+            "1",
+            Some(1),
             None,
+            "s3://bucket/v1.manifest",
+            None,
+            HashMap::new(),
         )
         .await
         .unwrap();

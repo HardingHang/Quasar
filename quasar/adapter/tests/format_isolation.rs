@@ -7,7 +7,8 @@ use deadpool_postgres::{Pool, Runtime};
 use http_body_util::BodyExt;
 use postgresql_embedded::PostgreSQL;
 use quasar_adapter::{iceberg, lance};
-use quasar_core::{AssetFormat, CatalogStore};
+use quasar_core::CatalogStore;
+use quasar_core::{NamespaceStore, TabularStore};
 use quasar_storage::PgCatalogStore;
 use serde_json::Value;
 use serial_test::serial;
@@ -94,7 +95,7 @@ async fn body_json(response: axum::response::Response) -> Value {
 
 async fn create_namespace(store: &Arc<PgCatalogStore>, name: &str) {
     store
-        .create_namespace(name, None, HashMap::new())
+        .create_namespace("default", name, None, HashMap::new())
         .await
         .unwrap();
 }
@@ -116,10 +117,11 @@ async fn test_cross_format_list_isolation() {
     create_namespace(&store, "prod").await;
 
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Iceberg,
             "users",
+            "iceberg",
             "s3://bucket/warehouse/prod/users",
             None,
             None,
@@ -128,10 +130,11 @@ async fn test_cross_format_list_isolation() {
         .await
         .unwrap();
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Lance,
             "users",
+            "lance",
             "lance://prod/users",
             None,
             None,
@@ -182,10 +185,11 @@ async fn test_cross_format_load_isolation() {
     create_namespace(&store, "prod").await;
 
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Lance,
             "users",
+            "lance",
             "lance://prod/users",
             None,
             None,
@@ -219,10 +223,11 @@ async fn test_cross_format_describe_isolation() {
     create_namespace(&store, "prod").await;
 
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Iceberg,
             "users",
+            "iceberg",
             "s3://bucket/warehouse/prod/users",
             None,
             None,
@@ -257,10 +262,11 @@ async fn test_cross_format_drop_isolation() {
     create_namespace(&store, "prod").await;
 
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Iceberg,
             "users",
+            "iceberg",
             "s3://bucket/warehouse/prod/users",
             None,
             None,
@@ -269,10 +275,11 @@ async fn test_cross_format_drop_isolation() {
         .await
         .unwrap();
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Lance,
             "users",
+            "lance",
             "lance://prod/users",
             None,
             None,
@@ -318,10 +325,11 @@ async fn test_cross_format_rename_isolation() {
     create_namespace(&store, "prod").await;
 
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Iceberg,
             "users",
+            "iceberg",
             "s3://bucket/warehouse/prod/users",
             None,
             None,
@@ -330,10 +338,11 @@ async fn test_cross_format_rename_isolation() {
         .await
         .unwrap();
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Lance,
             "users",
+            "lance",
             "lance://prod/users",
             None,
             None,
@@ -381,10 +390,11 @@ async fn test_cross_format_exists_isolation() {
     create_namespace(&store, "prod").await;
 
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Iceberg,
             "users",
+            "iceberg",
             "s3://bucket/warehouse/prod/users",
             None,
             None,
@@ -417,10 +427,11 @@ async fn test_cross_format_commit_isolation() {
     create_namespace(&store, "prod").await;
 
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Lance,
             "users",
+            "lance",
             "lance://prod/users",
             None,
             None,

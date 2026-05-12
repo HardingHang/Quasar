@@ -12,6 +12,7 @@ use super::dto::{
     PaginationQuery, UpdateNamespaceRequest,
 };
 use super::error::{map_namespace_error, UnifiedError, UnifiedErrorCode};
+use crate::DEFAULT_DOMAIN;
 use quasar_core::validate_name;
 
 fn namespace_to_response(ns: quasar_core::Namespace) -> NamespaceResponse {
@@ -44,7 +45,7 @@ pub async fn list_namespaces(
     })?;
 
     let namespaces = store
-        .list_namespaces(offset, page_size)
+        .list_namespaces(DEFAULT_DOMAIN, offset, page_size)
         .await
         .map_err(|e| map_namespace_error(e, "/unified/v1/namespaces", &request_id))?;
 
@@ -75,7 +76,7 @@ pub async fn create_namespace(
         .map_err(|e| map_namespace_error(e, "/unified/v1/namespaces", &request_id))?;
 
     let ns = store
-        .create_namespace(&req.name, req.comment, req.properties)
+        .create_namespace(DEFAULT_DOMAIN, &req.name, req.comment, req.properties)
         .await
         .map_err(|e| map_namespace_error(e, "/unified/v1/namespaces", &request_id))?;
 
@@ -92,9 +93,12 @@ pub async fn get_namespace(
         map_namespace_error(e, &format!("/unified/v1/namespaces/{}", ns), &request_id)
     })?;
 
-    let namespace = store.get_namespace(&ns).await.map_err(|e| {
-        map_namespace_error(e, &format!("/unified/v1/namespaces/{}", ns), &request_id)
-    })?;
+    let namespace = store
+        .get_namespace(DEFAULT_DOMAIN, &ns)
+        .await
+        .map_err(|e| {
+            map_namespace_error(e, &format!("/unified/v1/namespaces/{}", ns), &request_id)
+        })?;
 
     Ok((StatusCode::OK, Json(namespace_to_response(namespace))))
 }
@@ -109,9 +113,12 @@ pub async fn drop_namespace(
         map_namespace_error(e, &format!("/unified/v1/namespaces/{}", ns), &request_id)
     })?;
 
-    store.drop_namespace(&ns).await.map_err(|e| {
-        map_namespace_error(e, &format!("/unified/v1/namespaces/{}", ns), &request_id)
-    })?;
+    store
+        .drop_namespace(DEFAULT_DOMAIN, &ns)
+        .await
+        .map_err(|e| {
+            map_namespace_error(e, &format!("/unified/v1/namespaces/{}", ns), &request_id)
+        })?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -128,7 +135,13 @@ pub async fn update_namespace(
     })?;
 
     let updated = store
-        .update_namespace(&ns, req.comment, &req.removals, &req.updates)
+        .update_namespace(
+            DEFAULT_DOMAIN,
+            &ns,
+            req.comment,
+            &req.removals,
+            &req.updates,
+        )
         .await
         .map_err(|e| {
             map_namespace_error(e, &format!("/unified/v1/namespaces/{}", ns), &request_id)

@@ -4,12 +4,13 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use quasar_core::{AssetFormat, CatalogStore};
+use quasar_core::CatalogStore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::error::{store_error_to_lance, ProblemDetails};
+use crate::DEFAULT_DOMAIN;
 use quasar_core::validate_name;
 
 // ── Request DTOs ───────────────────────────────────────────
@@ -92,9 +93,9 @@ impl From<quasar_core::Asset> for TableResponse {
     }
 }
 
-impl From<quasar_core::AssetWithTabular> for TableResponse {
-    fn from(awt: quasar_core::AssetWithTabular) -> Self {
-        Self::from(awt.asset)
+impl From<(quasar_core::Asset, quasar_core::TabularAsset)> for TableResponse {
+    fn from(pair: (quasar_core::Asset, quasar_core::TabularAsset)) -> Self {
+        Self::from(pair.0)
     }
 }
 
@@ -116,7 +117,7 @@ pub async fn create_namespace(
     let instance = format!("/lance/v1/namespace/{}/create", id);
     validate_name(&id).map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
     let ns = store
-        .create_namespace(&id, None, req.properties)
+        .create_namespace(DEFAULT_DOMAIN, &id, None, req.properties)
         .await
         .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
 
@@ -138,7 +139,7 @@ pub async fn list_namespaces(
         .unwrap_or(0);
 
     let namespaces = store
-        .list_namespaces(offset, limit)
+        .list_namespaces(DEFAULT_DOMAIN, offset, limit)
         .await
         .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
 
@@ -166,7 +167,7 @@ pub async fn describe_namespace(
 ) -> Result<impl IntoResponse, ProblemDetails> {
     let instance = format!("/lance/v1/namespace/{}/describe", id);
     let ns = store
-        .get_namespace(&id)
+        .get_namespace(DEFAULT_DOMAIN, &id)
         .await
         .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
 
@@ -182,7 +183,7 @@ pub async fn drop_namespace(
 
     // Check if namespace is empty before dropping
     let assets = store
-        .list_assets(&id, AssetFormat::Lance)
+        .list_tabular_assets(DEFAULT_DOMAIN, &id, Some("lance"))
         .await
         .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
 
@@ -200,7 +201,7 @@ pub async fn drop_namespace(
     }
 
     store
-        .drop_namespace(&id)
+        .drop_namespace(DEFAULT_DOMAIN, &id)
         .await
         .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
 
@@ -217,7 +218,7 @@ pub async fn list_tables(
     let _limit = query.limit.unwrap_or(100).clamp(1, 1000);
 
     let assets = store
-        .list_assets(&id, AssetFormat::Lance)
+        .list_tabular_assets(DEFAULT_DOMAIN, &id, Some("lance"))
         .await
         .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
 
@@ -236,7 +237,7 @@ pub async fn namespace_exists(
 ) -> Result<impl IntoResponse, ProblemDetails> {
     let instance = format!("/lance/v1/namespace/{}/exists", id);
     let exists = store
-        .namespace_exists(&id)
+        .namespace_exists(DEFAULT_DOMAIN, &id)
         .await
         .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
 

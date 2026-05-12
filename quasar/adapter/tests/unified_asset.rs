@@ -6,8 +6,9 @@ use axum::http::{Request, StatusCode};
 use deadpool_postgres::{Pool, Runtime};
 use http_body_util::BodyExt;
 use postgresql_embedded::PostgreSQL;
-use quasar_adapter::{unified, CatalogStore};
+use quasar_adapter::unified;
 use quasar_core::{AssetFormat, PatchField};
+use quasar_core::{AssetStore, NamespaceStore, TabularStore, TabularVersionStore};
 use quasar_storage::PgCatalogStore;
 use serde_json::Value;
 use serial_test::serial;
@@ -113,17 +114,18 @@ async fn body_json(response: axum::response::Response) -> Value {
 
 async fn create_test_namespace(store: &Arc<PgCatalogStore>, name: &str) {
     store
-        .create_namespace(name, None, HashMap::new())
+        .create_namespace("default", name, None, HashMap::new())
         .await
         .unwrap();
 }
 
 async fn create_test_asset(store: &Arc<PgCatalogStore>, ns: &str, format: AssetFormat, name: &str) {
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             ns,
-            format,
             name,
+            format.as_str(),
             &format!("s3://bucket/{}/{}", ns, name),
             Some(&format!("s3://bucket/{}/{}/metadata.json", ns, name)),
             None,
@@ -639,9 +641,9 @@ async fn test_patch_asset_comment_null() {
     create_test_namespace(&store, "prod").await;
     create_test_asset(&store, "prod", AssetFormat::Iceberg, "users").await;
     store
-        .update_asset_properties(
+        .update_asset(
+            "default",
             "prod",
-            AssetFormat::Iceberg,
             "users",
             PatchField::Value("before".to_string()),
             &[],
@@ -676,9 +678,9 @@ async fn test_patch_asset_comment_missing_keeps_existing() {
     create_test_namespace(&store, "prod").await;
     create_test_asset(&store, "prod", AssetFormat::Iceberg, "users").await;
     store
-        .update_asset_properties(
+        .update_asset(
+            "default",
             "prod",
-            AssetFormat::Iceberg,
             "users",
             PatchField::Value("before".to_string()),
             &[],
@@ -905,14 +907,19 @@ async fn test_get_lance_asset_with_version() {
     create_test_namespace(&store, "prod").await;
     create_test_asset(&store, "prod", AssetFormat::Lance, "items").await;
 
+    let (asset, _) = store
+        .get_tabular_asset("default", "prod", "lance", "items")
+        .await
+        .unwrap();
     store
-        .create_version(
-            "prod",
-            AssetFormat::Lance,
-            "items",
-            1,
-            "s3://bucket/v1.manifest".to_string(),
+        .create_tabular_version(
+            asset.id,
+            "1",
+            Some(1),
             None,
+            "s3://bucket/v1.manifest",
+            None,
+            HashMap::new(),
         )
         .await
         .unwrap();

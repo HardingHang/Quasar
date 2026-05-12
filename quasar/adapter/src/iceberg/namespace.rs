@@ -4,7 +4,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use quasar_core::{AssetFormat, CatalogStore, PatchField};
+use quasar_core::{CatalogStore, PatchField};
 use std::sync::Arc;
 
 use super::dto::{
@@ -12,6 +12,7 @@ use super::dto::{
     UpdateNamespacePropertiesRequest, UpdateNamespacePropertiesResponse,
 };
 use super::error::{store_error_to_iceberg_namespace, IcebergError};
+use crate::DEFAULT_DOMAIN;
 use quasar_core::validate_name;
 
 /// GET /iceberg/v1/namespaces
@@ -27,7 +28,7 @@ pub async fn list_namespaces(
         .unwrap_or(0);
 
     let namespaces = store
-        .list_namespaces(offset, limit)
+        .list_namespaces(DEFAULT_DOMAIN, offset, limit)
         .await
         .map_err(store_error_to_iceberg_namespace)?;
 
@@ -61,7 +62,7 @@ pub async fn create_namespace(
     validate_name(name).map_err(store_error_to_iceberg_namespace)?;
 
     let ns = store
-        .create_namespace(name, None, req.properties)
+        .create_namespace(DEFAULT_DOMAIN, name, None, req.properties)
         .await
         .map_err(store_error_to_iceberg_namespace)?;
 
@@ -80,7 +81,7 @@ pub async fn get_namespace(
     Path(ns): Path<String>,
 ) -> Result<impl IntoResponse, IcebergError> {
     let namespace = store
-        .get_namespace(&ns)
+        .get_namespace(DEFAULT_DOMAIN, &ns)
         .await
         .map_err(store_error_to_iceberg_namespace)?;
 
@@ -99,7 +100,7 @@ pub async fn drop_namespace(
     Path(ns): Path<String>,
 ) -> Result<impl IntoResponse, IcebergError> {
     let assets = store
-        .list_assets(&ns, AssetFormat::Iceberg)
+        .list_tabular_assets(DEFAULT_DOMAIN, &ns, Some("iceberg"))
         .await
         .map_err(store_error_to_iceberg_namespace)?;
 
@@ -110,7 +111,7 @@ pub async fn drop_namespace(
     }
 
     store
-        .drop_namespace(&ns)
+        .drop_namespace(DEFAULT_DOMAIN, &ns)
         .await
         .map_err(store_error_to_iceberg_namespace)?;
 
@@ -125,12 +126,18 @@ pub async fn update_namespace_properties(
 ) -> Result<impl IntoResponse, IcebergError> {
     // Read pre-update namespace to distinguish removed vs missing keys.
     let before = store
-        .get_namespace(&ns)
+        .get_namespace(DEFAULT_DOMAIN, &ns)
         .await
         .map_err(store_error_to_iceberg_namespace)?;
 
     let updated_ns = store
-        .update_namespace(&ns, PatchField::Missing, &req.removals, &req.updates)
+        .update_namespace(
+            DEFAULT_DOMAIN,
+            &ns,
+            PatchField::Missing,
+            &req.removals,
+            &req.updates,
+        )
         .await
         .map_err(store_error_to_iceberg_namespace)?;
 

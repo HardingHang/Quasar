@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use deadpool_postgres::Pool;
 use quasar_core::{
-    Asset, AssetFormat, AssetVersion, AssetVersionWithTabular, AssetWithTabular, CatalogStore,
-    Namespace, PatchField, StoreError, TabularAsset, TabularAssetVersion,
+    Asset, AssetStore, AssetVersion, CasCommitStore, Domain, DomainPatch, DomainStore, Namespace,
+    NamespaceStore, PatchField, StoreError, TabularAsset, TabularAssetVersion, TabularStore,
+    TabularVersionStore, UnifiedQueryStore, VersionStore,
 };
 use std::collections::HashMap;
 use tokio_postgres::error::SqlState;
@@ -15,13 +16,6 @@ use crate::schema;
 pub struct PgCatalogStore {
     pool: Pool,
 }
-
-/// Phase 2 transitional binding. The V2 `CatalogStore` trait surface has no
-/// domain parameter, so storage scopes every call to the `default` domain
-/// seeded by `schema/init.sql`. Phase 3 lifts domain into the trait surface
-/// and removes this constant along with the seed.
-// TODO(v3-phase3): replace hardcoded "default" with adapter-supplied domain_name.
-const DEFAULT_DOMAIN: &str = "default";
 
 impl PgCatalogStore {
     pub fn new(pool: Pool) -> Self {
@@ -52,6 +46,30 @@ macro_rules! try_get {
             source: Some(Box::new(e)),
         })?
     };
+}
+
+// ── Row mappers ────────────────────────────────────────────────────────────
+
+fn row_to_domain(row: &Row) -> Result<Domain, StoreError> {
+    let props: serde_json::Value = try_get!(row, "properties");
+    let properties: HashMap<String, String> =
+        serde_json::from_value(props).map_err(|e| StoreError::Internal {
+            msg: format!("properties JSON: {}", &e),
+            source: Some(Box::new(e)),
+        })?;
+
+    Ok(Domain {
+        id: try_get!(row, "id"),
+        name: try_get!(row, "name"),
+        comment: row.try_get("comment").ok().flatten(),
+        properties,
+        storage_type: row.try_get("storage_type").ok().flatten(),
+        storage_config: try_get!(row, "storage_config"),
+        warehouse: row.try_get("warehouse").ok().flatten(),
+        owner: row.try_get("owner").ok().flatten(),
+        created_at: try_get!(row, "created_at"),
+        updated_at: try_get!(row, "updated_at"),
+    })
 }
 
 fn row_to_namespace(row: &Row) -> Result<Namespace, StoreError> {
@@ -109,9 +127,10 @@ fn row_to_tabular_asset(row: &Row) -> Result<TabularAsset, StoreError> {
     })
 }
 
-/// Variant of `row_to_tabular_asset` that returns `None` when the row's
-/// tabular extension columns are all NULL (i.e., a `LEFT JOIN` row for a
-/// non-tabular asset). Used by the unified read queries.
+/// `LEFT JOIN`-friendly variant of [`row_to_tabular_asset`]. Returns `None`
+/// when the row has no tabular extension (e.g., a future non-tabular asset
+/// type whose `LEFT JOIN tabular_assets` row has all-NULL extension
+/// columns).
 fn row_to_tabular_asset_optional(row: &Row) -> Result<Option<TabularAsset>, StoreError> {
     let asset_id: Option<Uuid> = row.try_get("asset_id").ok().flatten();
     match asset_id {
@@ -165,10 +184,178 @@ where
     }
 }
 
+/// Apply a `PatchField` to an existing optional value.
+fn apply_patch<T>(current: Option<T>, patch: PatchField<T>) -> Option<T> {
+    match patch {
+        PatchField::Missing => current,
+        PatchField::Null => None,
+        PatchField::Value(v) => Some(v),
+    }
+}
+
+// ── DomainStore ────────────────────────────────────────────────────────────
+
 #[async_trait]
-impl CatalogStore for PgCatalogStore {
+impl DomainStore for PgCatalogStore {
+    async fn create_domain(
+        &self,
+        name: &str,
+        comment: Option<String>,
+        properties: HashMap<String, String>,
+        storage_type: Option<String>,
+        storage_config: serde_json::Value,
+        warehouse: Option<String>,
+        owner: Option<String>,
+    ) -> Result<Domain, StoreError> {
+        let client = self.get_client().await?;
+        let props_json = props_to_json(&properties)?;
+
+        let row = client
+            .query_one(
+                queries::domain::CREATE,
+                &[
+                    &name,
+                    &comment,
+                    &props_json,
+                    &storage_type,
+                    &storage_config,
+                    &warehouse,
+                    &owner,
+                ],
+            )
+            .await
+            .map_err(|e| {
+                if let Some(db_err) = e.as_db_error() {
+                    if db_err.code() == &SqlState::UNIQUE_VIOLATION {
+                        return StoreError::AlreadyExists(format!("domain '{}'", name));
+                    }
+                }
+                StoreError::Internal {
+                    msg: format!("create_domain failed: {}", &e),
+                    source: Some(Box::new(e)),
+                }
+            })?;
+
+        row_to_domain(&row)
+    }
+
+    async fn list_domains(&self, offset: i64, limit: i32) -> Result<Vec<Domain>, StoreError> {
+        let client = self.get_client().await?;
+        let rows = client
+            .query(queries::domain::LIST, &[&(limit as i64), &offset])
+            .await
+            .map_err(internal_err("list_domains"))?;
+
+        rows.iter().map(row_to_domain).collect()
+    }
+
+    async fn get_domain(&self, name: &str) -> Result<Domain, StoreError> {
+        let client = self.get_client().await?;
+        let row = client
+            .query_opt(queries::domain::GET_BY_NAME, &[&name])
+            .await
+            .map_err(internal_err("get_domain"))?
+            .ok_or_else(|| StoreError::NotFound(format!("domain '{}'", name)))?;
+
+        row_to_domain(&row)
+    }
+
+    async fn domain_exists(&self, name: &str) -> Result<bool, StoreError> {
+        let client = self.get_client().await?;
+        let row = client
+            .query_one(queries::domain::EXISTS, &[&name])
+            .await
+            .map_err(internal_err("domain_exists"))?;
+
+        Ok(row.get(0))
+    }
+
+    async fn drop_domain(&self, name: &str) -> Result<(), StoreError> {
+        let client = self.get_client().await?;
+        let n = client
+            .execute(queries::domain::DELETE, &[&name])
+            .await
+            .map_err(|e| match e.code() {
+                Some(code)
+                    if code == &SqlState::RESTRICT_VIOLATION
+                        || code == &SqlState::FOREIGN_KEY_VIOLATION =>
+                {
+                    StoreError::DomainNotEmpty {
+                        domain: name.to_string(),
+                    }
+                }
+                Some(code) => StoreError::Internal {
+                    msg: format!("drop_domain failed: {} (sqlstate: {})", &e, code.code()),
+                    source: Some(Box::new(e)),
+                },
+                None => StoreError::Internal {
+                    msg: format!("drop_domain failed: {}", &e),
+                    source: Some(Box::new(e)),
+                },
+            })?;
+
+        if n == 0 {
+            return Err(StoreError::NotFound(format!("domain '{}'", name)));
+        }
+        Ok(())
+    }
+
+    async fn update_domain(&self, name: &str, patch: DomainPatch) -> Result<Domain, StoreError> {
+        let client = self.get_client().await?;
+
+        let existing = client
+            .query_opt(queries::domain::GET_BY_NAME, &[&name])
+            .await
+            .map_err(internal_err("update_domain"))?
+            .ok_or_else(|| StoreError::NotFound(format!("domain '{}'", name)))?;
+
+        let mut domain = row_to_domain(&existing)?;
+        domain.comment = apply_patch(domain.comment, patch.comment);
+        domain.storage_type = apply_patch(domain.storage_type, patch.storage_type);
+        domain.warehouse = apply_patch(domain.warehouse, patch.warehouse);
+        domain.owner = apply_patch(domain.owner, patch.owner);
+        match patch.storage_config {
+            PatchField::Missing => {}
+            PatchField::Null => {
+                domain.storage_config = serde_json::Value::Object(Default::default());
+            }
+            PatchField::Value(v) => domain.storage_config = v,
+        }
+        for key in &patch.property_removals {
+            domain.properties.remove(key);
+        }
+        for (key, value) in patch.property_updates {
+            domain.properties.insert(key, value);
+        }
+        let props_json = props_to_json(&domain.properties)?;
+
+        let row = client
+            .query_one(
+                queries::domain::UPDATE,
+                &[
+                    &domain.comment,
+                    &props_json,
+                    &domain.storage_type,
+                    &domain.storage_config,
+                    &domain.warehouse,
+                    &domain.owner,
+                    &name,
+                ],
+            )
+            .await
+            .map_err(internal_err("update_domain write"))?;
+
+        row_to_domain(&row)
+    }
+}
+
+// ── NamespaceStore ─────────────────────────────────────────────────────────
+
+#[async_trait]
+impl NamespaceStore for PgCatalogStore {
     async fn create_namespace(
         &self,
+        domain_name: &str,
         name: &str,
         comment: Option<String>,
         properties: HashMap<String, String>,
@@ -179,13 +366,16 @@ impl CatalogStore for PgCatalogStore {
         let row = client
             .query_opt(
                 queries::namespace::CREATE,
-                &[&DEFAULT_DOMAIN, &name, &comment, &props_json],
+                &[&domain_name, &name, &comment, &props_json],
             )
             .await
             .map_err(|e| {
                 if let Some(db_err) = e.as_db_error() {
                     if db_err.code() == &SqlState::UNIQUE_VIOLATION {
-                        return StoreError::AlreadyExists(format!("namespace '{}'", name));
+                        return StoreError::AlreadyExists(format!(
+                            "namespace '{}' in domain '{}'",
+                            name, domain_name
+                        ));
                     }
                 }
                 StoreError::Internal {
@@ -193,17 +383,22 @@ impl CatalogStore for PgCatalogStore {
                     source: Some(Box::new(e)),
                 }
             })?
-            .ok_or_else(|| StoreError::NotFound(format!("domain '{}'", DEFAULT_DOMAIN)))?;
+            .ok_or_else(|| StoreError::NotFound(format!("domain '{}'", domain_name)))?;
 
         row_to_namespace(&row)
     }
 
-    async fn list_namespaces(&self, offset: i64, limit: i32) -> Result<Vec<Namespace>, StoreError> {
+    async fn list_namespaces(
+        &self,
+        domain_name: &str,
+        offset: i64,
+        limit: i32,
+    ) -> Result<Vec<Namespace>, StoreError> {
         let client = self.get_client().await?;
         let rows = client
             .query(
                 queries::namespace::LIST_BY_DOMAIN,
-                &[&DEFAULT_DOMAIN, &(limit as i64), &offset],
+                &[&domain_name, &(limit as i64), &offset],
             )
             .await
             .map_err(internal_err("list_namespaces"))?;
@@ -211,10 +406,10 @@ impl CatalogStore for PgCatalogStore {
         rows.iter().map(row_to_namespace).collect()
     }
 
-    async fn get_namespace(&self, name: &str) -> Result<Namespace, StoreError> {
+    async fn get_namespace(&self, domain_name: &str, name: &str) -> Result<Namespace, StoreError> {
         let client = self.get_client().await?;
         let row = client
-            .query_opt(queries::namespace::GET_BY_NAME, &[&DEFAULT_DOMAIN, &name])
+            .query_opt(queries::namespace::GET_BY_NAME, &[&domain_name, &name])
             .await
             .map_err(internal_err("get_namespace"))?
             .ok_or_else(|| StoreError::NotFound(format!("namespace '{}'", name)))?;
@@ -222,20 +417,20 @@ impl CatalogStore for PgCatalogStore {
         row_to_namespace(&row)
     }
 
-    async fn namespace_exists(&self, name: &str) -> Result<bool, StoreError> {
+    async fn namespace_exists(&self, domain_name: &str, name: &str) -> Result<bool, StoreError> {
         let client = self.get_client().await?;
         let row = client
-            .query_one(queries::namespace::EXISTS, &[&DEFAULT_DOMAIN, &name])
+            .query_one(queries::namespace::EXISTS, &[&domain_name, &name])
             .await
             .map_err(internal_err("namespace_exists"))?;
 
         Ok(row.get(0))
     }
 
-    async fn drop_namespace(&self, name: &str) -> Result<(), StoreError> {
+    async fn drop_namespace(&self, domain_name: &str, name: &str) -> Result<(), StoreError> {
         let client = self.get_client().await?;
         let n = client
-            .execute(queries::namespace::DELETE, &[&DEFAULT_DOMAIN, &name])
+            .execute(queries::namespace::DELETE, &[&domain_name, &name])
             .await
             .map_err(|e| match e.code() {
                 Some(code)
@@ -264,6 +459,7 @@ impl CatalogStore for PgCatalogStore {
 
     async fn update_namespace(
         &self,
+        domain_name: &str,
         name: &str,
         comment: PatchField<String>,
         removals: &[String],
@@ -272,7 +468,7 @@ impl CatalogStore for PgCatalogStore {
         let client = self.get_client().await?;
 
         let existing = client
-            .query_opt(queries::namespace::GET_BY_NAME, &[&DEFAULT_DOMAIN, &name])
+            .query_opt(queries::namespace::GET_BY_NAME, &[&domain_name, &name])
             .await
             .map_err(internal_err("update_namespace"))?
             .ok_or_else(|| StoreError::NotFound(format!("namespace '{}'", name)))?;
@@ -296,41 +492,36 @@ impl CatalogStore for PgCatalogStore {
         let row = client
             .query_one(
                 queries::namespace::UPDATE,
-                &[&namespace.comment, &props_json, &DEFAULT_DOMAIN, &name],
+                &[&namespace.comment, &props_json, &domain_name, &name],
             )
             .await
             .map_err(internal_err("update_namespace write"))?;
 
         row_to_namespace(&row)
     }
+}
 
-    #[allow(clippy::too_many_arguments)]
+// ── AssetStore ─────────────────────────────────────────────────────────────
+
+#[async_trait]
+impl AssetStore for PgCatalogStore {
     async fn create_asset(
         &self,
+        domain_name: &str,
         namespace_name: &str,
-        format: AssetFormat,
         name: &str,
-        location: &str,
-        metadata_location: Option<&str>,
-        schema_snapshot: Option<serde_json::Value>,
+        asset_type: &str,
+        comment: Option<String>,
         properties: HashMap<String, String>,
     ) -> Result<Asset, StoreError> {
-        let mut client = self.get_client().await?;
+        let client = self.get_client().await?;
         let props_json = props_to_json(&properties)?;
-        let format_str = format.as_str();
-        let comment: Option<String> = None;
-        let asset_type = "table";
 
-        let tx = client
-            .transaction()
-            .await
-            .map_err(internal_err("transaction start"))?;
-
-        let asset_row = tx
+        let row = client
             .query_opt(
                 queries::asset::CREATE,
                 &[
-                    &DEFAULT_DOMAIN,
+                    &domain_name,
                     &namespace_name,
                     &name,
                     &asset_type,
@@ -355,64 +546,20 @@ impl CatalogStore for PgCatalogStore {
             })?
             .ok_or_else(|| StoreError::NotFound(format!("namespace '{}'", namespace_name)))?;
 
-        let asset_id: Uuid = try_get!(asset_row, "id");
-
-        tx.execute(
-            queries::asset::CREATE_TABULAR,
-            &[
-                &asset_id,
-                &format_str,
-                &location,
-                &metadata_location,
-                &schema_snapshot,
-            ],
-        )
-        .await
-        .map_err(internal_err("create tabular_asset"))?;
-
-        tx.commit()
-            .await
-            .map_err(internal_err("transaction commit"))?;
-
-        row_to_asset(&asset_row)
-    }
-
-    async fn list_assets(
-        &self,
-        namespace_name: &str,
-        format: AssetFormat,
-    ) -> Result<Vec<AssetWithTabular>, StoreError> {
-        let client = self.get_client().await?;
-        let format_str = format.as_str();
-        let rows = client
-            .query(
-                queries::asset::LIST_TABULAR_BY_NAMESPACE,
-                &[&DEFAULT_DOMAIN, &namespace_name, &format_str],
-            )
-            .await
-            .map_err(internal_err("list_assets"))?;
-
-        rows.iter()
-            .map(|row| {
-                let asset = row_to_asset(row)?;
-                let tabular = row_to_tabular_asset(row)?;
-                Ok(AssetWithTabular { asset, tabular })
-            })
-            .collect()
+        row_to_asset(&row)
     }
 
     async fn get_asset(
         &self,
+        domain_name: &str,
         namespace_name: &str,
-        format: AssetFormat,
         name: &str,
     ) -> Result<Asset, StoreError> {
         let client = self.get_client().await?;
-        let format_str = format.as_str();
         let row = client
             .query_opt(
-                queries::asset::GET_TABULAR_BY_NAME,
-                &[&DEFAULT_DOMAIN, &namespace_name, &name, &format_str],
+                queries::asset::GET_BY_NAME,
+                &[&domain_name, &namespace_name, &name],
             )
             .await
             .map_err(internal_err("get_asset"))?
@@ -421,81 +568,25 @@ impl CatalogStore for PgCatalogStore {
         row_to_asset(&row)
     }
 
-    async fn get_asset_with_tabular(
-        &self,
-        namespace_name: &str,
-        format: AssetFormat,
-        name: &str,
-    ) -> Result<(Asset, TabularAsset), StoreError> {
-        let client = self.get_client().await?;
-        let format_str = format.as_str();
-        let row = client
-            .query_opt(
-                queries::asset::GET_TABULAR_BY_NAME,
-                &[&DEFAULT_DOMAIN, &namespace_name, &name, &format_str],
-            )
-            .await
-            .map_err(internal_err("get_asset_with_tabular"))?
-            .ok_or_else(|| StoreError::NotFound(format!("asset '{}'", name)))?;
-
-        let asset = row_to_asset(&row)?;
-        let tabular = row_to_tabular_asset(&row)?;
-        Ok((asset, tabular))
-    }
-
-    async fn get_asset_with_current_version(
-        &self,
-        namespace_name: &str,
-        format: AssetFormat,
-        name: &str,
-    ) -> Result<(Asset, TabularAsset, Option<AssetVersionWithTabular>), StoreError> {
-        let client = self.get_client().await?;
-        let format_str = format.as_str();
-
-        let asset_row = client
-            .query_opt(
-                queries::asset::GET_TABULAR_BY_NAME,
-                &[&DEFAULT_DOMAIN, &namespace_name, &name, &format_str],
-            )
-            .await
-            .map_err(internal_err("get_asset_with_current_version"))?
-            .ok_or_else(|| StoreError::NotFound(format!("asset '{}'", name)))?;
-
-        let asset = row_to_asset(&asset_row)?;
-        let tabular = row_to_tabular_asset(&asset_row)?;
-
-        let version_row = client
-            .query_opt(queries::version::GET_LATEST_TABULAR, &[&asset.id])
-            .await
-            .map_err(internal_err("load current version"))?;
-
-        let current_version = match version_row {
-            Some(row) => {
-                let version = row_to_asset_version(&row)?;
-                let tabular_version = row_to_tabular_version(&row)?;
-                Some(AssetVersionWithTabular {
-                    version,
-                    tabular_version,
-                })
-            }
-            None => None,
-        };
-
-        Ok((asset, tabular, current_version))
-    }
-
     async fn asset_exists(
         &self,
+        domain_name: &str,
         namespace_name: &str,
-        format: AssetFormat,
         name: &str,
     ) -> Result<bool, StoreError> {
         let client = self.get_client().await?;
-        let format_str = format.as_str();
         let row = client
             .query_one(
-                queries::asset::EXISTS_TABULAR,
-                &[&DEFAULT_DOMAIN, &namespace_name, &name, &format_str],
+                r#"
+                SELECT EXISTS(
+                    SELECT 1 FROM assets a
+                    JOIN namespaces ns ON a.namespace_id = ns.id
+                    JOIN domains d ON ns.domain_id = d.id
+                    WHERE d.name = $1 AND ns.name = $2 AND a.name = $3
+                      AND a.deleted_at IS NULL
+                )
+                "#,
+                &[&domain_name, &namespace_name, &name],
             )
             .await
             .map_err(internal_err("asset_exists"))?;
@@ -505,19 +596,15 @@ impl CatalogStore for PgCatalogStore {
 
     async fn drop_asset(
         &self,
+        domain_name: &str,
         namespace_name: &str,
-        _format: AssetFormat,
         name: &str,
     ) -> Result<(), StoreError> {
-        // Phase 2: V3 schema enforces active-name uniqueness within a
-        // namespace regardless of format, so the V2 trait's `format` filter
-        // is ignored here. Format-aware drop semantics return in Phase 3 at
-        // the adapter layer (404 if asset has a different format).
         let client = self.get_client().await?;
         let n = client
             .execute(
                 queries::asset::DELETE,
-                &[&DEFAULT_DOMAIN, &namespace_name, &name],
+                &[&domain_name, &namespace_name, &name],
             )
             .await
             .map_err(internal_err("drop_asset"))?;
@@ -530,8 +617,8 @@ impl CatalogStore for PgCatalogStore {
 
     async fn rename_asset(
         &self,
+        domain_name: &str,
         namespace_name: &str,
-        _format: AssetFormat,
         name: &str,
         new_name: &str,
     ) -> Result<(), StoreError> {
@@ -539,7 +626,7 @@ impl CatalogStore for PgCatalogStore {
         let n = client
             .execute(
                 queries::asset::RENAME,
-                &[&DEFAULT_DOMAIN, &namespace_name, &name, &new_name],
+                &[&domain_name, &namespace_name, &name, &new_name],
             )
             .await
             .map_err(|e| {
@@ -563,25 +650,24 @@ impl CatalogStore for PgCatalogStore {
         Ok(())
     }
 
-    async fn update_asset_properties(
+    async fn update_asset(
         &self,
+        domain_name: &str,
         namespace_name: &str,
-        format: AssetFormat,
         name: &str,
         comment: PatchField<String>,
         removals: &[String],
         updates: &HashMap<String, String>,
     ) -> Result<Asset, StoreError> {
         let client = self.get_client().await?;
-        let format_str = format.as_str();
 
         let existing = client
             .query_opt(
-                queries::asset::GET_TABULAR_BY_NAME,
-                &[&DEFAULT_DOMAIN, &namespace_name, &name, &format_str],
+                queries::asset::GET_BY_NAME,
+                &[&domain_name, &namespace_name, &name],
             )
             .await
-            .map_err(internal_err("update_asset_properties"))?
+            .map_err(internal_err("update_asset"))?
             .ok_or_else(|| StoreError::NotFound(format!("asset '{}'", name)))?;
 
         let mut asset = row_to_asset(&existing)?;
@@ -591,7 +677,6 @@ impl CatalogStore for PgCatalogStore {
             PatchField::Null => asset.comment = None,
             PatchField::Value(c) => asset.comment = Some(c),
         }
-
         for key in removals {
             asset.properties.remove(key);
         }
@@ -606,120 +691,376 @@ impl CatalogStore for PgCatalogStore {
                 &[&asset.comment, &props_json, &asset.id],
             )
             .await
-            .map_err(internal_err("update_asset_properties write"))?;
+            .map_err(internal_err("update_asset write"))?;
 
         row_to_asset(&row)
     }
+}
 
-    async fn load_version(
+// ── TabularStore ───────────────────────────────────────────────────────────
+
+#[async_trait]
+impl TabularStore for PgCatalogStore {
+    async fn create_tabular_asset(
         &self,
+        domain_name: &str,
         namespace_name: &str,
-        format: AssetFormat,
-        asset_name: &str,
-        version_id: i64,
-    ) -> Result<AssetVersionWithTabular, StoreError> {
-        let client = self.get_client().await?;
-        let format_str = format.as_str();
-        let version_key = version_id.to_string();
+        name: &str,
+        format: &str,
+        location: &str,
+        metadata_location: Option<&str>,
+        schema_snapshot: Option<serde_json::Value>,
+        properties: HashMap<String, String>,
+    ) -> Result<(Asset, TabularAsset), StoreError> {
+        let mut client = self.get_client().await?;
+        let props_json = props_to_json(&properties)?;
+        let asset_type = "table";
+        let comment: Option<String> = None;
 
-        let asset_row = client
+        let tx = client
+            .transaction()
+            .await
+            .map_err(internal_err("transaction start"))?;
+
+        let asset_row = tx
             .query_opt(
-                queries::asset::GET_TABULAR_BY_NAME,
-                &[&DEFAULT_DOMAIN, &namespace_name, &asset_name, &format_str],
+                queries::asset::CREATE,
+                &[
+                    &domain_name,
+                    &namespace_name,
+                    &name,
+                    &asset_type,
+                    &comment,
+                    &props_json,
+                ],
             )
             .await
-            .map_err(internal_err("load_version asset lookup"))?
-            .ok_or_else(|| StoreError::NotFound(format!("asset '{}'", asset_name)))?;
-        let asset_id: Uuid = try_get!(asset_row, "id");
+            .map_err(|e| {
+                if let Some(db_err) = e.as_db_error() {
+                    if db_err.code() == &SqlState::UNIQUE_VIOLATION {
+                        return StoreError::AlreadyExists(format!(
+                            "asset '{}' in namespace '{}'",
+                            name, namespace_name
+                        ));
+                    }
+                }
+                StoreError::Internal {
+                    msg: format!("create_tabular_asset failed: {}", &e),
+                    source: Some(Box::new(e)),
+                }
+            })?
+            .ok_or_else(|| StoreError::NotFound(format!("namespace '{}'", namespace_name)))?;
 
-        let version_row = client
-            .query_opt(queries::version::GET_BY_KEY, &[&asset_id, &version_key])
-            .await
-            .map_err(internal_err("load_version"))?
-            .ok_or_else(|| StoreError::NotFound(format!("version {}", version_id)))?;
+        let asset = row_to_asset(&asset_row)?;
 
-        let version = row_to_asset_version(&version_row)?;
-
-        // Need the tabular extension too. We have version.id; fetch the row
-        // directly rather than re-joining through the asset path.
-        let tav_row = client
+        let tabular_row = tx
             .query_one(
-                r#"
-                SELECT version_id, metadata_location, created_at AS tabular_created_at
-                FROM tabular_asset_versions
-                WHERE version_id = $1
-                "#,
-                &[&version.id],
+                queries::asset::CREATE_TABULAR,
+                &[
+                    &asset.id,
+                    &format,
+                    &location,
+                    &metadata_location,
+                    &schema_snapshot,
+                ],
             )
             .await
-            .map_err(internal_err("load_version tabular"))?;
-        let tabular_version = row_to_tabular_version(&tav_row)?;
+            .map_err(internal_err("create tabular_asset"))?;
 
-        Ok(AssetVersionWithTabular {
-            version,
-            tabular_version,
-        })
+        let tabular = row_to_tabular_asset(&tabular_row)?;
+
+        tx.commit()
+            .await
+            .map_err(internal_err("transaction commit"))?;
+
+        Ok((asset, tabular))
     }
 
-    async fn load_current_version(
+    async fn list_tabular_assets(
         &self,
+        domain_name: &str,
         namespace_name: &str,
-        format: AssetFormat,
-        asset_name: &str,
-    ) -> Result<Option<AssetVersionWithTabular>, StoreError> {
+        format: Option<&str>,
+    ) -> Result<Vec<(Asset, TabularAsset)>, StoreError> {
         let client = self.get_client().await?;
-        let format_str = format.as_str();
+        let rows = client
+            .query(
+                queries::asset::LIST_TABULAR_BY_NAMESPACE,
+                &[&domain_name, &namespace_name, &format],
+            )
+            .await
+            .map_err(internal_err("list_tabular_assets"))?;
 
+        rows.iter()
+            .map(|row| {
+                let asset = row_to_asset(row)?;
+                let tabular = row_to_tabular_asset(row)?;
+                Ok((asset, tabular))
+            })
+            .collect()
+    }
+
+    async fn get_tabular_asset(
+        &self,
+        domain_name: &str,
+        namespace_name: &str,
+        format: &str,
+        name: &str,
+    ) -> Result<(Asset, TabularAsset), StoreError> {
+        let client = self.get_client().await?;
+        let row = client
+            .query_opt(
+                queries::asset::GET_TABULAR_BY_NAME,
+                &[&domain_name, &namespace_name, &name, &format],
+            )
+            .await
+            .map_err(internal_err("get_tabular_asset"))?
+            .ok_or_else(|| StoreError::NotFound(format!("asset '{}'", name)))?;
+
+        let asset = row_to_asset(&row)?;
+        let tabular = row_to_tabular_asset(&row)?;
+        Ok((asset, tabular))
+    }
+
+    async fn get_tabular_asset_with_current_version(
+        &self,
+        domain_name: &str,
+        namespace_name: &str,
+        format: &str,
+        name: &str,
+    ) -> Result<
+        (
+            Asset,
+            TabularAsset,
+            Option<(AssetVersion, TabularAssetVersion)>,
+        ),
+        StoreError,
+    > {
+        let client = self.get_client().await?;
         let asset_row = client
             .query_opt(
                 queries::asset::GET_TABULAR_BY_NAME,
-                &[&DEFAULT_DOMAIN, &namespace_name, &asset_name, &format_str],
+                &[&domain_name, &namespace_name, &name, &format],
             )
             .await
-            .map_err(internal_err("load_current_version asset lookup"))?;
-        let asset_id: Uuid = match asset_row {
-            Some(row) => try_get!(row, "id"),
-            None => return Ok(None),
-        };
+            .map_err(internal_err("get_tabular_asset_with_current_version"))?
+            .ok_or_else(|| StoreError::NotFound(format!("asset '{}'", name)))?;
+
+        let asset = row_to_asset(&asset_row)?;
+        let tabular = row_to_tabular_asset(&asset_row)?;
 
         let version_row = client
-            .query_opt(queries::version::GET_LATEST_TABULAR, &[&asset_id])
+            .query_opt(queries::version::GET_LATEST_TABULAR, &[&asset.id])
             .await
-            .map_err(internal_err("load_current_version"))?;
+            .map_err(internal_err("load current version"))?;
 
-        match version_row {
+        let current_version = match version_row {
             Some(row) => {
                 let version = row_to_asset_version(&row)?;
                 let tabular_version = row_to_tabular_version(&row)?;
-                Ok(Some(AssetVersionWithTabular {
-                    version,
-                    tabular_version,
-                }))
+                Some((version, tabular_version))
             }
-            None => Ok(None),
-        }
+            None => None,
+        };
+
+        Ok((asset, tabular, current_version))
     }
+}
 
-    async fn list_versions(
+// ── VersionStore ───────────────────────────────────────────────────────────
+
+#[async_trait]
+impl VersionStore for PgCatalogStore {
+    async fn create_version(
         &self,
-        namespace_name: &str,
-        format: AssetFormat,
-        asset_name: &str,
-    ) -> Result<Vec<AssetVersionWithTabular>, StoreError> {
+        asset_id: Uuid,
+        version_key: &str,
+        version_order: Option<i64>,
+        previous_version_id: Option<Uuid>,
+        comment: Option<String>,
+        properties: HashMap<String, String>,
+    ) -> Result<AssetVersion, StoreError> {
         let client = self.get_client().await?;
-        let format_str = format.as_str();
+        let props_json = props_to_json(&properties)?;
 
-        let asset_row = client
-            .query_opt(
-                queries::asset::GET_TABULAR_BY_NAME,
-                &[&DEFAULT_DOMAIN, &namespace_name, &asset_name, &format_str],
+        let row = client
+            .query_one(
+                queries::version::CREATE,
+                &[
+                    &asset_id,
+                    &version_key,
+                    &version_order,
+                    &previous_version_id,
+                    &comment,
+                    &props_json,
+                ],
             )
             .await
-            .map_err(internal_err("list_versions asset lookup"))?
-            .ok_or_else(|| StoreError::NotFound(format!("asset '{}'", asset_name)))?;
-        let asset_id: Uuid = try_get!(asset_row, "id");
+            .map_err(|e| {
+                if let Some(db_err) = e.as_db_error() {
+                    if db_err.code() == &SqlState::UNIQUE_VIOLATION {
+                        return StoreError::AlreadyExists(format!(
+                            "version '{}' already exists",
+                            version_key
+                        ));
+                    }
+                    if db_err.code() == &SqlState::CHECK_VIOLATION {
+                        return StoreError::Conflict {
+                            msg: db_err.message().to_string(),
+                        };
+                    }
+                }
+                StoreError::Internal {
+                    msg: format!("create_version failed: {}", &e),
+                    source: Some(Box::new(e)),
+                }
+            })?;
 
-        // Join in the tabular extension columns so we can return paired rows.
+        row_to_asset_version(&row)
+    }
+
+    async fn get_version(
+        &self,
+        asset_id: Uuid,
+        version_key: &str,
+    ) -> Result<AssetVersion, StoreError> {
+        let client = self.get_client().await?;
+        let row = client
+            .query_opt(queries::version::GET_BY_KEY, &[&asset_id, &version_key])
+            .await
+            .map_err(internal_err("get_version"))?
+            .ok_or_else(|| StoreError::NotFound(format!("version '{}'", version_key)))?;
+
+        row_to_asset_version(&row)
+    }
+
+    async fn list_versions(&self, asset_id: Uuid) -> Result<Vec<AssetVersion>, StoreError> {
+        let client = self.get_client().await?;
+        let rows = client
+            .query(queries::version::LIST_BY_ASSET, &[&asset_id])
+            .await
+            .map_err(internal_err("list_versions"))?;
+
+        rows.iter().map(row_to_asset_version).collect()
+    }
+
+    async fn get_latest_version(&self, asset_id: Uuid) -> Result<Option<AssetVersion>, StoreError> {
+        let client = self.get_client().await?;
+        let row = client
+            .query_opt(queries::version::GET_LATEST, &[&asset_id])
+            .await
+            .map_err(internal_err("get_latest_version"))?;
+
+        row.as_ref().map(row_to_asset_version).transpose()
+    }
+}
+
+// ── TabularVersionStore ────────────────────────────────────────────────────
+
+#[async_trait]
+impl TabularVersionStore for PgCatalogStore {
+    async fn create_tabular_version(
+        &self,
+        asset_id: Uuid,
+        version_key: &str,
+        version_order: Option<i64>,
+        previous_version_id: Option<Uuid>,
+        metadata_location: &str,
+        comment: Option<String>,
+        properties: HashMap<String, String>,
+    ) -> Result<(AssetVersion, TabularAssetVersion), StoreError> {
+        let mut client = self.get_client().await?;
+        let props_json = props_to_json(&properties)?;
+
+        let tx = client
+            .transaction()
+            .await
+            .map_err(internal_err("transaction start"))?;
+
+        let version_row = tx
+            .query_one(
+                queries::version::CREATE,
+                &[
+                    &asset_id,
+                    &version_key,
+                    &version_order,
+                    &previous_version_id,
+                    &comment,
+                    &props_json,
+                ],
+            )
+            .await
+            .map_err(|e| {
+                if let Some(db_err) = e.as_db_error() {
+                    if db_err.code() == &SqlState::UNIQUE_VIOLATION {
+                        return StoreError::AlreadyExists(format!(
+                            "version '{}' already exists",
+                            version_key
+                        ));
+                    }
+                    if db_err.code() == &SqlState::CHECK_VIOLATION {
+                        return StoreError::Conflict {
+                            msg: db_err.message().to_string(),
+                        };
+                    }
+                }
+                StoreError::Internal {
+                    msg: format!("create_tabular_version failed: {}", &e),
+                    source: Some(Box::new(e)),
+                }
+            })?;
+
+        let version = row_to_asset_version(&version_row)?;
+
+        let tav_row = tx
+            .query_one(
+                queries::version::CREATE_TABULAR,
+                &[&version.id, &metadata_location],
+            )
+            .await
+            .map_err(internal_err("create tabular_asset_version"))?;
+        let tabular_version = row_to_tabular_version(&tav_row)?;
+
+        tx.commit()
+            .await
+            .map_err(internal_err("transaction commit"))?;
+
+        Ok((version, tabular_version))
+    }
+
+    async fn get_tabular_version(
+        &self,
+        asset_id: Uuid,
+        version_key: &str,
+    ) -> Result<(AssetVersion, TabularAssetVersion), StoreError> {
+        let client = self.get_client().await?;
+        let row = client
+            .query_opt(
+                r#"
+                SELECT av.id, av.asset_id, av.version_key, av.version_order, av.previous_version_id,
+                       av.comment, av.properties, av.created_at,
+                       tav.version_id, tav.metadata_location,
+                       tav.created_at AS tabular_created_at
+                FROM asset_versions av
+                JOIN tabular_asset_versions tav ON av.id = tav.version_id
+                WHERE av.asset_id = $1 AND av.version_key = $2
+                "#,
+                &[&asset_id, &version_key],
+            )
+            .await
+            .map_err(internal_err("get_tabular_version"))?
+            .ok_or_else(|| StoreError::NotFound(format!("version '{}'", version_key)))?;
+
+        let version = row_to_asset_version(&row)?;
+        let tabular_version = row_to_tabular_version(&row)?;
+        Ok((version, tabular_version))
+    }
+
+    async fn list_tabular_versions(
+        &self,
+        asset_id: Uuid,
+    ) -> Result<Vec<(AssetVersion, TabularAssetVersion)>, StoreError> {
+        let client = self.get_client().await?;
         let rows = client
             .query(
                 r#"
@@ -735,128 +1076,48 @@ impl CatalogStore for PgCatalogStore {
                 &[&asset_id],
             )
             .await
-            .map_err(internal_err("list_versions"))?;
+            .map_err(internal_err("list_tabular_versions"))?;
 
         rows.iter()
             .map(|row| {
                 let version = row_to_asset_version(row)?;
                 let tabular_version = row_to_tabular_version(row)?;
-                Ok(AssetVersionWithTabular {
-                    version,
-                    tabular_version,
-                })
+                Ok((version, tabular_version))
             })
             .collect()
     }
 
-    async fn create_version(
+    async fn get_latest_tabular_version(
         &self,
-        namespace_name: &str,
-        format: AssetFormat,
-        asset_name: &str,
-        version_id: i64,
-        metadata_location: String,
-        previous_version_id: Option<i64>,
-    ) -> Result<AssetVersionWithTabular, StoreError> {
-        let mut client = self.get_client().await?;
-        let format_str = format.as_str();
-        let version_key = version_id.to_string();
-        let empty_props = serde_json::json!({});
-        let comment: Option<String> = None;
-
-        let tx = client
-            .transaction()
+        asset_id: Uuid,
+    ) -> Result<Option<(AssetVersion, TabularAssetVersion)>, StoreError> {
+        let client = self.get_client().await?;
+        let row = client
+            .query_opt(queries::version::GET_LATEST_TABULAR, &[&asset_id])
             .await
-            .map_err(internal_err("transaction start"))?;
+            .map_err(internal_err("get_latest_tabular_version"))?;
 
-        let asset_row = tx
-            .query_opt(
-                queries::asset::GET_TABULAR_BY_NAME,
-                &[&DEFAULT_DOMAIN, &namespace_name, &asset_name, &format_str],
-            )
-            .await
-            .map_err(internal_err("asset lookup"))?
-            .ok_or_else(|| StoreError::NotFound(format!("asset '{}'", asset_name)))?;
-        let asset_id: Uuid = try_get!(asset_row, "id");
-
-        let previous_version_uuid: Option<Uuid> = match previous_version_id {
-            Some(prev_order) => {
-                let prev_row = tx
-                    .query_opt(
-                        "SELECT id FROM asset_versions WHERE asset_id = $1 AND version_order = $2",
-                        &[&asset_id, &prev_order],
-                    )
-                    .await
-                    .map_err(internal_err("previous version lookup"))?
-                    .ok_or_else(|| StoreError::Conflict {
-                        msg: format!("previous version {} not found", prev_order),
-                    })?;
-                Some(try_get!(prev_row, "id"))
+        match row {
+            Some(r) => {
+                let version = row_to_asset_version(&r)?;
+                let tabular_version = row_to_tabular_version(&r)?;
+                Ok(Some((version, tabular_version)))
             }
-            None => None,
-        };
-
-        let version_row = tx
-            .query_one(
-                queries::version::CREATE,
-                &[
-                    &asset_id,
-                    &version_key,
-                    &version_id,
-                    &previous_version_uuid,
-                    &comment,
-                    &empty_props,
-                ],
-            )
-            .await
-            .map_err(|e| {
-                if let Some(db_err) = e.as_db_error() {
-                    if db_err.code() == &SqlState::UNIQUE_VIOLATION {
-                        return StoreError::AlreadyExists(format!(
-                            "version {} already exists",
-                            version_id
-                        ));
-                    }
-                    if db_err.code() == &SqlState::CHECK_VIOLATION {
-                        return StoreError::Conflict {
-                            msg: db_err.message().to_string(),
-                        };
-                    }
-                }
-                StoreError::Internal {
-                    msg: format!("create_version failed: {}", &e),
-                    source: Some(Box::new(e)),
-                }
-            })?;
-
-        let version = row_to_asset_version(&version_row)?;
-
-        let tav_row = tx
-            .query_one(
-                queries::version::CREATE_TABULAR,
-                &[&version.id, &metadata_location],
-            )
-            .await
-            .map_err(internal_err("create tabular_asset_version"))?;
-
-        tx.commit()
-            .await
-            .map_err(internal_err("transaction commit"))?;
-
-        let tabular_version = row_to_tabular_version(&tav_row)?;
-
-        Ok(AssetVersionWithTabular {
-            version,
-            tabular_version,
-        })
+            None => Ok(None),
+        }
     }
+}
 
-    #[allow(clippy::too_many_arguments)]
+// ── CasCommitStore ─────────────────────────────────────────────────────────
+
+#[async_trait]
+impl CasCommitStore for PgCatalogStore {
     async fn cas_update_metadata_location(
         &self,
+        domain_name: &str,
         namespace_name: &str,
         asset_name: &str,
-        format: AssetFormat,
+        format: &str,
         expected_location: &str,
         new_location: &str,
         new_schema_snapshot: Option<serde_json::Value>,
@@ -864,25 +1125,22 @@ impl CatalogStore for PgCatalogStore {
         property_updates: &HashMap<String, String>,
     ) -> Result<(), StoreError> {
         let mut client = self.get_client().await?;
-        let format_str = format.as_str();
 
         let tx = client
             .transaction()
             .await
             .map_err(internal_err("transaction start"))?;
 
-        // Step 1: CAS update tabular_assets.metadata_location. Zero rows
-        // affected ⇒ optimistic concurrency conflict (Iceberg CAS commit).
         let cas_row = tx
             .query_opt(
                 queries::asset::CAS_UPDATE_METADATA_LOCATION,
                 &[
                     &new_location,
                     &new_schema_snapshot,
-                    &DEFAULT_DOMAIN,
+                    &domain_name,
                     &namespace_name,
                     &asset_name,
-                    &format_str,
+                    &format,
                     &expected_location,
                 ],
             )
@@ -892,10 +1150,6 @@ impl CatalogStore for PgCatalogStore {
         let asset_id: Uuid = match cas_row {
             Some(row) => try_get!(row, "asset_id"),
             None => {
-                // Either the asset does not exist or the metadata_location
-                // does not match `expected_location`. The Iceberg adapter
-                // interprets Conflict as a CommitFailedException; NotFound
-                // semantics could be distinguished in a follow-up if needed.
                 return Err(StoreError::Conflict {
                     msg: format!(
                         "metadata location for '{}' has been modified by another commit (expected '{}')",
@@ -905,7 +1159,6 @@ impl CatalogStore for PgCatalogStore {
             }
         };
 
-        // Step 2: merge property delta into assets row.
         let existing_props_row = tx
             .query_one(
                 "SELECT properties FROM assets WHERE id = $1 AND deleted_at IS NULL",
@@ -941,25 +1194,30 @@ impl CatalogStore for PgCatalogStore {
 
         Ok(())
     }
+}
 
+// ── UnifiedQueryStore ──────────────────────────────────────────────────────
+
+#[async_trait]
+impl UnifiedQueryStore for PgCatalogStore {
     async fn list_assets_unified(
         &self,
+        domain_name: &str,
         namespace_name: &str,
-        format: Option<AssetFormat>,
-        name: Option<&str>,
+        format: Option<&str>,
+        name_filter: Option<&str>,
         offset: i64,
         limit: i32,
-    ) -> Result<Vec<(Asset, TabularAsset)>, StoreError> {
+    ) -> Result<Vec<(Asset, Option<TabularAsset>)>, StoreError> {
         let client = self.get_client().await?;
-        let format_str = format.map(|f| f.as_str());
         let rows = client
             .query(
                 queries::asset::LIST_UNIFIED,
                 &[
-                    &DEFAULT_DOMAIN,
+                    &domain_name,
                     &namespace_name,
-                    &format_str,
-                    &name,
+                    &format,
+                    &name_filter,
                     &(limit as i64),
                     &offset,
                 ],
@@ -967,45 +1225,33 @@ impl CatalogStore for PgCatalogStore {
             .await
             .map_err(internal_err("list_assets_unified"))?;
 
-        // Phase 2: the V2 trait surface returns `Vec<(Asset, TabularAsset)>`;
-        // LEFT JOIN rows for non-tabular assets surface as `None` and are
-        // skipped. Today every active asset is tabular so this filter is a
-        // no-op in practice, but it preserves V2 semantics if a future asset
-        // type slips into the namespace before Phase 3 lands the
-        // `Option<TabularAsset>` trait return shape.
-        let mut out = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let asset = row_to_asset(row)?;
-            if let Some(tabular) = row_to_tabular_asset_optional(row)? {
-                out.push((asset, tabular));
-            }
-        }
-        Ok(out)
+        rows.iter()
+            .map(|row| {
+                let asset = row_to_asset(row)?;
+                let tabular = row_to_tabular_asset_optional(row)?;
+                Ok((asset, tabular))
+            })
+            .collect()
     }
 
     async fn get_asset_unified(
         &self,
+        domain_name: &str,
         namespace_name: &str,
         name: &str,
-        _format: AssetFormat,
-    ) -> Result<(Asset, TabularAsset), StoreError> {
-        // Phase 2: `_format` is ignored — V3 active asset names are unique
-        // within a namespace, so a single name resolves to at most one row
-        // regardless of format. Endpoint-level format filtering is the
-        // adapter's job (Phase 3).
+    ) -> Result<(Asset, Option<TabularAsset>), StoreError> {
         let client = self.get_client().await?;
         let row = client
             .query_opt(
                 queries::asset::GET_UNIFIED,
-                &[&DEFAULT_DOMAIN, &namespace_name, &name],
+                &[&domain_name, &namespace_name, &name],
             )
             .await
             .map_err(internal_err("get_asset_unified"))?
             .ok_or_else(|| StoreError::NotFound(format!("asset '{}'", name)))?;
 
         let asset = row_to_asset(&row)?;
-        let tabular = row_to_tabular_asset_optional(&row)?
-            .ok_or_else(|| StoreError::NotFound(format!("tabular asset '{}'", name)))?;
+        let tabular = row_to_tabular_asset_optional(&row)?;
         Ok((asset, tabular))
     }
 }

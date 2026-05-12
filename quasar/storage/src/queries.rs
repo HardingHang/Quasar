@@ -208,7 +208,8 @@ pub mod asset {
     pub const CREATE_TABULAR: &str = r#"
         INSERT INTO tabular_assets (asset_id, format, location, metadata_location, schema_snapshot)
         VALUES ($1, $2, $3, $4, $5)
-        RETURNING asset_id, format, location, metadata_location, schema_snapshot, created_at, updated_at
+        RETURNING asset_id, format, location, metadata_location, schema_snapshot,
+                  created_at AS tabular_created_at, updated_at AS tabular_updated_at
     "#;
 
     /// Update comment and properties on the active asset, returning the new row.

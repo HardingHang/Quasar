@@ -16,5 +16,8 @@ pub use models::{
     Asset, AssetFormat, AssetType, AssetVersion, AssetVersionWithTabular, AssetWithTabular, Domain,
     Namespace, PatchField, TabularAsset, TabularAssetVersion,
 };
-pub use store::CatalogStore;
+pub use store::{
+    AssetStore, CasCommitStore, CatalogStore, DomainPatch, DomainStore, NamespaceStore,
+    TabularStore, TabularVersionStore, UnifiedQueryStore, VersionStore,
+};
 pub use validation::validate_name;

@@ -3,13 +3,14 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use quasar_core::{AssetFormat, CatalogStore};
+use quasar_core::{CatalogStore, StoreError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::error::{store_error_to_lance_table, LanceError, ProblemDetails};
 use super::LanceConfig;
+use crate::DEFAULT_DOMAIN;
 use quasar_core::validate_name;
 
 // ── Path Parsing ───────────────────────────────────────────
@@ -96,11 +97,12 @@ pub async fn declare_table(
         properties.insert(format!("storage_{}", key), value.clone());
     }
 
-    let asset = store
-        .create_asset(
+    let (asset, _tabular) = store
+        .create_tabular_asset(
+            DEFAULT_DOMAIN,
             namespace,
-            AssetFormat::Lance,
             table,
+            "lance",
             &location,
             None,
             None,
@@ -129,7 +131,7 @@ pub async fn describe_table(
 
     // Use single query to get asset and current version
     let (asset, tabular, current_version) = store
-        .get_asset_with_current_version(namespace, AssetFormat::Lance, table)
+        .get_tabular_asset_with_current_version(DEFAULT_DOMAIN, namespace, "lance", table)
         .await
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
 
@@ -138,7 +140,7 @@ pub async fn describe_table(
         Json(DescribeTableResponse {
             name: asset.name,
             location: tabular.location,
-            current_version: current_version.and_then(|v| v.version.version_order),
+            current_version: current_version.and_then(|(v, _)| v.version_order),
             created_at: asset.created_at.to_rfc3339(),
         }),
     ))
@@ -159,11 +161,12 @@ pub async fn register_table(
 
     let properties = req.options;
 
-    let asset = store
-        .create_asset(
+    let (asset, _tabular) = store
+        .create_tabular_asset(
+            DEFAULT_DOMAIN,
             namespace,
-            AssetFormat::Lance,
             table,
+            "lance",
             &req.location,
             None,
             None,
@@ -191,7 +194,7 @@ pub async fn deregister_table(
     let (namespace, table) = parse_table_id(&id)?;
 
     store
-        .drop_asset(namespace, AssetFormat::Lance, table)
+        .drop_asset(DEFAULT_DOMAIN, namespace, table)
         .await
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
 
@@ -207,7 +210,7 @@ pub async fn drop_table(
     let (namespace, table) = parse_table_id(&id)?;
 
     store
-        .drop_asset(namespace, AssetFormat::Lance, table)
+        .drop_asset(DEFAULT_DOMAIN, namespace, table)
         .await
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
 
@@ -222,10 +225,17 @@ pub async fn table_exists(
     let instance = format!("/lance/v1/table/{}/exists", id);
     let (namespace, table) = parse_table_id(&id)?;
 
-    let exists = store
-        .asset_exists(namespace, AssetFormat::Lance, table)
+    // V3 stores the format on `tabular_assets.format`; an Iceberg-format
+    // asset under the same name still satisfies `asset_exists`, so we
+    // ask the format-filtered lookup instead.
+    let exists = match store
+        .get_tabular_asset(DEFAULT_DOMAIN, namespace, "lance", table)
         .await
-        .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+    {
+        Ok(_) => true,
+        Err(StoreError::NotFound(_)) => false,
+        Err(e) => return Err(store_error_to_lance_table(e, &instance).to_problem_details()),
+    };
 
     Ok((StatusCode::OK, Json(TableExistsResponse { exists })))
 }
@@ -246,7 +256,7 @@ pub async fn rename_table(
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
 
     store
-        .rename_asset(namespace, AssetFormat::Lance, table, &req.new_name)
+        .rename_asset(DEFAULT_DOMAIN, namespace, table, &req.new_name)
         .await
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
 

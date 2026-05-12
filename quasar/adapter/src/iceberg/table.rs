@@ -3,7 +3,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use quasar_core::{AssetFormat, CatalogStore, MetricsState, StoreError};
+use quasar_core::{CatalogStore, MetricsState, StoreError};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,6 +17,7 @@ use super::error::{store_error_to_iceberg_table, IcebergError};
 use super::table_metadata::TableMetadata;
 use super::IcebergConfig;
 use crate::object_store_util::{object_exists, read_json, s3_url_to_path, write_json};
+use crate::DEFAULT_DOMAIN;
 use quasar_core::validate_name;
 
 // ── Object Store Helpers ───────────────────────────────────
@@ -179,7 +180,7 @@ pub async fn list_tables(
     let _ = query; // pagination placeholder for MVP
 
     let assets = store
-        .list_assets(&ns, AssetFormat::Iceberg)
+        .list_tabular_assets(DEFAULT_DOMAIN, &ns, Some("iceberg"))
         .await
         .map_err(store_error_to_iceberg_table)?;
 
@@ -188,9 +189,9 @@ pub async fn list_tables(
         Json(ListTablesResponse {
             identifiers: assets
                 .into_iter()
-                .map(|a| TableIdentifier {
+                .map(|(asset, _)| TableIdentifier {
                     namespace: vec![ns.clone()],
-                    name: a.asset.name,
+                    name: asset.name,
                 })
                 .collect(),
             next_page_token: None,
@@ -229,11 +230,12 @@ pub async fn create_table(
     // Write initial metadata.json to object store
     write_metadata_to_store(&metadata_location, &metadata_json, &config).await?;
 
-    let _asset = store
-        .create_asset(
+    let _ = store
+        .create_tabular_asset(
+            DEFAULT_DOMAIN,
             &ns,
-            AssetFormat::Iceberg,
             &req.name,
+            "iceberg",
             &location,
             Some(&metadata_location),
             Some(metadata_json),
@@ -265,7 +267,7 @@ pub async fn load_table(
     Path((ns, table)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, IcebergError> {
     let (asset, tabular) = store
-        .get_asset_with_tabular(&ns, AssetFormat::Iceberg, &table)
+        .get_tabular_asset(DEFAULT_DOMAIN, &ns, "iceberg", &table)
         .await
         .map_err(store_error_to_iceberg_table)?;
 
@@ -301,7 +303,7 @@ pub async fn drop_table(
     Path((ns, table)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, IcebergError> {
     store
-        .drop_asset(&ns, AssetFormat::Iceberg, &table)
+        .drop_asset(DEFAULT_DOMAIN, &ns, &table)
         .await
         .map_err(store_error_to_iceberg_table)?;
 
@@ -313,10 +315,14 @@ pub async fn table_exists(
     State(store): State<Arc<dyn CatalogStore>>,
     Path((ns, table)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, IcebergError> {
-    let exists = store
-        .asset_exists(&ns, AssetFormat::Iceberg, &table)
+    let exists = match store
+        .get_tabular_asset(DEFAULT_DOMAIN, &ns, "iceberg", &table)
         .await
-        .map_err(store_error_to_iceberg_table)?;
+    {
+        Ok(_) => true,
+        Err(StoreError::NotFound(_)) => false,
+        Err(e) => return Err(store_error_to_iceberg_table(e)),
+    };
 
     if exists {
         Ok(StatusCode::OK)
@@ -358,8 +364,8 @@ pub async fn rename_table(
 
     store
         .rename_asset(
+            DEFAULT_DOMAIN,
             src_ns,
-            AssetFormat::Iceberg,
             &req.source.name,
             &req.destination.name,
         )
@@ -381,7 +387,7 @@ pub async fn commit_table(
     let metrics = metrics.map(|e| e.0);
     // 1. Load the current asset with tabular detail
     let (_asset, tabular) = store
-        .get_asset_with_tabular(&ns, AssetFormat::Iceberg, &table)
+        .get_tabular_asset(DEFAULT_DOMAIN, &ns, "iceberg", &table)
         .await
         .map_err(store_error_to_iceberg_table)?;
 
@@ -450,9 +456,10 @@ pub async fn commit_table(
     // 11. CAS update via storage layer (atomically updates metadata_location, schema_snapshot, and properties)
     store
         .cas_update_metadata_location(
+            DEFAULT_DOMAIN,
             &ns,
             &table,
-            AssetFormat::Iceberg,
+            "iceberg",
             &metadata_location,
             &new_metadata_location,
             Some(new_schema_snapshot.clone()),

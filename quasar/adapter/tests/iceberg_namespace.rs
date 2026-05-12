@@ -7,7 +7,8 @@ use deadpool_postgres::{Pool, Runtime};
 use http_body_util::BodyExt;
 use postgresql_embedded::PostgreSQL;
 use quasar_adapter::iceberg;
-use quasar_core::{AssetFormat, CatalogStore};
+use quasar_core::CatalogStore;
+use quasar_core::{NamespaceStore, TabularStore};
 use quasar_storage::PgCatalogStore;
 use serde_json::Value;
 use serial_test::serial;
@@ -83,7 +84,7 @@ async fn body_json(response: axum::response::Response) -> Value {
 
 async fn create_namespace(store: &PgCatalogStore, name: &str) {
     store
-        .create_namespace(name, None, HashMap::new())
+        .create_namespace("default", name, None, HashMap::new())
         .await
         .unwrap();
 }
@@ -240,10 +241,11 @@ async fn test_drop_non_empty_namespace() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Iceberg,
             "users",
+            "iceberg",
             "s3://bucket/warehouse/prod/users",
             None,
             None,
@@ -276,7 +278,10 @@ async fn test_update_namespace_properties() {
     let mut props = HashMap::new();
     props.insert("owner".to_string(), "team-a".to_string());
     props.insert("env".to_string(), "prod".to_string());
-    store.create_namespace("prod", None, props).await.unwrap();
+    store
+        .create_namespace("default", "prod", None, props)
+        .await
+        .unwrap();
 
     let app = test_app(store);
 

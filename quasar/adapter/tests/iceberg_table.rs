@@ -7,7 +7,8 @@ use deadpool_postgres::{Pool, Runtime};
 use http_body_util::BodyExt;
 use postgresql_embedded::PostgreSQL;
 use quasar_adapter::iceberg;
-use quasar_core::{AssetFormat, CatalogStore};
+use quasar_core::CatalogStore;
+use quasar_core::{NamespaceStore, TabularStore};
 use quasar_storage::PgCatalogStore;
 use serde_json::Value;
 use serial_test::serial;
@@ -83,7 +84,7 @@ async fn body_json(response: axum::response::Response) -> Value {
 
 async fn create_namespace(store: &PgCatalogStore, name: &str) {
     store
-        .create_namespace(name, None, HashMap::new())
+        .create_namespace("default", name, None, HashMap::new())
         .await
         .unwrap();
 }
@@ -149,10 +150,11 @@ async fn test_create_duplicate_returns_409() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Iceberg,
             "users",
+            "iceberg",
             "s3://bucket/warehouse/prod/users",
             None,
             None,
@@ -186,10 +188,11 @@ async fn test_list_tables() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Iceberg,
             "users",
+            "iceberg",
             "s3://bucket/warehouse/prod/users",
             None,
             None,
@@ -198,10 +201,11 @@ async fn test_list_tables() {
         .await
         .unwrap();
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Iceberg,
             "orders",
+            "iceberg",
             "s3://bucket/warehouse/prod/orders",
             None,
             None,
@@ -264,10 +268,11 @@ async fn test_drop_table() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Iceberg,
             "users",
+            "iceberg",
             "s3://bucket/warehouse/prod/users",
             None,
             None,
@@ -311,10 +316,11 @@ async fn test_table_exists() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Iceberg,
             "users",
+            "iceberg",
             "s3://bucket/warehouse/prod/users",
             None,
             None,
@@ -358,10 +364,11 @@ async fn test_rename_table() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Iceberg,
             "users",
+            "iceberg",
             "s3://bucket/warehouse/prod/users",
             None,
             None,
@@ -421,10 +428,11 @@ async fn test_rename_cross_namespace() {
     create_namespace(&store, "prod").await;
     create_namespace(&store, "staging").await;
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Iceberg,
             "users",
+            "iceberg",
             "s3://bucket/warehouse/prod/users",
             None,
             None,
@@ -508,10 +516,11 @@ async fn test_rename_table_destination_already_exists() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Iceberg,
             "users",
+            "iceberg",
             "s3://bucket/warehouse/prod/users",
             None,
             None,
@@ -520,10 +529,11 @@ async fn test_rename_table_destination_already_exists() {
         .await
         .unwrap();
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Iceberg,
             "customers",
+            "iceberg",
             "s3://bucket/warehouse/prod/customers",
             None,
             None,

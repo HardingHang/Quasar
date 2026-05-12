@@ -7,7 +7,8 @@ use deadpool_postgres::{Pool, Runtime};
 use http_body_util::BodyExt;
 use postgresql_embedded::PostgreSQL;
 use quasar_adapter::iceberg;
-use quasar_core::{AssetFormat, CatalogStore};
+use quasar_core::CatalogStore;
+use quasar_core::{CasCommitStore, NamespaceStore, TabularStore};
 use quasar_storage::PgCatalogStore;
 use serde_json::Value;
 use serial_test::serial;
@@ -83,7 +84,7 @@ async fn body_json(response: axum::response::Response) -> Value {
 
 async fn create_namespace(store: &PgCatalogStore, name: &str) {
     store
-        .create_namespace(name, None, HashMap::new())
+        .create_namespace("default", name, None, HashMap::new())
         .await
         .unwrap();
 }
@@ -161,10 +162,11 @@ async fn test_commit_conflict() {
 
     // Create table directly through store so we can manipulate metadata_location
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Iceberg,
             "users",
+            "iceberg",
             "s3://bucket/warehouse/prod/users",
             Some("s3://bucket/warehouse/prod/users/metadata/00001-uuid.metadata.json"),
             Some(serde_json::json!({
@@ -237,10 +239,11 @@ async fn test_commit_requirement_failure() {
 
     // Create table with an existing snapshot
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Iceberg,
             "users",
+            "iceberg",
             "s3://bucket/warehouse/prod/users",
             Some("s3://bucket/warehouse/prod/users/metadata/00001-uuid.metadata.json"),
             Some(serde_json::json!({
@@ -410,10 +413,11 @@ async fn test_commit_cas_conflict_simulated() {
 
     // Create table directly through store with a known metadata_location
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Iceberg,
             "users",
+            "iceberg",
             "s3://bucket/warehouse/prod/users",
             Some("s3://bucket/warehouse/prod/users/metadata/00001-uuid.metadata.json"),
             Some(serde_json::json!({
@@ -444,9 +448,10 @@ async fn test_commit_cas_conflict_simulated() {
     // First CAS commit succeeds: expected 00001 matches DB
     store
         .cas_update_metadata_location(
+            "default",
             "prod",
             "users",
-            AssetFormat::Iceberg,
+            "iceberg",
             "s3://bucket/warehouse/prod/users/metadata/00001-uuid.metadata.json",
             "s3://bucket/warehouse/prod/users/metadata/00002-uuid.metadata.json",
             None,
@@ -459,9 +464,10 @@ async fn test_commit_cas_conflict_simulated() {
     // Second CAS commit fails: expected 00001 no longer matches DB (now 00002)
     let err = store
         .cas_update_metadata_location(
+            "default",
             "prod",
             "users",
-            AssetFormat::Iceberg,
+            "iceberg",
             "s3://bucket/warehouse/prod/users/metadata/00001-uuid.metadata.json",
             "s3://bucket/warehouse/prod/users/metadata/00003-uuid.metadata.json",
             None,
@@ -583,10 +589,11 @@ async fn test_assert_ref_snapshot_id_custom_branch() {
 
     // Create table with a custom branch "staging"
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Iceberg,
             "users",
+            "iceberg",
             "s3://bucket/warehouse/prod/users",
             Some("s3://bucket/warehouse/prod/users/metadata/00001-uuid.metadata.json"),
             Some(serde_json::json!({
@@ -653,10 +660,11 @@ async fn test_assert_ref_snapshot_id_custom_branch_fail() {
 
     // Create table with a custom branch "staging"
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Iceberg,
             "users",
+            "iceberg",
             "s3://bucket/warehouse/prod/users",
             Some("s3://bucket/warehouse/prod/users/metadata/00001-uuid.metadata.json"),
             Some(serde_json::json!({
@@ -728,10 +736,11 @@ async fn test_assert_table_uuid_failure() {
 
     // Create table with known UUID
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Iceberg,
             "users",
+            "iceberg",
             "s3://bucket/warehouse/prod/users",
             Some("s3://bucket/warehouse/prod/users/metadata/00001-uuid.metadata.json"),
             Some(serde_json::json!({

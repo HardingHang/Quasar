@@ -1,9 +1,10 @@
-use quasar_core::{AssetFormat, AssetVersionWithTabular, CatalogStore};
+use quasar_core::{AssetFormat, AssetVersion, CatalogStore, TabularAssetVersion};
 
 use super::dto::CurrentVersionResponse;
 use super::error::{UnifiedError, UnifiedErrorCode};
 
 use super::UnifiedConfig;
+use crate::DEFAULT_DOMAIN;
 
 /// Get the current version for an asset, format-specific.
 #[allow(clippy::too_many_arguments)]
@@ -19,12 +20,15 @@ pub async fn get_current_version(
 ) -> Result<Option<CurrentVersionResponse>, UnifiedError> {
     match format {
         AssetFormat::Lance => {
-            get_lance_current_version(store, namespace, name, format, instance, request_id).await
+            get_lance_current_version(store, namespace, name, instance, request_id).await
         }
         #[cfg(feature = "iceberg")]
         AssetFormat::Iceberg => get_iceberg_current_version(config, metadata_location).await,
         #[cfg(not(feature = "iceberg"))]
-        AssetFormat::Iceberg => Ok(None),
+        AssetFormat::Iceberg => {
+            let _ = (config, metadata_location);
+            Ok(None)
+        }
     }
 }
 
@@ -34,12 +38,26 @@ async fn get_lance_current_version(
     store: &dyn CatalogStore,
     namespace: &str,
     name: &str,
-    format: AssetFormat,
     instance: &str,
     request_id: &str,
 ) -> Result<Option<CurrentVersionResponse>, UnifiedError> {
+    // Resolve asset id (lance format) and then ask the version store for
+    // the latest tabular version; V3 splits the lookup from the version
+    // operation.
+    let (asset, _) = store
+        .get_tabular_asset(DEFAULT_DOMAIN, namespace, "lance", name)
+        .await
+        .map_err(|e| {
+            UnifiedError::new(
+                UnifiedErrorCode::InternalError,
+                format!("failed to resolve lance asset: {}", e),
+                instance,
+                request_id,
+            )
+        })?;
+
     let version = store
-        .load_current_version(namespace, format, name)
+        .get_latest_tabular_version(asset.id)
         .await
         .map_err(|e| {
             UnifiedError::new(
@@ -53,20 +71,20 @@ async fn get_lance_current_version(
     Ok(version.map(lance_version_to_response))
 }
 
-fn lance_version_to_response(v: AssetVersionWithTabular) -> CurrentVersionResponse {
+fn lance_version_to_response(pair: (AssetVersion, TabularAssetVersion)) -> CurrentVersionResponse {
+    let (version, tabular_version) = pair;
     CurrentVersionResponse::Lance {
-        version_id: v
-            .version
+        version_id: version
             .version_order
-            .unwrap_or_else(|| v.version.version_key.parse().unwrap_or(0)),
-        metadata_location: v.tabular_version.metadata_location,
+            .unwrap_or_else(|| version.version_key.parse().unwrap_or(0)),
+        metadata_location: tabular_version.metadata_location,
         // TODO(v3-phase3): V3 model stores previous_version_id as Uuid on
         // AssetVersion (not as i64 on tabular_version). The Lance protocol
         // response expects an i64 version number. Until the storage layer
         // exposes a Uuid -> version_order resolver, expose None and rely
         // on the explicit version chain that V3 will surface from queries.
         previous_version_id: None,
-        timestamp: v.version.created_at.to_rfc3339(),
+        timestamp: version.created_at.to_rfc3339(),
     }
 }
 

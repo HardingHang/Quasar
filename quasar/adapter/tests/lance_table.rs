@@ -7,7 +7,8 @@ use deadpool_postgres::{Pool, Runtime};
 use http_body_util::BodyExt;
 use postgresql_embedded::PostgreSQL;
 use quasar_adapter::lance;
-use quasar_core::{AssetFormat, CatalogStore};
+use quasar_core::CatalogStore;
+use quasar_core::{NamespaceStore, TabularStore};
 use quasar_storage::PgCatalogStore;
 use serde_json::Value;
 use serial_test::serial;
@@ -83,7 +84,7 @@ async fn body_json(response: axum::response::Response) -> Value {
 
 async fn create_namespace(store: &PgCatalogStore, name: &str) {
     store
-        .create_namespace(name, None, HashMap::new())
+        .create_namespace("default", name, None, HashMap::new())
         .await
         .unwrap();
 }
@@ -176,10 +177,11 @@ async fn test_list_tables() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Lance,
             "t1",
+            "lance",
             "lance://prod/t1",
             None,
             None,
@@ -188,10 +190,11 @@ async fn test_list_tables() {
         .await
         .unwrap();
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Lance,
             "t2",
+            "lance",
             "lance://prod/t2",
             None,
             None,
@@ -229,10 +232,11 @@ async fn test_table_exists() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Lance,
             "users",
+            "lance",
             "lance://prod/users",
             None,
             None,
@@ -308,10 +312,11 @@ async fn test_deregister_table() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Lance,
             "users",
+            "lance",
             "lance://prod/users",
             None,
             None,
@@ -359,10 +364,11 @@ async fn test_drop_table() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Lance,
             "users",
+            "lance",
             "lance://prod/users",
             None,
             None,
@@ -409,10 +415,11 @@ async fn test_rename_table() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Lance,
             "users",
+            "lance",
             "lance://prod/users",
             None,
             None,
@@ -521,10 +528,11 @@ async fn test_register_duplicate_returns_409() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Lance,
             "users",
+            "lance",
             "lance://prod/users",
             None,
             None,
@@ -561,10 +569,11 @@ async fn test_rename_to_existing_name_returns_409() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Lance,
             "users",
+            "lance",
             "lance://prod/users",
             None,
             None,
@@ -573,10 +582,11 @@ async fn test_rename_to_existing_name_returns_409() {
         .await
         .unwrap();
     store
-        .create_asset(
+        .create_tabular_asset(
+            "default",
             "prod",
-            AssetFormat::Lance,
             "customers",
+            "lance",
             "lance://prod/customers",
             None,
             None,

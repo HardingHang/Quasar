@@ -3,12 +3,14 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use quasar_core::{AssetFormat, CatalogStore};
+use quasar_core::CatalogStore;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::error::{store_error_to_lance_version, ProblemDetails};
 use super::table::parse_table_id;
+use crate::DEFAULT_DOMAIN;
 
 // ── Request DTOs ───────────────────────────────────────────
 
@@ -49,14 +51,22 @@ pub async fn create_version(
     let instance = format!("/lance/v1/table/{}/version/create", id);
     let (namespace, table) = parse_table_id(&id)?;
 
-    let version = store
-        .create_version(
-            namespace,
-            AssetFormat::Lance,
-            table,
-            req.version,
-            req.manifest_path.clone(),
+    // Resolve asset id first; V3 version operations are keyed on asset_id.
+    let (asset, _) = store
+        .get_tabular_asset(DEFAULT_DOMAIN, namespace, "lance", table)
+        .await
+        .map_err(|e| store_error_to_lance_version(e, &instance).to_problem_details())?;
+
+    let version_key = req.version.to_string();
+    let (version, tabular_version) = store
+        .create_tabular_version(
+            asset.id,
+            &version_key,
+            Some(req.version),
             None,
+            &req.manifest_path,
+            None,
+            HashMap::new(),
         )
         .await
         .map_err(|e| store_error_to_lance_version(e, &instance).to_problem_details())?;
@@ -64,8 +74,8 @@ pub async fn create_version(
     Ok((
         StatusCode::OK,
         Json(VersionResponse {
-            version: version.version.version_order.unwrap_or(0),
-            manifest_path: version.tabular_version.metadata_location,
+            version: version.version_order.unwrap_or(0),
+            manifest_path: tabular_version.metadata_location,
         }),
     ))
 }
@@ -78,8 +88,13 @@ pub async fn list_versions(
     let instance = format!("/lance/v1/table/{}/version/list", id);
     let (namespace, table) = parse_table_id(&id)?;
 
+    let (asset, _) = store
+        .get_tabular_asset(DEFAULT_DOMAIN, namespace, "lance", table)
+        .await
+        .map_err(|e| store_error_to_lance_version(e, &instance).to_problem_details())?;
+
     let versions = store
-        .list_versions(namespace, AssetFormat::Lance, table)
+        .list_tabular_versions(asset.id)
         .await
         .map_err(|e| store_error_to_lance_version(e, &instance).to_problem_details())?;
 
@@ -88,7 +103,7 @@ pub async fn list_versions(
         Json(ListVersionsResponse {
             versions: versions
                 .into_iter()
-                .map(|v| v.version.version_order.unwrap_or(0))
+                .map(|(v, _)| v.version_order.unwrap_or(0))
                 .collect(),
         }),
     ))
@@ -103,16 +118,22 @@ pub async fn describe_version(
     let instance = format!("/lance/v1/table/{}/version/describe", id);
     let (namespace, table) = parse_table_id(&id)?;
 
-    let version = store
-        .load_version(namespace, AssetFormat::Lance, table, req.version)
+    let (asset, _) = store
+        .get_tabular_asset(DEFAULT_DOMAIN, namespace, "lance", table)
+        .await
+        .map_err(|e| store_error_to_lance_version(e, &instance).to_problem_details())?;
+
+    let version_key = req.version.to_string();
+    let (version, tabular_version) = store
+        .get_tabular_version(asset.id, &version_key)
         .await
         .map_err(|e| store_error_to_lance_version(e, &instance).to_problem_details())?;
 
     Ok((
         StatusCode::OK,
         Json(VersionResponse {
-            version: version.version.version_order.unwrap_or(0),
-            manifest_path: version.tabular_version.metadata_location,
+            version: version.version_order.unwrap_or(0),
+            manifest_path: tabular_version.metadata_location,
         }),
     ))
 }
