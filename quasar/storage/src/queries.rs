@@ -1,11 +1,9 @@
 //! Centralized SQL constants for V3 Data Core Model queries.
 //!
 //! These constants are defined in Phase 1 of the V3 implementation as the
-//! single place where SQL strings live. `PgCatalogStore` will switch from its
-//! inline V1 SQL to these constants in Phase 2 once the V3 schema is wired
-//! through `crate::schema`. They are intentionally unused right now; the
-//! `dead_code` attribute keeps clippy quiet without hiding the symbols from
-//! Phase 2 implementations.
+//! single place where SQL strings live. `PgCatalogStore` switches its inline
+//! V1 SQL to these constants in Phase 2 once the V3 schema is wired through
+//! `crate::schema`.
 //!
 //! Conventions:
 //! - constant names use `SCREAMING_SNAKE_CASE`;
@@ -15,7 +13,13 @@
 //!   so callers do not have to thread UUIDs in handler code;
 //! - statements that mutate state always `RETURNING` the canonical column set
 //!   so callers can rebuild the model without an extra round-trip.
-
+//!
+//! Phase 2 C3 keeps the V2 trait surface, so the domain-, version-,
+//! and identity-level constants (Domain* CRUD, version::GET_LATEST,
+//! version::LIST_BY_ASSET, asset::LOOKUP_ID_BY_NAME) are not yet referenced.
+//! C4 lights them up when `DomainStore`, `VersionStore`, and the V3-shaped
+//! `AssetStore` methods land. The file-level `dead_code` allow keeps clippy
+//! quiet until then and is removed in C4.
 #![allow(dead_code)]
 
 /// Queries against the `domains` table (V3 §3.3.2, §5.3).
@@ -73,11 +77,16 @@ pub mod domain {
 
 /// Queries against the `namespaces` table (V3 §3.3.3, §5.3).
 pub mod namespace {
-    /// Insert a namespace under an existing domain. Parameters: $1 domain_id,
-    /// $2 name, $3 comment, $4 properties.
+    /// Insert a namespace under an existing domain (resolved by name). The
+    /// SELECT-source subquery returns zero rows when the domain does not
+    /// exist, so the INSERT inserts zero rows and the caller can detect that
+    /// case via `RETURNING`. Parameters: $1 domain_name, $2 name,
+    /// $3 comment, $4 properties.
     pub const CREATE: &str = r#"
         INSERT INTO namespaces (domain_id, name, comment, properties)
-        VALUES ($1, $2, $3, $4)
+        SELECT d.id, $2, $3, $4
+        FROM domains d
+        WHERE d.name = $1
         RETURNING id, domain_id, name, comment, properties, created_at, updated_at
     "#;
 
@@ -134,11 +143,17 @@ pub mod namespace {
 
 /// Queries against `assets` and `tabular_assets` (V3 §3.3.4-5, §5.3).
 pub mod asset {
-    /// Insert a generic asset under a namespace. Parameters: $1 namespace_id,
-    /// $2 name, $3 asset_type, $4 comment, $5 properties.
+    /// Insert a generic asset under `(domain, namespace)` resolved by name.
+    /// The SELECT-source returns zero rows when the namespace does not exist,
+    /// so the INSERT inserts zero rows and the caller can detect that case via
+    /// `RETURNING`. Parameters: $1 domain_name, $2 namespace_name, $3 name,
+    /// $4 asset_type, $5 comment, $6 properties.
     pub const CREATE: &str = r#"
         INSERT INTO assets (namespace_id, name, asset_type, comment, properties)
-        VALUES ($1, $2, $3, $4, $5)
+        SELECT ns.id, $3, $4, $5, $6
+        FROM namespaces ns
+        JOIN domains d ON ns.domain_id = d.id
+        WHERE d.name = $1 AND ns.name = $2
         RETURNING id, namespace_id, name, asset_type, comment, properties, deleted_at,
                   created_by, updated_by, created_at, updated_at
     "#;
@@ -208,19 +223,29 @@ pub mod asset {
                   created_by, updated_by, created_at, updated_at
     "#;
 
-    /// Rename an active asset within the same namespace.
-    /// Parameters: $1 new_name, $2 asset_id.
+    /// Rename an active asset within a namespace.
+    /// Parameters: $1 domain_name, $2 namespace_name, $3 current_name,
+    /// $4 new_name.
     pub const RENAME: &str = r#"
-        UPDATE assets
-        SET name = $1,
+        UPDATE assets a
+        SET name = $4,
             updated_at = NOW()
-        WHERE id = $2 AND deleted_at IS NULL
+        FROM namespaces ns, domains d
+        WHERE ns.id = a.namespace_id
+          AND d.id = ns.domain_id
+          AND d.name = $1 AND ns.name = $2 AND a.name = $3
+          AND a.deleted_at IS NULL
     "#;
 
     /// Hard delete an asset; cascades to extension and version rows via FK.
-    /// Parameter: $1 asset_id.
+    /// Parameters: $1 domain_name, $2 namespace_name, $3 asset_name.
     pub const DELETE: &str = r#"
-        DELETE FROM assets WHERE id = $1
+        DELETE FROM assets a
+        USING namespaces ns, domains d
+        WHERE ns.id = a.namespace_id
+          AND d.id = ns.domain_id
+          AND d.name = $1 AND ns.name = $2 AND a.name = $3
+          AND a.deleted_at IS NULL
     "#;
 
     /// Check whether a tabular asset of a specific format exists with the
@@ -236,6 +261,91 @@ pub mod asset {
             WHERE d.name = $1 AND ns.name = $2 AND a.name = $3
               AND a.deleted_at IS NULL AND a.asset_type = 'table' AND ta.format = $4
         )
+    "#;
+
+    /// Compare-and-swap update of a tabular asset's `metadata_location`. The
+    /// row is only updated when its current `metadata_location` equals the
+    /// caller-supplied expected value, giving Iceberg-style optimistic
+    /// concurrency. Callers detect mismatch by checking that the statement
+    /// returned a row (0 rows → `Conflict`).
+    ///
+    /// Parameters: $1 new_location, $2 new_schema_snapshot (JSONB, nullable),
+    /// $3 domain_name, $4 namespace_name, $5 asset_name, $6 format,
+    /// $7 expected_location.
+    pub const CAS_UPDATE_METADATA_LOCATION: &str = r#"
+        UPDATE tabular_assets ta
+        SET metadata_location = $1,
+            schema_snapshot = COALESCE($2, ta.schema_snapshot),
+            updated_at = NOW()
+        FROM assets a
+        JOIN namespaces ns ON a.namespace_id = ns.id
+        JOIN domains d ON ns.domain_id = d.id
+        WHERE ta.asset_id = a.id
+          AND d.name = $3 AND ns.name = $4 AND a.name = $5 AND ta.format = $6
+          AND a.deleted_at IS NULL AND a.asset_type = 'table'
+          AND ta.metadata_location IS NOT DISTINCT FROM $7
+        RETURNING ta.asset_id
+    "#;
+
+    /// Update an active asset's properties in place. Used as the second
+    /// statement of a CAS commit transaction so the property delta lands
+    /// atomically with the metadata_location swap. Parameters: $1 properties
+    /// (JSONB), $2 asset_id.
+    pub const UPDATE_PROPERTIES_BY_ID: &str = r#"
+        UPDATE assets
+        SET properties = $1,
+            updated_at = NOW()
+        WHERE id = $2 AND deleted_at IS NULL
+    "#;
+
+    /// Unified list of active assets in a namespace. `LEFT JOIN tabular_assets`
+    /// lets future non-tabular asset types appear as `(Asset, None)`. Today
+    /// every row pairs with a tabular extension. Parameters: $1 domain_name,
+    /// $2 namespace_name, $3 format filter (TEXT, NULL = no filter),
+    /// $4 name filter (TEXT, NULL = no filter), $5 limit, $6 offset.
+    pub const LIST_UNIFIED: &str = r#"
+        SELECT a.id, a.namespace_id, a.name, a.asset_type, a.comment, a.properties,
+               a.deleted_at, a.created_by, a.updated_by, a.created_at, a.updated_at,
+               ta.asset_id, ta.format, ta.location, ta.metadata_location, ta.schema_snapshot,
+               ta.created_at AS tabular_created_at, ta.updated_at AS tabular_updated_at
+        FROM assets a
+        LEFT JOIN tabular_assets ta ON a.id = ta.asset_id
+        JOIN namespaces ns ON a.namespace_id = ns.id
+        JOIN domains d ON ns.domain_id = d.id
+        WHERE d.name = $1 AND ns.name = $2
+          AND a.deleted_at IS NULL
+          AND ($3::TEXT IS NULL OR ta.format = $3)
+          AND ($4::TEXT IS NULL OR a.name = $4)
+        ORDER BY a.name, ta.format NULLS LAST
+        LIMIT $5 OFFSET $6
+    "#;
+
+    /// Unified single-asset lookup. Returns the asset with its optional
+    /// tabular extension; non-tabular asset types map to a `None` extension.
+    /// Parameters: $1 domain_name, $2 namespace_name, $3 asset_name.
+    pub const GET_UNIFIED: &str = r#"
+        SELECT a.id, a.namespace_id, a.name, a.asset_type, a.comment, a.properties,
+               a.deleted_at, a.created_by, a.updated_by, a.created_at, a.updated_at,
+               ta.asset_id, ta.format, ta.location, ta.metadata_location, ta.schema_snapshot,
+               ta.created_at AS tabular_created_at, ta.updated_at AS tabular_updated_at
+        FROM assets a
+        LEFT JOIN tabular_assets ta ON a.id = ta.asset_id
+        JOIN namespaces ns ON a.namespace_id = ns.id
+        JOIN domains d ON ns.domain_id = d.id
+        WHERE d.name = $1 AND ns.name = $2 AND a.name = $3
+          AND a.deleted_at IS NULL
+    "#;
+
+    /// Resolve the active asset id for `(domain, namespace, name)`. Used by
+    /// version operations that need an `asset_id` before issuing the version
+    /// query. Parameters: $1 domain_name, $2 namespace_name, $3 asset_name.
+    pub const LOOKUP_ID_BY_NAME: &str = r#"
+        SELECT a.id
+        FROM assets a
+        JOIN namespaces ns ON a.namespace_id = ns.id
+        JOIN domains d ON ns.domain_id = d.id
+        WHERE d.name = $1 AND ns.name = $2 AND a.name = $3
+          AND a.deleted_at IS NULL
     "#;
 }
 
@@ -254,7 +364,7 @@ pub mod version {
     pub const CREATE_TABULAR: &str = r#"
         INSERT INTO tabular_asset_versions (version_id, metadata_location)
         VALUES ($1, $2)
-        RETURNING version_id, metadata_location, created_at
+        RETURNING version_id, metadata_location, created_at AS tabular_created_at
     "#;
 
     /// Get the highest version_order for an asset. Returns NULL if the asset
@@ -347,6 +457,17 @@ mod tests {
         assert_constant("asset::RENAME", asset::RENAME);
         assert_constant("asset::DELETE", asset::DELETE);
         assert_constant("asset::EXISTS_TABULAR", asset::EXISTS_TABULAR);
+        assert_constant(
+            "asset::CAS_UPDATE_METADATA_LOCATION",
+            asset::CAS_UPDATE_METADATA_LOCATION,
+        );
+        assert_constant(
+            "asset::UPDATE_PROPERTIES_BY_ID",
+            asset::UPDATE_PROPERTIES_BY_ID,
+        );
+        assert_constant("asset::LIST_UNIFIED", asset::LIST_UNIFIED);
+        assert_constant("asset::GET_UNIFIED", asset::GET_UNIFIED);
+        assert_constant("asset::LOOKUP_ID_BY_NAME", asset::LOOKUP_ID_BY_NAME);
     }
 
     #[test]
@@ -380,6 +501,30 @@ mod tests {
         assert!(
             version::GET_LATEST_TABULAR.contains("version_order IS NOT NULL"),
             "latest tabular version query must ignore rows without a numeric order"
+        );
+    }
+
+    #[test]
+    fn cas_update_uses_optimistic_predicate() {
+        assert!(
+            asset::CAS_UPDATE_METADATA_LOCATION.contains("IS NOT DISTINCT FROM"),
+            "CAS update must check the prior metadata_location with IS NOT DISTINCT FROM"
+        );
+        assert!(
+            asset::CAS_UPDATE_METADATA_LOCATION.contains("RETURNING"),
+            "CAS update must RETURN affected rows for the caller to detect Conflict"
+        );
+    }
+
+    #[test]
+    fn unified_queries_use_left_join() {
+        assert!(
+            asset::LIST_UNIFIED.contains("LEFT JOIN tabular_assets"),
+            "LIST_UNIFIED must LEFT JOIN tabular_assets so non-table assets surface as None"
+        );
+        assert!(
+            asset::GET_UNIFIED.contains("LEFT JOIN tabular_assets"),
+            "GET_UNIFIED must LEFT JOIN tabular_assets so non-table assets surface as None"
         );
     }
 }

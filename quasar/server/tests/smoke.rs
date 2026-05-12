@@ -35,12 +35,12 @@ impl PgInstance {
 
                 let pool = test_pool(&url);
                 let store = PgCatalogStore::new(pool.clone());
-                store.migrate().await.expect("migration failed");
+                store.initialize().await.expect("initialize failed");
 
                 let client = pool.get().await.expect("failed to get client");
                 client
                     .execute(
-                        "TRUNCATE tabular_asset_versions, asset_versions, tabular_assets, assets, namespaces CASCADE",
+                        "TRUNCATE tabular_asset_versions, asset_versions, tabular_assets, assets, namespaces, asset_permissions CASCADE",
                         &[],
                     )
                     .await
@@ -70,7 +70,7 @@ async fn setup() -> Pool {
     let client = pool.get().await.expect("failed to get client");
     client
         .execute(
-            "TRUNCATE tabular_asset_versions, asset_versions, tabular_assets, assets, namespaces CASCADE",
+            "TRUNCATE tabular_asset_versions, asset_versions, tabular_assets, assets, namespaces, asset_permissions CASCADE",
             &[],
         )
         .await

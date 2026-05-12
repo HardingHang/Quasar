@@ -18,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     let store = std::sync::Arc::new(quasar_storage::PgCatalogStore::new(pool.clone()));
-    store.migrate().await?;
+    store.initialize().await?;
 
     #[allow(unused_mut)]
     let mut app_config = quasar_server::AppConfig::default();

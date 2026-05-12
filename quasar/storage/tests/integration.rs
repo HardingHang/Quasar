@@ -59,17 +59,31 @@ async fn setup_with_pool() -> (PgCatalogStore, Pool) {
 
     let client = pool.get().await.expect("failed to get client");
 
-    // Clean slate: drop any existing V1 or V2 tables and refinery history.
-    // This is necessary because the embedded PostgreSQL instance may be
-    // reused across test runs (cached by OnceCell).
+    // Clean slate: drop any existing V1, V2, or V3 catalog objects from the
+    // shared embedded PostgreSQL instance (OnceCell-cached across runs) so
+    // `initialize()` can rebuild a fresh V3 schema.
     let _ = client
-        .execute(
-            "DROP TABLE IF EXISTS refinery_schema_history, tabular_asset_versions, asset_versions, tabular_assets, assets, namespaces CASCADE",
-            &[],
+        .batch_execute(
+            r#"
+            DROP TABLE IF EXISTS
+                refinery_schema_history,
+                asset_permissions,
+                tabular_asset_versions,
+                asset_versions,
+                tabular_assets,
+                assets,
+                namespaces,
+                domains,
+                tabular_formats,
+                asset_types
+            CASCADE;
+            DROP FUNCTION IF EXISTS ensure_tabular_asset_type() CASCADE;
+            DROP FUNCTION IF EXISTS ensure_previous_version_same_asset() CASCADE;
+            "#,
         )
         .await;
 
-    store.migrate().await.expect("migration failed");
+    store.initialize().await.expect("initialize failed");
 
     (store, pool)
 }

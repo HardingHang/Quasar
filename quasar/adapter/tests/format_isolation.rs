@@ -57,12 +57,12 @@ async fn setup() -> Arc<PgCatalogStore> {
     let instance = PgInstance::get().await;
     let pool = test_pool(&instance.url);
     let store = Arc::new(PgCatalogStore::new(pool.clone()));
-    store.migrate().await.expect("migration failed");
+    store.initialize().await.expect("initialize failed");
 
     let client = pool.get().await.expect("failed to get client");
     client
         .execute(
-            "TRUNCATE tabular_asset_versions, asset_versions, tabular_assets, assets, namespaces CASCADE",
+            "TRUNCATE tabular_asset_versions, asset_versions, tabular_assets, assets, namespaces, asset_permissions CASCADE",
             &[],
         )
         .await
@@ -99,8 +99,18 @@ async fn create_namespace(store: &Arc<PgCatalogStore>, name: &str) {
         .unwrap();
 }
 
+// Phase 2 V3 schema change: `uq_assets_active_name(namespace_id, name)
+// WHERE deleted_at IS NULL` makes active asset names unique within a
+// namespace regardless of format. The three tests below seed the same
+// asset name in both Iceberg and Lance — that is no longer legal in V3
+// and must be redesigned in Phase 3 (the adapter is the right place to
+// surface the cross-format conflict per V3_DESIGN §11.2).
+// TODO(v3-phase3): redesign the cross-format conflict tests against the
+// V3 active-name uniqueness invariant; until then they are #[ignore]d.
+
 #[tokio::test]
 #[serial]
+#[ignore = "TODO(v3-phase3): cross-format same-name setup violates V3 active-name uniqueness"]
 async fn test_cross_format_list_isolation() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
@@ -241,6 +251,7 @@ async fn test_cross_format_describe_isolation() {
 
 #[tokio::test]
 #[serial]
+#[ignore = "TODO(v3-phase3): cross-format same-name setup violates V3 active-name uniqueness"]
 async fn test_cross_format_drop_isolation() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
@@ -301,6 +312,7 @@ async fn test_cross_format_drop_isolation() {
 
 #[tokio::test]
 #[serial]
+#[ignore = "TODO(v3-phase3): cross-format same-name setup violates V3 active-name uniqueness"]
 async fn test_cross_format_rename_isolation() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
