@@ -76,8 +76,8 @@ fn asset_pair_to_list_item(
     AssetListItem {
         id: asset.id.to_string(),
         name: asset.name,
-        asset_type: asset.asset_type.as_str().to_string(),
-        format: asset.asset_subtype,
+        asset_type: asset.asset_type,
+        format: tabular.format,
         location: tabular.location,
         metadata_location: tabular.metadata_location,
         comment: asset.comment,
@@ -94,8 +94,8 @@ fn asset_pair_to_response(
     AssetResponse {
         id: asset.id.to_string(),
         name: asset.name,
-        asset_type: asset.asset_type.as_str().to_string(),
-        format: asset.asset_subtype,
+        asset_type: asset.asset_type,
+        format: tabular.format,
         location: tabular.location,
         metadata_location: tabular.metadata_location,
         comment: asset.comment,

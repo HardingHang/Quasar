@@ -60,7 +60,12 @@ fn lance_version_to_response(v: AssetVersionWithTabular) -> CurrentVersionRespon
             .version_order
             .unwrap_or_else(|| v.version.version_key.parse().unwrap_or(0)),
         metadata_location: v.tabular_version.metadata_location,
-        previous_version_id: v.tabular_version.previous_version_order,
+        // TODO(v3-phase3): V3 model stores previous_version_id as Uuid on
+        // AssetVersion (not as i64 on tabular_version). The Lance protocol
+        // response expects an i64 version number. Until the storage layer
+        // exposes a Uuid -> version_order resolver, expose None and rely
+        // on the explicit version chain that V3 will surface from queries.
+        previous_version_id: None,
         timestamp: v.version.created_at.to_rfc3339(),
     }
 }

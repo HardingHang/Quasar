@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use deadpool_postgres::Pool;
 use quasar_core::{
-    Asset, AssetFormat, AssetType, AssetVersion, AssetVersionWithTabular, AssetWithTabular,
-    CatalogStore, Namespace, PatchField, StoreError, TabularAsset, TabularAssetVersion,
+    Asset, AssetFormat, AssetVersion, AssetVersionWithTabular, AssetWithTabular, CatalogStore,
+    Namespace, PatchField, StoreError, TabularAsset, TabularAssetVersion,
 };
 use serde_json;
 use std::collections::HashMap;
@@ -66,12 +66,18 @@ fn row_to_namespace(row: &Row) -> Result<Namespace, StoreError> {
             source: Some(Box::new(e)),
         })?;
 
+    let created_at: chrono::DateTime<chrono::Utc> = try_get!(row, "created_at");
+    // TODO(v3-phase2): wire to namespaces.domain_id / updated_at columns
+    // once schema migrates to schema/init.sql. V1 schema has no domain_id;
+    // bridge with Uuid::nil() and reuse created_at for updated_at.
     Ok(Namespace {
         id: try_get!(row, "id"),
+        domain_id: uuid::Uuid::nil(),
         name: try_get!(row, "name"),
         comment: row.try_get("comment").ok(),
         properties,
-        created_at: try_get!(row, "created_at"),
+        created_at,
+        updated_at: created_at,
     })
 }
 
@@ -83,37 +89,45 @@ fn row_to_asset(row: &Row) -> Result<Asset, StoreError> {
             source: Some(Box::new(e)),
         })?;
 
-    let asset_type_str: String = try_get!(row, "asset_type");
-    let asset_type = match asset_type_str.as_str() {
-        "table" => AssetType::Table,
-        _ => {
-            return Err(StoreError::Internal {
-                msg: format!("unknown asset_type: {}", asset_type_str),
-                source: None,
-            })
-        }
-    };
-
+    let created_at: chrono::DateTime<chrono::Utc> = try_get!(row, "created_at");
+    // TODO(v3-phase2): asset_type is read straight from the V1 'asset_type'
+    // column which is constrained to {'table'}. Once schema/init.sql lands,
+    // it will reference the asset_types registry instead.
+    // Audit fields (deleted_at, created_by, updated_by, updated_at) are not
+    // present in the V1 schema; populated with None / created_at fallback.
     Ok(Asset {
         id: try_get!(row, "id"),
         namespace_id: try_get!(row, "namespace_id"),
         name: try_get!(row, "name"),
-        asset_type,
-        asset_subtype: try_get!(row, "asset_subtype"),
+        asset_type: try_get!(row, "asset_type"),
         comment: row.try_get("comment").ok(),
         properties,
-        created_at: try_get!(row, "created_at"),
+        deleted_at: None,
+        created_by: None,
+        updated_by: None,
+        created_at,
+        updated_at: created_at,
     })
 }
 
 fn row_to_tabular_asset(row: &Row) -> Result<TabularAsset, StoreError> {
     let schema_snapshot: Option<serde_json::Value> = row.try_get("schema_snapshot").ok();
-
+    let created_at: chrono::DateTime<chrono::Utc> = row
+        .try_get("created_at")
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
+    // TODO(v3-phase2): the V1 schema stores the format on assets.asset_subtype.
+    // V3 stores it on tabular_assets.format. Until storage SQL is rewritten,
+    // read the asset_subtype column from the joined row and project it into
+    // TabularAsset.format. created_at / updated_at default to MIN_UTC when
+    // absent (Phase 2 will populate from real columns).
     Ok(TabularAsset {
         asset_id: try_get!(row, "asset_id"),
+        format: try_get!(row, "asset_subtype"),
         location: try_get!(row, "location"),
         metadata_location: row.try_get("metadata_location").ok(),
         schema_snapshot,
+        created_at,
+        updated_at: created_at,
     })
 }
 
@@ -125,22 +139,30 @@ fn row_to_asset_version(row: &Row) -> Result<AssetVersion, StoreError> {
             source: Some(Box::new(e)),
         })?;
 
+    // TODO(v3-phase2): previous_version_id and comment columns are not in
+    // V1 asset_versions; populated with None until schema migration.
     Ok(AssetVersion {
         id: try_get!(row, "id"),
         asset_id: try_get!(row, "asset_id"),
         version_key: try_get!(row, "version_key"),
         version_order: row.try_get("version_order").ok(),
+        previous_version_id: None,
+        comment: None,
         properties,
         created_at: try_get!(row, "created_at"),
     })
 }
 
 fn row_to_tabular_version(row: &Row) -> Result<TabularAssetVersion, StoreError> {
+    let created_at: chrono::DateTime<chrono::Utc> = row
+        .try_get("created_at")
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
+    // TODO(v3-phase2): V1 column is asset_version_id; V3 schema renames it
+    // to version_id. Bridge by reading the V1 column into the V3 field.
     Ok(TabularAssetVersion {
-        asset_version_id: try_get!(row, "asset_version_id"),
+        version_id: try_get!(row, "asset_version_id"),
         metadata_location: try_get!(row, "metadata_location"),
-        previous_asset_version_id: row.try_get("previous_asset_version_id").ok(),
-        previous_version_order: row.try_get("previous_version_order").ok(),
+        created_at,
     })
 }
 
@@ -824,12 +846,20 @@ impl CatalogStore for PgCatalogStore {
             source: Some(Box::new(e)),
         })?;
 
-        let version = row_to_asset_version(&version_row)?;
+        let mut version = row_to_asset_version(&version_row)?;
+        // TODO(v3-phase2): row_to_asset_version returns None for the new
+        // previous_version_id field because V1 asset_versions has no such
+        // column. Bridge by overriding from the resolved UUID here so the
+        // returned AssetVersion still reflects the chain that Phase 2 will
+        // persist directly.
+        version.previous_version_id = previous_version_uuid;
+        // TODO(v3-phase2): V1 tabular_asset_versions has no created_at
+        // column, so we default to MIN_UTC. Phase 2 reads the real column.
+        let _ = previous_version_id; // retained until removed in Phase 2
         let tabular_version = TabularAssetVersion {
-            asset_version_id: version_uuid,
+            version_id: version_uuid,
             metadata_location,
-            previous_asset_version_id: previous_version_uuid,
-            previous_version_order: previous_version_id,
+            created_at: chrono::DateTime::<chrono::Utc>::MIN_UTC,
         };
         Ok(AssetVersionWithTabular {
             version,

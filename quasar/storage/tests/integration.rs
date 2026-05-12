@@ -256,7 +256,7 @@ async fn test_version_commit_and_load() {
         .await
         .unwrap();
     assert_eq!(v2.version.version_key, "2");
-    assert!(v2.tabular_version.previous_asset_version_id.is_some());
+    assert!(v2.version.previous_version_id.is_some());
 
     let current = store
         .load_current_version("ns1", AssetFormat::Lance, "tbl")
