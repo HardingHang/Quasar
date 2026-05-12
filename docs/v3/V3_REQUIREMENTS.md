@@ -44,7 +44,7 @@ Domain 'prod'
         ├── Asset 'events' (format=iceberg)
         │     → /iceberg/v1/prod/namespaces/analytics/tables/events
         └── Asset 'embeddings' (format=lance)
-              → /lance/v1/prod/namespaces/analytics/tables/embeddings
+              → /lance/v1/table/prod$analytics$embeddings/describe
 ```
 
 **选择端点级隔离的考量：**
@@ -57,6 +57,7 @@ Domain 'prod'
 **代价**：
 - 每个协议端点内部需要按 `format` 字段过滤，用错端点会返回 `TableNotFoundException`
 - 端点过滤逻辑需要在各 handler 中重复实现（可通过中间件抽象）
+- 为保持官方协议兼容，Iceberg 的 Domain 映射为官方 `{prefix}`；Lance 的 Domain 编码为官方 `{id}` 的第一段，不新增 `/domains/{domain}` 这类 Lance 自定义路径。
 
 ---
 

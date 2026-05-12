@@ -26,7 +26,7 @@ V3 Data Core Model 的目标是建立长期稳定的元数据核心：
 - 同一 Domain 内 Namespace 名称唯一。
 - 同一 Namespace 内活动 Asset 名称唯一。
 - Asset 必须属于一个 Namespace。
-- 表资产扩展记录必须属于一个 Asset。
+- 表资产扩展记录必须属于一个 `asset_type='table'` 的 Asset。
 - AssetVersion 必须属于一个 Asset。
 - 同一 Asset 下 `version_key` 唯一。
 - 同一 Asset 下非空 `version_order` 唯一。
@@ -40,7 +40,7 @@ V3 区分上层容器删除与明确的资产删除：
 - `namespaces -> assets`：建议 `ON DELETE RESTRICT`。
 - `assets -> tabular_assets / asset_versions / asset_permissions`：允许 `ON DELETE CASCADE`，但只能由明确的 Asset 删除 API 触发。
 - `asset_versions -> tabular_asset_versions`：允许 `ON DELETE CASCADE`。
-- 版本前驱引用建议 `ON DELETE SET NULL` 或存储层显式重连/清理。
+- 版本前驱引用使用 `ON DELETE SET NULL`；跨 Asset 前驱引用由数据库触发器兜底。
 
 这样可以避免一次误删 Domain 或 Namespace 导致大量资产和版本记录被数据库隐式删除。
 
@@ -257,13 +257,33 @@ CREATE TABLE tabular_assets (
 
 CREATE INDEX idx_tabular_assets_format_asset
     ON tabular_assets(format, asset_id);
+
+CREATE OR REPLACE FUNCTION ensure_tabular_asset_type()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM assets
+        WHERE id = NEW.asset_id
+          AND asset_type = 'table'
+    ) THEN
+        RAISE EXCEPTION 'tabular asset % must reference an asset with asset_type=table', NEW.asset_id
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_tabular_assets_asset_type
+BEFORE INSERT OR UPDATE OF asset_id ON tabular_assets
+FOR EACH ROW
+EXECUTE FUNCTION ensure_tabular_asset_type();
 ```
 
 设计说明：
 
 - `format` 属于表资产扩展层。
 - `metadata_location` 对 Iceberg 是当前 metadata.json 指针；对 Lance 可以为空，Lance 版本元数据记录在 `tabular_asset_versions`。
-- 需要在存储层或触发器中保证 `tabular_assets.asset_id` 对应的 `assets.asset_type = 'table'`。
+- `trg_tabular_assets_asset_type` 保证 `tabular_assets.asset_id` 对应的 `assets.asset_type = 'table'`。
 
 ### 4.6 asset_versions
 
@@ -299,6 +319,28 @@ CREATE INDEX idx_asset_versions_latest
 
 CREATE INDEX idx_asset_versions_previous
     ON asset_versions(previous_version_id);
+
+CREATE OR REPLACE FUNCTION ensure_previous_version_same_asset()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.previous_version_id IS NOT NULL
+       AND NOT EXISTS (
+           SELECT 1 FROM asset_versions
+           WHERE id = NEW.previous_version_id
+             AND asset_id = NEW.asset_id
+       ) THEN
+        RAISE EXCEPTION 'previous_version_id % must reference a version of the same asset %',
+            NEW.previous_version_id, NEW.asset_id
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_asset_versions_previous_same_asset
+BEFORE INSERT OR UPDATE OF asset_id, previous_version_id ON asset_versions
+FOR EACH ROW
+EXECUTE FUNCTION ensure_previous_version_same_asset();
 ```
 
 设计说明：
@@ -306,7 +348,7 @@ CREATE INDEX idx_asset_versions_previous
 - `version_key` 是原生版本标识，例如 Lance 的 `"1"`、模型版本的 `"v1.2.0"`、或其他格式的 hash/tag。
 - `version_order` 是可比较顺序。Lance 写入 `version_order = version_id`；不具备稳定数字顺序的格式可以为空。
 - latest 查询不得从 `version_key` 解析 fallback。没有 `version_order` 的格式必须提供格式内权威 latest 指针或返回无 latest。
-- `previous_version_id` 必须指向同一 Asset 下版本。PostgreSQL 单列 FK 无法直接表达该约束，V3 实现应在同一事务内校验，并用集成测试覆盖；如后续需要完全数据库级兜底，可引入触发器或复合引用设计。
+- `trg_asset_versions_previous_same_asset` 保证 `previous_version_id` 必须指向同一 Asset 下版本；应用层仍需在同一事务内校验，用于返回更清晰的协议错误。
 
 ### 4.7 tabular_asset_versions
 
@@ -376,6 +418,8 @@ pub struct Domain {
     pub properties: HashMap<String, String>,
     /// 存储类型，如 s3 / minio / hdfs / local。
     pub storage_type: Option<String>,
+    /// 存储配置。使用 JSON 值承载嵌套配置和 secret reference，API 响应必须脱敏。
+    pub storage_config: serde_json::Value,
     /// 默认 warehouse 根路径。
     pub warehouse: Option<String>,
     /// Domain 所有者标识。
@@ -418,6 +462,10 @@ pub struct Asset {
     pub properties: HashMap<String, String>,
     /// 软删除时间；None 表示活动资产。
     pub deleted_at: Option<DateTime<Utc>>,
+    /// 创建者标识。
+    pub created_by: Option<String>,
+    /// 最后更新者标识。
+    pub updated_by: Option<String>,
     /// 创建时间。
     pub created_at: DateTime<Utc>,
     /// 更新时间。
@@ -435,6 +483,10 @@ pub struct TabularAsset {
     pub metadata_location: Option<String>,
     /// schema 快照缓存。
     pub schema_snapshot: Option<serde_json::Value>,
+    /// 创建时间。
+    pub created_at: DateTime<Utc>,
+    /// 更新时间。
+    pub updated_at: DateTime<Utc>,
 }
 
 pub struct AssetVersion {
@@ -452,6 +504,15 @@ pub struct AssetVersion {
     pub comment: Option<String>,
     /// 版本级自定义属性。
     pub properties: HashMap<String, String>,
+    /// 创建时间。
+    pub created_at: DateTime<Utc>,
+}
+
+pub struct TabularAssetVersion {
+    /// 关联的通用版本记录 ID。
+    pub version_id: Uuid,
+    /// 该表版本的元数据文件或 manifest 位置。
+    pub metadata_location: String,
     /// 创建时间。
     pub created_at: DateTime<Utc>,
 }
@@ -495,9 +556,10 @@ V3 存储 trait 建议按职责拆分：
 
 ### 7.2 Lance
 
-- Domain 映射到 Lance REST Namespace 的根或服务端配置上下文，具体路径由 V3 API 设计文档确认。
+- Domain 编码为 Lance REST Namespace 官方 `{id}` 的第一段，例如 `prod$analytics$events`。
+- Lance 适配器不得新增 `/domains/{domain}` 这类自定义协议路径。
 - Table 查询必须过滤 `asset_type = 'table'` 与 `tabular_assets.format = 'lance'`。
-- `create_version` 本质是注册已存在版本，写入 `asset_versions.version_key = version_id::text`、`version_order = version_id` 和 `tabular_asset_versions.metadata_location`。
+- 官方 `POST /v1/table/{id}/version/create` 的本质是注册已存在版本，写入 `asset_versions.version_key = version_id::text`、`version_order = version_id` 和 `tabular_asset_versions.metadata_location`。
 
 ### 7.3 Unified API
 
@@ -543,3 +605,8 @@ V3 实现阶段至少覆盖以下测试：
 
 - 删除 `tabular_formats.supports_version_registration`，避免把显式版本注册能力混入核心格式注册表。
 - 保留 `supports_cas_commit`，并明确其含义是是否支持 Catalog-managed CAS commit。
+
+### V1.3
+
+- 补充数据库触发器，确保表资产扩展只能引用 table Asset、版本前驱不能跨 Asset。
+- 修复 Core Rust 模型与 DDL 的不一致：补充 `storage_config`、审计字段、扩展表时间字段和 `TabularAssetVersion`。
