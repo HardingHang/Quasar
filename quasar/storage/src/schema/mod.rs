@@ -121,6 +121,18 @@ mod tests {
     }
 
     #[test]
+    fn init_sql_seeds_default_domain() {
+        assert!(
+            INIT_SQL.contains("INSERT INTO domains"),
+            "INIT_SQL must seed the default domain"
+        );
+        assert!(
+            INIT_SQL.contains("'default'"),
+            "default domain seed must use the literal name 'default'"
+        );
+    }
+
+    #[test]
     fn init_sql_uses_partial_unique_for_active_assets() {
         assert!(
             INIT_SQL.contains("WHERE deleted_at IS NULL"),

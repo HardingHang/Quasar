@@ -199,6 +199,20 @@ async fn init_sql_creates_all_v3_objects() {
     assert!(formats[0].get::<_, bool>("supports_cas_commit"));
     assert_eq!(formats[1].get::<_, String>("name"), "lance");
     assert!(!formats[1].get::<_, bool>("supports_cas_commit"));
+
+    // Default domain seed: a single 'default' row exists after init.
+    let default_domain_count: i64 = client
+        .query_one(
+            "SELECT COUNT(*)::BIGINT AS c FROM domains WHERE name = 'default'",
+            &[],
+        )
+        .await
+        .expect("count default domain failed")
+        .get("c");
+    assert_eq!(
+        default_domain_count, 1,
+        "expected exactly one seeded 'default' domain row"
+    );
 }
 
 #[tokio::test]
@@ -235,4 +249,14 @@ async fn init_sql_is_idempotent() {
         .expect("count tabular_formats failed")
         .get("c");
     assert_eq!(format_count, 2);
+
+    let domain_count: i64 = client
+        .query_one("SELECT COUNT(*)::BIGINT AS c FROM domains", &[])
+        .await
+        .expect("count domains failed")
+        .get("c");
+    assert_eq!(
+        domain_count, 1,
+        "default domain seed must not duplicate on re-initialize"
+    );
 }

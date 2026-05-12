@@ -65,6 +65,14 @@ CREATE TABLE IF NOT EXISTS domains (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Seed a `default` domain so the Phase 2 storage layer can map the V2 trait
+-- surface (no domain parameter) onto V3 schema by hardcoding this name. The
+-- row is harmless once Phase 3 wires real domain routing from the request path
+-- and may then be deleted by an operator if a default catalog is not desired.
+INSERT INTO domains (name, comment)
+VALUES ('default', 'Quasar default domain (V3 transitional, removable after Phase 3)')
+ON CONFLICT DO NOTHING;
+
 -- ----------------------------------------------------------------------------
 -- namespaces (V3 §3.3.3)
 --
