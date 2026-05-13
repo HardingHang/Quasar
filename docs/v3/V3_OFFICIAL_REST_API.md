@@ -202,6 +202,25 @@ POST /lance/v1/table/prod$analytics$embeddings/describe
 
 ---
 
+## 七、Quasar 自定义管理 API（Unified Domain）
+
+> 本章节端点为 **Quasar-specific**，不属于 Iceberg REST Catalog 或 Lance REST Namespace 官方协议。它们通过 Unified API (`/unified/v1`) 暴露，用于 Domain 生命周期管理。
+
+| 方法 | 路径 | 能力 | V3 范围 |
+|------|------|------|---------|
+| GET | `/unified/v1/domains` | 列出所有 Domain | 必须实现 |
+| POST | `/unified/v1/domains` | 创建 Domain | 必须实现 |
+| GET | `/unified/v1/domains/{domain}` | 获取单个 Domain | 必须实现 |
+| PATCH | `/unified/v1/domains/{domain}` | 更新 Domain | 必须实现 |
+| DELETE | `/unified/v1/domains/{domain}` | 删除空 Domain | 必须实现 |
+
+**设计约束**：
+- `DELETE` 仅对空 Domain 生效（无下属 Namespace）；非空删除返回 `409 DomainNotEmpty`。
+- `GET /unified/v1/domains/{domain}` 响应中的 `storage_config` 字段必须脱敏（credential / secret 值不得明文暴露）。
+- Domain 名称在全局唯一；`name` 字段同时受 `validate_name` 规则约束。
+
+---
+
 ## 五、维护规则
 
 1. 修改 `V3_DESIGN.md` 第四章 REST API 范围时，必须同步更新本文档的 V3 范围列。
@@ -212,6 +231,14 @@ POST /lance/v1/table/prod$analytics$embeddings/describe
 ---
 
 ## 六、修订记录
+
+### V1.1 (2026-05-13)
+
+- 新增 **七、Quasar 自定义管理 API（Unified Domain）** 章节，登记 5 个 Domain 管理端点。
+- 明确 V3 路径形态变更：
+  - Iceberg `/iceberg/v1/{prefix}/...` 中 `{prefix}` = Domain.name；
+  - Lance `/lance/v1/table/{id}/...` 中 `{id}` 第一段 = Domain.name；
+  - Unified Namespace/Asset 路由统一挂载到 `/unified/v1/domains/{domain}/...`。
 
 ### V1.0
 

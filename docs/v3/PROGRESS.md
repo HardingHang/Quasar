@@ -222,3 +222,71 @@ Phase 4 启动时建议处理:
 3. **端到端 HTTP 测试**:扩展 `server/tests/smoke.rs` 覆盖完整生命周期(create domain → create namespace → create table → commit → drop)。
 4. **`AssetFormat` 枚举评估**:adapter 内部仍依赖 `AssetFormat::from_str` 解析 `tabular.format` 字符串;Phase 4 可评估是否引入 newtype `TabularFormatName(String)` 在 core 层(见 V3_DESIGN §3.5 类型安全策略)。
 5. **REST API 文档**:Phase 3 引入 5 个新 Domain 管理端点 + 路径形态变化;Phase 4 同步 `docs/v3/V3_OFFICIAL_REST_API.md` 与 OpenAPI / 客户端 SDK。
+
+---
+
+## Phase 4 详情
+
+### 范围
+
+Phase 4 负责 V3 的 **集成与验证**，核心目标：
+1. **修复 V3_DESIGN.md 内部设计矛盾**：rename 跨 namespace 不一致(§4.1.1/§4.1.2 暗示支持 vs §4.1.3/§5.1 同 ns only) + AssetResponse `location: String` 无法承载非 tabular 资产。
+2. **端到端 HTTP 测试**：扩展 `server/tests/smoke.rs` 覆盖 V3_DESIGN §11.4 P0 矩阵。
+3. **文档最终检查**：同步 `V3_OFFICIAL_REST_API.md`、创建 `V3_CLOSURE.md` 11 核心问题闭环回溯表。
+
+### 用户确认的关键决策
+
+| 决策 | 选择 |
+|------|------|
+| rename 跨 ns | 同 domain 支持，跨 domain 拒绝 |
+| Lance DTO 字段重命名 | `new_name` → `new_table_name`，加 `new_namespace_id: Option<Vec<String>>`，**不保留 alias** |
+| AssetListItem `location` | `String` → `Option<String>`，与 `format` 对称 |
+| 非 tabular fixture | `AssetStore::create_asset` 直接创建，验证 list/get 返回 null |
+
+### Commit 清单
+
+| Commit | 标题 | 影响 |
+|--------|------|------|
+| `65db637` | `feat(core,storage): rename_asset supports cross-namespace within same domain` | **C1** — core trait + storage SQL/impl + 设计文档 §5.1/§5.2 |
+| `0e9c4d1` | `feat(adapter): Iceberg rename removes cross-ns guard; Lance DTO aligns with spec` | **C2** — Iceberg handler + Lance DTO/handler + 设计文档 §4.1.1/§4.1.2 |
+| `b82df1f` | `feat(adapter): Unified rename_asset accepts optional new_namespace` | **C3** — Unified DTO/handler + 设计文档 §4.1.3 |
+| `b3541fc` | `feat(adapter): AssetListItem and AssetResponse support non-tabular assets` | **C4** — DTO Option 改造 + handler filter_map→map + 翻页 bug 修复 + 设计文档 §4.4/§4.5 |
+| `5989566` | `test(adapter): verify non-tabular asset list and get return null fields` | **C5** — `create_asset` 直接 fixture + list/get/patch/rename 验证 |
+| `5a24761` | `test(server): extend e2e smoke tests for Phase 4` | **C6-C8** — 6 个 e2e 测试覆盖 Iceberg/Lance 全生命周期、Domain 隔离、跨格式冲突、非空 Domain 保护 |
+| *(本次提交)* | `docs: sync V3_OFFICIAL_REST_API.md + V3_CLOSURE.md + PROGRESS.md` | **C9-C11** — REST API 文档同步 + 11 问题闭环表 + 进度更新 |
+
+### 验收
+
+- `cargo fmt --all --check`:通过
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`:通过
+- `cargo test --all-features`:**全绿** (293 passed, 2 ignored)
+- `cargo test -p quasar-storage --test schema_init -- --ignored`:2/2 通过
+- `grep -rn 'new_name' quasar/adapter/src/lance/`:**零命中**(DTO 字段改名完成)
+- `grep -rn 'require_tabular' quasar/adapter/src/unified/`:**零命中**
+- `grep -rn 'msg.contains\|msg.starts_with' quasar/adapter/src/*/error.rs`:**零命中**(字符串匹配已清除)
+- `docs/v3/V3_DESIGN.md` 内部无自相矛盾( rename 三协议一致跨 ns + AssetResponse location 为 Option)
+
+### Phase 4 测试矩阵覆盖(V3_DESIGN §11.4)
+
+P0 场景新增/验证：
+
+- ✅ 完整 Iceberg 生命周期 — `server/tests/smoke.rs::test_iceberg_full_lifecycle`
+- ✅ 完整 Lance 生命周期 — `server/tests/smoke.rs::test_lance_full_lifecycle`
+- ✅ Domain 隔离 — `server/tests/smoke.rs::test_domain_isolation_same_namespace_name`
+- ✅ 同名跨格式冲突 — `server/tests/smoke.rs::test_cross_format_name_conflict_server_level`
+- ✅ 非空 Domain 删除保护 — `server/tests/smoke.rs::test_non_empty_domain_delete_protection`
+- ✅ 多 Domain Namespace 同名 — `server/tests/smoke.rs::test_multi_domain_namespace_same_name`
+- ✅ V3 active-name uniqueness:同名跨格式 create → 409 — `adapter/tests/format_isolation.rs::test_cross_format_create_conflicts`
+- ✅ Lance drop 无法误删 Iceberg 资产 — `adapter/tests/format_isolation.rs::test_lance_drop_cannot_target_iceberg_asset`
+- ✅ Lance rename 无法误改 Iceberg 资产 — `adapter/tests/format_isolation.rs::test_lance_rename_cannot_target_iceberg_asset`
+- ✅ 非 tabular 资产 list/get 返回 null — `adapter/tests/unified_asset.rs::test_non_tabular_asset_list_and_get`
+
+### Phase 5 交接清单
+
+Phase 5（V3.1 或后续版本）可处理：
+
+1. **AssetFormat newtype 评估**:adapter 内部仍使用 `AssetFormat::from_str` 解析字符串;可评估是否上提到 core 层 `TabularFormatName(String)` newtype(V3_DESIGN §3.5)。
+2. **cursor-based 分页**:当前 list 端点使用 OFFSET 分页，大数据量下性能隐患(V3_REQUIREMENTS 问题 5)。
+3. **metadata 缓存**:Iceberg `load_table` 每次从对象存储读取 metadata.json，可引入本地缓存(V3_REQUIREMENTS 问题 11)。
+4. **后台清理任务**:对象存储与数据库非原子性(V3_REQUIREMENTS 问题 15)需后台任务兜底。
+5. **OpenAPI / SDK 生成**:V3_OFFICIAL_REST_API.md 已同步，但 OpenAPI YAML / 客户端 SDK 尚未生成。
