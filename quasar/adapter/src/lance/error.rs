@@ -142,10 +142,13 @@ pub fn store_error_to_lance(err: StoreError, instance: &str) -> LanceError {
             detail: format!("operation '{}' timed out", operation),
             instance: instance.to_string(),
         },
-        StoreError::Internal { msg, .. } => LanceError::InternalError {
-            detail: msg,
-            instance: instance.to_string(),
-        },
+        StoreError::Internal { msg, source } => {
+            tracing::error!(error = ?source, %msg, "internal store error");
+            LanceError::InternalError {
+                detail: "An internal error occurred".to_string(),
+                instance: instance.to_string(),
+            }
+        }
     }
 }
 
@@ -183,10 +186,13 @@ pub fn store_error_to_lance_table(err: StoreError, instance: &str) -> LanceError
             detail: format!("operation '{}' timed out", operation),
             instance: instance.to_string(),
         },
-        StoreError::Internal { msg, .. } => LanceError::InternalError {
-            detail: msg,
-            instance: instance.to_string(),
-        },
+        StoreError::Internal { msg, source } => {
+            tracing::error!(error = ?source, %msg, "internal store error");
+            LanceError::InternalError {
+                detail: "An internal error occurred".to_string(),
+                instance: instance.to_string(),
+            }
+        }
     }
 }
 
@@ -196,25 +202,10 @@ pub fn store_error_to_lance_version(err: StoreError, instance: &str) -> LanceErr
             name: msg,
             instance: instance.to_string(),
         },
-        StoreError::AlreadyExists(msg) => {
-            if msg.starts_with("version ") {
-                let version_str = msg
-                    .trim_start_matches("version ")
-                    .split(' ')
-                    .next()
-                    .unwrap_or("0");
-                let version = version_str.parse::<i64>().unwrap_or(0);
-                LanceError::TableVersionAlreadyExists {
-                    version,
-                    instance: instance.to_string(),
-                }
-            } else {
-                LanceError::TableAlreadyExists {
-                    name: msg,
-                    instance: instance.to_string(),
-                }
-            }
-        }
+        StoreError::AlreadyExists(msg) => LanceError::TableAlreadyExists {
+            name: msg,
+            instance: instance.to_string(),
+        },
         StoreError::NamespaceNotEmpty { namespace } => LanceError::NamespaceNotEmpty {
             name: namespace,
             instance: instance.to_string(),
@@ -239,10 +230,13 @@ pub fn store_error_to_lance_version(err: StoreError, instance: &str) -> LanceErr
             detail: format!("operation '{}' timed out", operation),
             instance: instance.to_string(),
         },
-        StoreError::Internal { msg, .. } => LanceError::InternalError {
-            detail: msg,
-            instance: instance.to_string(),
-        },
+        StoreError::Internal { msg, source } => {
+            tracing::error!(error = ?source, %msg, "internal store error");
+            LanceError::InternalError {
+                detail: "An internal error occurred".to_string(),
+                instance: instance.to_string(),
+            }
+        }
     }
 }
 
@@ -360,7 +354,7 @@ mod tests {
         ));
         assert!(matches!(
             store_error_to_lance(StoreError::Internal { msg: "oops".into(), source: None }, "/test"),
-            LanceError::InternalError { detail, .. } if detail == "oops"
+            LanceError::InternalError { detail, .. } if detail == "An internal error occurred"
         ));
     }
 
@@ -377,19 +371,10 @@ mod tests {
     }
 
     #[test]
-    fn test_store_error_to_lance_version_parses_version_number() {
-        let err = store_error_to_lance_version(
-            StoreError::AlreadyExists("version 42 already exists".into()),
-            "/test",
-        );
-        assert!(matches!(
-            err,
-            LanceError::TableVersionAlreadyExists { version, .. } if version == 42
-        ));
-    }
-
-    #[test]
-    fn test_store_error_to_lance_version_non_version_message() {
+    fn test_store_error_to_lance_version_already_exists_maps_to_table_exists() {
+        // V3: storage CAS conflicts surface as `Conflict`, not `AlreadyExists`.
+        // The adapter no longer parses the message string to invent a version
+        // number; any `AlreadyExists` here is treated as a name collision.
         let err = store_error_to_lance_version(
             StoreError::AlreadyExists("table bar already exists".into()),
             "/test",
@@ -428,7 +413,7 @@ mod tests {
     fn test_store_error_to_lance_version_internal() {
         assert!(matches!(
             store_error_to_lance_version(StoreError::Internal { msg: "oops".into(), source: None }, "/test"),
-            LanceError::InternalError { detail, .. } if detail == "oops"
+            LanceError::InternalError { detail, .. } if detail == "An internal error occurred"
         ));
     }
 }

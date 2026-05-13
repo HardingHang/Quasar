@@ -242,14 +242,7 @@ pub async fn create_table(
             properties,
         )
         .await
-        .map_err(|e| match e {
-            StoreError::NotFound(ref msg) if msg.starts_with("namespace") => {
-                IcebergError::NoSuchNamespaceException {
-                    message: msg.clone(),
-                }
-            }
-            other => store_error_to_iceberg_table(other),
-        })?;
+        .map_err(store_error_to_iceberg_table)?;
 
     Ok((
         StatusCode::OK,

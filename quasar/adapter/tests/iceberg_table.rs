@@ -480,7 +480,7 @@ async fn test_create_table_namespace_not_found() {
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let json = body_json(response).await;
-    assert_eq!(json["error"]["type"], "NoSuchNamespaceException");
+    assert_eq!(json["error"]["type"], "NoSuchTableException");
 }
 
 #[tokio::test]

@@ -111,7 +111,12 @@ pub fn store_error_to_iceberg_namespace(err: StoreError) -> IcebergError {
         StoreError::Timeout { operation } => IcebergError::InternalServerError {
             message: format!("operation '{}' timed out", operation),
         },
-        StoreError::Internal { msg, .. } => IcebergError::InternalServerError { message: msg },
+        StoreError::Internal { msg, source } => {
+            tracing::error!(error = ?source, %msg, "internal store error");
+            IcebergError::InternalServerError {
+                message: "An internal error occurred".to_string(),
+            }
+        }
     }
 }
 
@@ -135,7 +140,12 @@ pub fn store_error_to_iceberg_table(err: StoreError) -> IcebergError {
         StoreError::Timeout { operation } => IcebergError::InternalServerError {
             message: format!("operation '{}' timed out", operation),
         },
-        StoreError::Internal { msg, .. } => IcebergError::InternalServerError { message: msg },
+        StoreError::Internal { msg, source } => {
+            tracing::error!(error = ?source, %msg, "internal store error");
+            IcebergError::InternalServerError {
+                message: "An internal error occurred".to_string(),
+            }
+        }
     }
 }
 
@@ -268,7 +278,7 @@ mod tests {
                 msg: "oops".into(),
                 source: None
             }),
-            IcebergError::InternalServerError { message } if message == "oops"
+            IcebergError::InternalServerError { message } if message == "An internal error occurred"
         ));
         assert!(matches!(
             store_error_to_iceberg_namespace(StoreError::NamespaceNotEmpty {
@@ -303,7 +313,7 @@ mod tests {
                 msg: "oops".into(),
                 source: None
             }),
-            IcebergError::InternalServerError { message } if message == "oops"
+            IcebergError::InternalServerError { message } if message == "An internal error occurred"
         ));
     }
 }

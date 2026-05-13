@@ -205,7 +205,7 @@ async fn test_create_duplicate_returns_409() {
 
     assert_eq!(second.status(), StatusCode::CONFLICT);
     let json = body_json(second).await;
-    assert_eq!(json["error"], "TableVersionAlreadyExists");
+    assert_eq!(json["error"], "TableAlreadyExists");
     assert_eq!(json["code"], 409);
 }
 

@@ -186,8 +186,14 @@ pub fn map_namespace_error(err: StoreError, instance: &str, request_id: &str) ->
             instance,
             request_id,
         ),
-        StoreError::Internal { msg, .. } => {
-            UnifiedError::new(UnifiedErrorCode::InternalError, msg, instance, request_id)
+        StoreError::Internal { msg, source } => {
+            tracing::error!(error = ?source, %msg, "internal store error");
+            UnifiedError::new(
+                UnifiedErrorCode::InternalError,
+                "An internal error occurred",
+                instance,
+                request_id,
+            )
         }
     }
 }
@@ -234,8 +240,57 @@ pub fn map_asset_error(err: StoreError, instance: &str, request_id: &str) -> Uni
             instance,
             request_id,
         ),
-        StoreError::Internal { msg, .. } => {
-            UnifiedError::new(UnifiedErrorCode::InternalError, msg, instance, request_id)
+        StoreError::Internal { msg, source } => {
+            tracing::error!(error = ?source, %msg, "internal store error");
+            UnifiedError::new(
+                UnifiedErrorCode::InternalError,
+                "An internal error occurred",
+                instance,
+                request_id,
+            )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn internal_error_redacts_msg() {
+        let err = map_namespace_error(
+            StoreError::Internal {
+                msg: "stack-trace with secret key".into(),
+                source: None,
+            },
+            "/test",
+            "rid",
+        );
+        assert_eq!(err.code, UnifiedErrorCode::InternalError);
+        assert_eq!(err.detail, "An internal error occurred");
+        assert!(!err.detail.contains("secret"));
+
+        let err = map_asset_error(
+            StoreError::Internal {
+                msg: "another leak".into(),
+                source: None,
+            },
+            "/test",
+            "rid",
+        );
+        assert_eq!(err.detail, "An internal error occurred");
+    }
+
+    #[test]
+    fn domain_not_empty_maps_via_namespace_error() {
+        let err = map_namespace_error(
+            StoreError::DomainNotEmpty {
+                domain: "prod".into(),
+            },
+            "/test",
+            "rid",
+        );
+        assert_eq!(err.code, UnifiedErrorCode::NamespaceNotEmpty);
+        assert!(err.detail.contains("prod"));
     }
 }
