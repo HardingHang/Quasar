@@ -3,7 +3,7 @@
 > 本文档集中维护所有测试用例的描述，作为测试覆盖的权威目录。
 > 每个测试函数对应一行：名称、类型、场景、验证点。
 >
-> **运行全部测试：** `cargo test --all-features --manifest-path quasar/Cargo.toml`
+> **运行全部测试：** `cargo test --workspace --all-features --all-targets`
 
 ---
 
@@ -11,13 +11,13 @@
 
 | Crate | 单元测试 | 集成测试 | 合计 |
 |-------|---------|---------|------|
-| quasar-core | 27 | 0 | 27 |
-| quasar-server | 9 | 5 | 14 |
-| quasar-adapter | 54 | 131 | 185 |
-| quasar-storage | 0 | 8 | 8 |
-| **合计** | **90** | **144** | **234** |
+| quasar-core | 35 | 0 | 35 |
+| quasar-server | 9 | 11 | 20 |
+| quasar-adapter | 67 | 141 | 208 |
+| quasar-storage | 15 | 16 | 31 |
+| **合计** | **126** | **168** | **294** |
 
-> 注：统计基于 `cargo test --all-features --manifest-path quasar/Cargo.toml` 的测试函数数量，不含 doc-tests（当前为 0）。
+> 注：统计基于 `cargo test --workspace --all-features --all-targets` 的测试函数数量，不含 doc-tests（当前为 0）。
 
 ---
 
@@ -34,7 +34,13 @@
 | `test_already_exists_display` | AlreadyExists 变体 | Display 输出格式：`"already exists: {msg}"` |
 | `test_conflict_display` | Conflict 变体 | Display 输出格式：`"conflict: {msg}"` |
 | `test_invalid_input_display` | InvalidInput 变体 | Display 输出格式：`"invalid input: {msg}"` |
-| `test_internal_display` | Internal 变体 | Display 输出格式：`"internal error: {msg}"` |
+| `test_namespace_not_empty_display` | NamespaceNotEmpty 变体 | Display 输出含 namespace 名 |
+| `test_domain_not_empty_display` | DomainNotEmpty 变体 | Display 输出含 domain 名 |
+| `test_database_unavailable_display_without_source` | DatabaseUnavailable 无 source | Display 输出格式正确 |
+| `test_database_unavailable_chains_source` | DatabaseUnavailable 有 source | source 被正确链式记录 |
+| `test_timeout_display` | Timeout 变体 | Display 输出格式正确 |
+| `test_internal_display_without_source` | Internal 无 source | Display 输出格式正确 |
+| `test_internal_chains_source` | Internal 有 source | source 被正确链式记录 |
 
 ### 模型结构体 (`src/models.rs`)
 
@@ -46,6 +52,8 @@
 | `test_asset_type_serde_roundtrip` | AssetType 序列化/反序列化 | `snake_case` 序列化，完整往返正确 |
 | `test_patch_field_deserialize` | PatchField 三态反序列化 | missing/null/value 分别映射为 Missing/Null/Value |
 | `test_patch_field_default` | PatchField 默认值 | 默认值为 Missing |
+| `test_domain_default` | Domain 默认值 | 默认 domain name 为 `"default"` |
+| `test_domain_serde_roundtrip` | Domain 序列化/反序列化 | 所有字段往返正确 |
 | `test_namespace_serde_roundtrip` | Namespace 序列化/反序列化 | 所有字段（含 HashMap properties）往返正确 |
 | `test_namespace_without_comment` | Namespace 无 comment | `comment: None` 往返正确 |
 | `test_asset_serde_roundtrip` | Asset 序列化/反序列化 | 所有字段（含 namespace_id 关联）往返正确 |
@@ -103,12 +111,18 @@
 | 测试函数 | 类型 | 场景 | 验证点 |
 |---------|------|------|--------|
 | `test_dual_instance_stateless_smoke` | 集成 | 两个 server 实例共享同一 PostgreSQL | Unified/Lance/Iceberg 跨实例读写一致，删除后可见性一致 |
+| `test_iceberg_full_lifecycle` | 集成 | Iceberg 完整生命周期 | create domain → ns → table → load → commit → drop，各阶段状态正确 |
+| `test_lance_full_lifecycle` | 集成 | Lance 完整生命周期 | declare → version → list → drop，各阶段状态正确 |
+| `test_domain_isolation_same_namespace_name` | 集成 | 不同 Domain 同名 Namespace 隔离 | prod/analytics 与 staging/analytics 互不干扰 |
+| `test_cross_format_name_conflict_server_level` | 集成 | 跨格式同名冲突 | 同一 domain/ns 下 iceberg create 后 lance declare 同名 → 409 |
+| `test_non_empty_domain_delete_protection` | 集成 | 非空 Domain 删除保护 | domain 含 namespace 时 DELETE 返回 409 |
+| `test_multi_domain_namespace_same_name` | 集成 | 多 Domain 同名 Namespace | prod/analytics 和 staging/analytics 均可创建成功 |
 
 ---
 
 ## quasar-adapter
 
-> 位置：`quasar/adapter/src/lance/` + `quasar/adapter/src/iceberg/` + `quasar/adapter/tests/`
+> 位置：`quasar/adapter/src/` + `quasar/adapter/tests/`
 > 测试类型：单元测试 + 集成测试
 
 ### Lance 错误映射 (`src/lance/error.rs`)
@@ -124,12 +138,28 @@
 | `test_problem_details_serde` | 单元 | ProblemDetails 序列化 | JSON 包含 error/code/detail/instance 字段 |
 | `test_store_error_to_lance_mapping` | 单元 | StoreError → LanceError（namespace） | 5 种 StoreError 全变体正确映射 |
 | `test_store_error_to_lance_table_mapping` | 单元 | StoreError → LanceError（table） | NotFound/AlreadyExists 映射为 TableNotFound/TableAlreadyExists |
-| `test_store_error_to_lance_version_parses_version_number` | 单元 | "version 42 already exists" 解析 | 提取 version=42，映射为 TableVersionAlreadyExists |
-| `test_store_error_to_lance_version_non_version_message` | 单元 | 非 version 开头的 AlreadyExists | 回退到 TableAlreadyExists |
+| `test_store_error_to_lance_version_already_exists_maps_to_table_exists` | 单元 | version AlreadyExists 解析 | 映射为 TableAlreadyExists |
 | `test_store_error_to_lance_version_not_found` | 单元 | StoreError::NotFound → LanceError（version） | 映射为 TableNotFound |
 | `test_store_error_to_lance_version_conflict` | 单元 | StoreError::Conflict → LanceError（version） | 映射为 TableNotEmpty |
 | `test_store_error_to_lance_version_invalid_input` | 单元 | StoreError::InvalidInput → LanceError（version） | 映射为 InvalidInput |
 | `test_store_error_to_lance_version_internal` | 单元 | StoreError::Internal → LanceError（version） | 映射为 InternalError |
+
+### Lance ID 解析器 (`src/lance/id.rs`)
+
+| 测试函数 | 类型 | 场景 | 验证点 |
+|---------|------|------|--------|
+| `parse_namespace_id_root` | 单元 | `"$"` 根 Namespace | 解析为 Root |
+| `parse_namespace_id_single_segment_is_domain` | 单元 | `"prod"` 单段 | 解析为 Domain |
+| `parse_namespace_id_two_segments_is_namespace` | 单元 | `"prod$analytics"` 两段 | 解析为 Namespace {domain, namespace} |
+| `parse_namespace_id_three_segments_rejected` | 单元 | `"a$b$c"` 三段 Namespace | 拒绝，返回 Err |
+| `parse_namespace_id_four_segments_rejected` | 单元 | `"a$b$c$d"` 四段 | 拒绝，返回 Err |
+| `parse_namespace_id_empty_inner_segment_rejected` | 单元 | `"a$$b"` 含空段 | 拒绝，返回 Err |
+| `parse_namespace_id_trailing_empty_segment_rejected` | 单元 | `"a$"` 尾部空段 | 拒绝，返回 Err |
+| `parse_namespace_id_leading_empty_segment_rejected` | 单元 | `"$$"` 头部空段 | 拒绝，返回 Err |
+| `parse_table_id_three_segments_accepted` | 单元 | `"prod$analytics$events"` 三段 Table | 解析为 LanceTableId |
+| `parse_table_id_two_segments_rejected` | 单元 | `"analytics$events"` 两段 Table | 拒绝，返回 Err |
+| `parse_table_id_four_segments_rejected` | 单元 | `"a$b$c$d"` 四段 Table | 拒绝，返回 Err |
+| `parse_table_id_empty_segment_rejected` | 单元 | `"a$$b"` / `"a$b$"` / `"$b$c"` | 拒绝，返回 Err |
 
 ### Lance Namespace 端点 (`tests/lance_namespace.rs`)
 
@@ -142,6 +172,9 @@
 | `test_drop_namespace` | 集成 | POST drop 后再次 drop | 首次 200，重复 404 |
 | `test_describe_not_found` | 集成 | describe 不存在的 Namespace | 返回 404，error="NamespaceNotFound" |
 | `test_list_namespaces_pagination_with_limit` | 集成 | limit 限制返回数量 | 返回数量 <= limit |
+| `test_root_list_returns_domains` | 集成 | GET /lance/v1/namespace/$/list | 返回全部 Domain 列表 |
+| `test_single_segment_id_rejected_on_create` | 集成 | POST create 单段 id | 拒绝，返回 InvalidInput |
+| `test_namespace_in_non_default_domain` | 集成 | 在非 default Domain 下创建 Namespace | 创建成功，数据按 Domain 隔离 |
 
 ### Lance Table 端点 (`tests/lance_table.rs`)
 
@@ -161,9 +194,12 @@
 | `test_rename_to_existing_name_returns_409` | 集成 | rename 到已存在的名称 | 返回 409，error="TableAlreadyExists" |
 | `test_drop_table_not_found` | 集成 | drop 不存在的 Table | 返回 404，error="TableNotFound" |
 | `test_rename_table_not_found` | 集成 | rename 不存在的 Table | 返回 404，error="TableNotFound" |
+| `test_rename_cross_namespace` | 集成 | 同 Domain 跨 Namespace rename | 返回 200，数据正确迁移 |
+| `test_rename_cross_domain_rejected` | 集成 | 跨 Domain rename | 返回 400，error="InvalidInput" |
 | `test_list_tables_empty_namespace` | 集成 | 无 Table 的 Namespace 列表 | 返回空数组，next_page_token=null |
 | `test_exists_table_not_found_in_existing_namespace` | 集成 | exists 不存在的 Table（ns 存在） | 返回 200，`{"exists": false}` |
 | `test_exists_namespace_not_found_returns_false` | 集成 | exists 时 Namespace 不存在 | 返回 200，`{"exists": false}` |
+| `test_declare_in_non_default_domain` | 集成 | 在非 default Domain 下 declare Table | 创建成功，数据按 Domain 隔离 |
 
 ### Lance Version 端点 (`tests/lance_version.rs`)
 
@@ -171,10 +207,17 @@
 |---------|------|------|--------|
 | `test_create_and_describe_version` | 集成 | POST version/create → POST version/describe | 返回 version/manifest_path |
 | `test_create_duplicate_returns_409` | 集成 | 重复创建同版本号 | 返回 409，error="TableVersionAlreadyExists" |
-| `test_list_versions` | 集成 | 创建 v1/v2 后列表 | 返回 [1, 2] |
+| `test_list_versions` | 集成 | 创建 v1/v2 后列表 | 返回 [1, 2]，按 version_order 升序 |
 | `test_describe_not_found` | 集成 | describe 不存在的版本 | 返回 404，error="TableNotFound" |
 | `test_create_table_not_found` | 集成 | 对不存在的 Table 创建版本 | 返回 404，error="TableNotFound" |
 | `test_describe_current_version_in_describe_table` | 集成 | 创建版本后 describe_table | current_version 联动更新为最新版本 |
+
+### Unified 错误映射 (`src/unified/error.rs`)
+
+| 测试函数 | 类型 | 场景 | 验证点 |
+|---------|------|------|--------|
+| `internal_error_redacts_msg` | 单元 | Internal → UnifiedError | detail 固定为 "An internal error occurred"，不泄露内部信息 |
+| `domain_not_empty_maps_to_domain_not_empty` | 单元 | DomainNotEmpty → UnifiedError | code=DomainNotEmpty，detail 含 domain 名 |
 
 ### Iceberg 错误映射 (`src/iceberg/error.rs`)
 
@@ -259,7 +302,7 @@
 | `test_drop_table` | 集成 | DELETE 后再次 GET | 首次 204，再次 404 |
 | `test_table_exists` | 集成 | HEAD 存在/不存在检查 | 存在 → 200，不存在 → 404 |
 | `test_rename_table` | 集成 | POST rename 后验证 | 旧名 HEAD 404，新名 HEAD 200 |
-| `test_rename_cross_namespace` | 集成 | 跨 Namespace rename | 返回 400，type="BadRequestException" |
+| `test_rename_cross_namespace` | 集成 | 同 Domain 跨 Namespace rename | 返回 200，数据正确迁移 |
 | `test_create_table_namespace_not_found` | 集成 | 在不存在的 Namespace 创建 Table | 返回 404，type="NoSuchNamespaceException" |
 | `test_rename_table_source_not_found` | 集成 | rename 不存在的 source Table | 返回 404，type="NoSuchTableException" |
 | `test_rename_table_destination_already_exists` | 集成 | rename 到已存在的名称 | 返回 409，type="TableAlreadyExistsException" |
@@ -306,11 +349,11 @@
 
 | 测试函数 | 类型 | 场景 | 验证点 |
 |---------|------|------|--------|
-| `test_cross_format_list_isolation` | 集成 | 同名 Iceberg/Lance 表共存后分别 list | 标准协议只返回本格式表 |
+| `test_cross_format_create_conflicts` | 集成 | 同名 Iceberg/Lance 表创建冲突 | 同一 namespace 下第二个创建返回 409 |
 | `test_cross_format_load_isolation` | 集成 | Iceberg load Lance-only 表 | 返回 NoSuchTableException |
 | `test_cross_format_describe_isolation` | 集成 | Lance describe Iceberg-only 表 | 返回 TableNotFound |
-| `test_cross_format_drop_isolation` | 集成 | Iceberg drop 同名表 | Lance 同名表仍存在 |
-| `test_cross_format_rename_isolation` | 集成 | Iceberg rename 同名表 | Lance 同名表仍存在 |
+| `test_lance_drop_cannot_target_iceberg_asset` | 集成 | Lance drop Iceberg-only 表 | 返回 TableNotFound |
+| `test_lance_rename_cannot_target_iceberg_asset` | 集成 | Lance rename Iceberg-only 表 | 返回 TableNotFound |
 | `test_cross_format_exists_isolation` | 集成 | Lance exists Iceberg-only 表 | 返回 exists=false |
 | `test_cross_format_commit_isolation` | 集成 | Iceberg commit Lance-only 表 | 返回 NoSuchTableException |
 | `test_standard_protocol_errors_do_not_use_unified_problem_details` | 集成 | 标准协议错误响应 | 不使用 Unified Problem Details 格式 |
@@ -336,6 +379,8 @@
 | `test_problem_details_content_type` | 集成 | Unified 错误响应 | Content-Type 为 application/problem+json |
 | `test_request_id_propagation` | 集成 | 传入 X-Request-Id | header 与错误体复用请求 ID |
 | `test_generated_request_id_is_uuid` | 集成 | 未传 X-Request-Id | 服务端生成 UUID 请求 ID |
+| `test_domain_crud_smoke` | 集成 | Domain 完整 CRUD | 创建/获取/更新/删除全链路 |
+| `test_drop_non_empty_domain_returns_409` | 集成 | 删除含 Namespace 的 Domain | 409 DomainNotEmpty |
 
 ### Unified Asset 端点 (`tests/unified_asset.rs`)
 
@@ -349,11 +394,11 @@
 | `test_list_assets_page_size_too_large` | 集成 | pageSize 超上限 | 400 PageSizeTooLarge |
 | `test_list_assets_page_size_zero` | 集成 | pageSize=0 | 400 InvalidInput |
 | `test_list_assets_empty_format_returns_invalid_format` | 集成 | format= 空字符串 | 400 InvalidFormat |
-| `test_list_assets_order_by_name_then_format` | 集成 | 同名跨格式排序 | 按 name、format 稳定排序 |
+| `test_list_assets_order_by_name` | 集成 | 按名称排序 | 按 name 稳定排序，非 tabular 资产也包含在内 |
 | `test_create_asset_not_allowed` | 集成 | POST /assets | 405 MethodNotAllowed 且不创建记录 |
 | `test_get_asset_detail` | 集成 | GET Asset 详情 | 返回 tabular 字段与 current_version |
-| `test_get_asset_missing_format` | 集成 | 单资源缺 format | 400 InvalidInput |
-| `test_get_asset_invalid_format` | 集成 | 单资源非法 format | 400 InvalidFormat |
+| `test_get_asset_without_format_returns_200` | 集成 | 单资源无 format 参数 | 返回 200，不再强制要求 format |
+| `test_get_asset_ignores_unknown_format_query` | 集成 | 单资源带未知 format | 忽略 format 参数，正常返回 200 |
 | `test_get_asset_not_found` | 集成 | GET 不存在 Asset | 404 AssetNotFound |
 | `test_delete_asset` | 集成 | DELETE Asset | 204 No Content |
 | `test_delete_asset_not_found` | 集成 | DELETE 不存在 Asset | 404 AssetNotFound |
@@ -364,6 +409,8 @@
 | `test_rename_asset` | 集成 | rename Asset | 旧名不存在，新名存在 |
 | `test_rename_asset_to_existing_name` | 集成 | rename 到冲突名 | 409 AssetAlreadyExists |
 | `test_rename_asset_invalid_new_name` | 集成 | rename 到非法名称 | 400 InvalidInput |
+| `test_rename_asset_cross_namespace` | 集成 | 同 Domain 跨 Namespace rename | 返回 200，数据正确迁移 |
+| `test_non_tabular_asset_list_and_get` | 集成 | 非 tabular 资产 list/get | format/location/current_version 均为 null，rename 正常 |
 | `test_list_assets_invalid_format` | 集成 | 列表非法 format | 400 InvalidFormat |
 | `test_get_lance_asset_no_version` | 集成 | Lance 无版本 | current_version=null |
 | `test_get_lance_asset_with_version` | 集成 | Lance 有版本 | version_id/metadata_location 正确 |
@@ -375,8 +422,33 @@
 
 ## quasar-storage
 
-> 位置：`quasar/storage/tests/integration.rs`
-> 测试类型：集成测试（嵌入式 PostgreSQL）
+> 位置：`quasar/storage/src/` + `quasar/storage/tests/`
+> 测试类型：单元测试 + 集成测试（嵌入式 PostgreSQL）
+
+### SQL 常量校验 (`src/queries.rs`)
+
+| 测试函数 | 类型 | 场景 | 验证点 |
+|---------|------|------|--------|
+| `domain_constants_are_well_formed` | 单元 | Domain SQL 常量 | 非空且含 `$1` 占位符 |
+| `namespace_constants_are_well_formed` | 单元 | Namespace SQL 常量 | 非空且含 `$1` 占位符 |
+| `asset_constants_are_well_formed` | 单元 | Asset SQL 常量 | 非空且含 `$1` 占位符 |
+| `version_constants_are_well_formed` | 单元 | Version SQL 常量 | 非空且含 `$1` 占位符 |
+| `asset_get_uses_active_filter` | 单元 | Asset GET 查询 | 包含 `deleted_at IS NULL` 过滤 |
+| `version_latest_excludes_nulls` | 单元 | Version 最新查询 | 包含 `version_order IS NOT NULL` 过滤 |
+| `cas_update_uses_optimistic_predicate` | 单元 | CAS UPDATE | 使用 `IS NOT DISTINCT FROM` 和 `RETURNING` |
+| `unified_queries_use_left_join` | 单元 | Unified 查询 | `LIST_UNIFIED` 和 `GET_UNIFIED` 使用 `LEFT JOIN` |
+
+### Schema 初始化校验 (`src/schema/mod.rs`)
+
+| 测试函数 | 类型 | 场景 | 验证点 |
+|---------|------|------|--------|
+| `init_sql_is_non_empty` | 单元 | INIT_SQL 非空 | 加载后不为空 |
+| `init_sql_contains_expected_tables` | 单元 | V3 数据核心表 | 包含全部 9 张表声明 |
+| `init_sql_contains_expected_triggers` | 单元 | V3 触发器 | 包含全部 2 个触发器 |
+| `init_sql_contains_expected_indexes` | 单元 | V3 索引 | 包含全部 4 个索引 |
+| `init_sql_seeds_registries` | 单元 | 注册表 seed | asset_types 和 tabular_formats 已 seed |
+| `init_sql_seeds_default_domain` | 单元 | 默认 Domain seed | 名称为 `"default"` |
+| `init_sql_uses_partial_unique_for_active_assets` | 单元 | active 资产唯一索引 | 使用 `WHERE deleted_at IS NULL` 部分唯一索引 |
 
 ### CatalogStore 集成 (`tests/integration.rs`)
 
@@ -384,16 +456,47 @@
 |---------|------|------|--------|
 | `test_namespace_crud` | 集成 | Namespace 完整 CRUD | 创建/列出/获取/存在检查/删除全链路 |
 | `test_asset_crud` | 集成 | Asset 完整 CRUD | 创建/列出/获取/存在检查/重命名/删除全链路 |
+| `test_rename_asset_cross_namespace` | 集成 | 同 Domain 跨 Namespace rename | 成功迁移，目标 namespace 正确 |
 | `test_version_commit_and_load` | 集成 | 版本提交与查询 | 顺序提交 v1→v2，load_version/load_current/list_versions 正确 |
 | `test_version_conflict` | 集成 | CAS 乐观锁冲突 | previous_version_id 不匹配返回 Conflict |
-| `test_not_found_errors` | 集成 | NotFound 场景 | namespace 不存在、asset 不存在、无版本记录 |
-| `test_update_namespace_properties` | 集成 | Namespace properties 更新 | removals/updates 生效，缺失 Namespace 返回 NotFound |
 | `test_previous_version_must_belong_to_same_asset` | 集成 | previous_version_id 跨 Asset 使用 | 返回 Conflict，防止版本链串表 |
 | `test_drop_asset_cascades_tabular_and_versions` | 集成 | 删除含版本 Asset | assets/tabular_assets/asset_versions/tabular_asset_versions 全部级联清理 |
+| `test_not_found_errors` | 集成 | NotFound 场景 | namespace 不存在、asset 不存在、无版本记录 |
+| `test_update_namespace_properties` | 集成 | Namespace properties 更新 | removals/updates 生效，缺失 Namespace 返回 NotFound |
+| `test_domain_crud_complete_flow` | 集成 | Domain 完整 CRUD | 创建/获取/更新/删除，名称全局唯一 |
+| `test_namespace_same_name_across_domains` | 集成 | 不同 Domain 同名 Namespace | 互不干扰，各自独立 |
+| `test_non_empty_domain_delete_returns_conflict` | 集成 | 删除含 Namespace 的 Domain | 返回 Conflict，DomainNotEmpty |
+| `test_asset_active_uniqueness_within_namespace` | 集成 | active-name 唯一性 | 同一 namespace 下活动资产名唯一，删除后可复用 |
+| `test_get_latest_version_uses_version_order` | 集成 | 最新版本查询 | 按 version_order 而非 version_key 排序 |
+| `test_unified_query_pairs_asset_with_tabular` | 集成 | Unified 查询返回形态 | `(Asset, Option<TabularAsset>)` 非 tabular 时第二个为 None |
+| `test_cas_commit_optimistic_concurrency` | 集成 | CAS Commit 乐观并发 | expected metadata_location 不匹配时拒绝更新 |
 
 ---
 
 ## 修订记录
+
+### V5.0（2026-05-13）
+
+- 更新：测试统计总览表（126 单元 + 168 集成 = 294 合计），同步 Phase 4 实际数量
+- 新增：quasar-core StoreError 扩展变体测试矩阵（11 个单元测试，新增 namespace_not_empty / domain_not_empty / database_unavailable / timeout / internal 结构体变体）
+- 新增：quasar-core Domain 模型测试矩阵（2 个单元测试）
+- 新增：Lance ID 解析器单元测试矩阵（12 个单元测试，V3 新增）
+- 新增：Unified 错误映射单元测试矩阵（2 个单元测试，internal 脱敏 + domain_not_empty）
+- 新增：quasar-storage 单元测试矩阵（15 个单元测试，SQL 常量 well-formed + schema init 校验）
+- 新增：quasar-server e2e 测试矩阵（6 个集成测试，Iceberg/Lance 全生命周期 + Domain 隔离 + 跨格式冲突 + 非空 Domain 保护）
+- 新增：Lance Namespace 端点 id parser 集成测试（3 个测试，root list / single segment / non-default domain）
+- 新增：Lance Table 端点跨 Namespace rename 测试（2 个：cross_namespace happy path + cross_domain rejected）
+- 新增：Iceberg Table 端点跨 Namespace rename 测试（1 个，行为从 400 改为支持跨 ns）
+- 新增：Unified Asset 端点非 tabular 资产测试（1 个）
+- 新增：Unified Asset 端点跨 Namespace rename 测试（1 个）
+- 新增：Unified Namespace 端点 Domain CRUD 测试（2 个）
+- 新增：Storage 集成测试矩阵扩展（8 个新增：cross-ns rename / domain CRUD / namespace isolation / active uniqueness / version_order / unified query / CAS commit）
+- 修正：Unified Asset `test_list_assets_order_by_name_then_format` → `test_list_assets_order_by_name`
+- 修正：Unified Asset 删除 `test_get_asset_missing_format`、`test_get_asset_invalid_format`（V3 不再强制 format）
+- 修正：Unified Asset 新增 `test_get_asset_without_format_returns_200`、`test_get_asset_ignores_unknown_format_query`
+- 修正：Lance error `test_store_error_to_lance_version_parses_version_number` / `test_store_error_to_lance_version_non_version_message` → `test_store_error_to_lance_version_already_exists_maps_to_table_exists`
+- 修正：跨格式隔离测试矩阵更新（V3 端点级隔离后行为变更：list/drop/rename isolation 改为 create conflicts / lance drop/rename cannot target iceberg）
+- 修正：运行命令更新为 `cargo test --workspace --all-features --all-targets`
 
 ### V4.0（2026-05-07）
 
