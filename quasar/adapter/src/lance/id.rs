@@ -10,10 +10,6 @@
 //! | Domain `prod`                                  | `"prod"`                    |
 //! | Domain `prod` + Namespace `analytics`          | `"prod$analytics"`          |
 //! | Domain + Namespace + Table `embeddings`        | `"prod$analytics$embeddings"` |
-//!
-//! Phase 3 C2 lands the parser; the call sites in `namespace.rs` /
-//! `table.rs` / `version.rs` are wired in C3 / C4.
-#![allow(dead_code)]
 
 use super::error::LanceError;
 

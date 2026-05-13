@@ -165,7 +165,7 @@ async fn test_cross_format_list_isolation() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/lance/v1/namespace/prod/table/list")
+                .uri("/lance/v1/namespace/default$prod/table/list")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -241,7 +241,7 @@ async fn test_cross_format_describe_isolation() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/describe")
+                .uri("/lance/v1/table/default%24prod%24users/describe")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -306,7 +306,7 @@ async fn test_cross_format_drop_isolation() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/exists")
+                .uri("/lance/v1/table/default%24prod%24users/exists")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -372,7 +372,7 @@ async fn test_cross_format_rename_isolation() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/exists")
+                .uri("/lance/v1/table/default%24prod%24users/exists")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -408,7 +408,7 @@ async fn test_cross_format_exists_isolation() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/exists")
+                .uri("/lance/v1/table/default%24prod%24users/exists")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -492,7 +492,7 @@ async fn test_standard_protocol_errors_do_not_use_unified_problem_details() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24missing/describe")
+                .uri("/lance/v1/table/default%24prod%24missing/describe")
                 .body(Body::empty())
                 .unwrap(),
         )

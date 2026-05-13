@@ -101,7 +101,7 @@ async fn test_declare_and_describe_table() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/declare")
+                .uri("/lance/v1/table/default%24prod%24users/declare")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"options": {"mode": "create"}}"#))
                 .unwrap(),
@@ -118,7 +118,7 @@ async fn test_declare_and_describe_table() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/describe")
+                .uri("/lance/v1/table/default%24prod%24users/describe")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -144,7 +144,7 @@ async fn test_declare_duplicate_returns_409() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/declare")
+                .uri("/lance/v1/table/default%24prod%24users/declare")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{}"#))
                 .unwrap(),
@@ -157,7 +157,7 @@ async fn test_declare_duplicate_returns_409() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/declare")
+                .uri("/lance/v1/table/default%24prod%24users/declare")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{}"#))
                 .unwrap(),
@@ -252,7 +252,7 @@ async fn test_table_exists() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/exists")
+                .uri("/lance/v1/table/default%24prod%24users/exists")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -267,7 +267,7 @@ async fn test_table_exists() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24missing/exists")
+                .uri("/lance/v1/table/default%24prod%24missing/exists")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -290,7 +290,7 @@ async fn test_register_table() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/register")
+                .uri("/lance/v1/table/default%24prod%24users/register")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{"location": "s3://bucket/warehouse/prod/users"}"#,
@@ -332,7 +332,7 @@ async fn test_deregister_table() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/deregister")
+                .uri("/lance/v1/table/default%24prod%24users/deregister")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -345,7 +345,7 @@ async fn test_deregister_table() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/deregister")
+                .uri("/lance/v1/table/default%24prod%24users/deregister")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -384,7 +384,7 @@ async fn test_drop_table() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/drop")
+                .uri("/lance/v1/table/default%24prod%24users/drop")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -397,7 +397,7 @@ async fn test_drop_table() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/exists")
+                .uri("/lance/v1/table/default%24prod%24users/exists")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -435,7 +435,7 @@ async fn test_rename_table() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/rename")
+                .uri("/lance/v1/table/default%24prod%24users/rename")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"new_name": "customers"}"#))
                 .unwrap(),
@@ -450,7 +450,7 @@ async fn test_rename_table() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/exists")
+                .uri("/lance/v1/table/default%24prod%24users/exists")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -464,7 +464,7 @@ async fn test_rename_table() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24customers/exists")
+                .uri("/lance/v1/table/default%24prod%24customers/exists")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -486,7 +486,7 @@ async fn test_describe_not_found() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24missing/describe")
+                .uri("/lance/v1/table/default%24prod%24missing/describe")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -508,7 +508,7 @@ async fn test_declare_namespace_not_found() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/declare")
+                .uri("/lance/v1/table/default%24prod%24users/declare")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{}"#))
                 .unwrap(),
@@ -547,7 +547,7 @@ async fn test_register_duplicate_returns_409() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/register")
+                .uri("/lance/v1/table/default%24prod%24users/register")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{"location": "s3://bucket/warehouse/prod/users"}"#,
@@ -601,7 +601,7 @@ async fn test_rename_to_existing_name_returns_409() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/rename")
+                .uri("/lance/v1/table/default%24prod%24users/rename")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"new_name": "customers"}"#))
                 .unwrap(),
@@ -626,7 +626,7 @@ async fn test_drop_table_not_found() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24missing/drop")
+                .uri("/lance/v1/table/default%24prod%24missing/drop")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -650,7 +650,7 @@ async fn test_rename_table_not_found() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24missing/rename")
+                .uri("/lance/v1/table/default%24prod%24missing/rename")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"new_name": "newname"}"#))
                 .unwrap(),
@@ -700,7 +700,7 @@ async fn test_exists_table_not_found_in_existing_namespace() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24missing/exists")
+                .uri("/lance/v1/table/default%24prod%24missing/exists")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -721,7 +721,7 @@ async fn test_exists_namespace_not_found_returns_false() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/exists")
+                .uri("/lance/v1/table/default%24prod%24users/exists")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -731,4 +731,64 @@ async fn test_exists_namespace_not_found_returns_false() {
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response).await;
     assert_eq!(json["exists"], false);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_declare_in_non_default_domain() {
+    use quasar_core::DomainStore;
+    let store = setup().await;
+    // Tear down any non-default domain leftover from earlier tests.
+    let instance = PG_INSTANCE.get().expect("instance initialised");
+    let pool = test_pool(&instance.url);
+    let client = pool.get().await.expect("client");
+    client
+        .execute("DELETE FROM domains WHERE name <> 'default'", &[])
+        .await
+        .expect("clear non-default domains");
+    store
+        .create_domain(
+            "phase3",
+            None,
+            HashMap::new(),
+            None,
+            serde_json::json!({}),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .create_namespace("phase3", "analytics", None, HashMap::new())
+        .await
+        .unwrap();
+
+    let app = test_app(store);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/lance/v1/table/phase3%24analytics%24events/declare")
+                .header("Content-Type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/lance/v1/table/phase3%24analytics%24events/exists")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["exists"], true);
 }

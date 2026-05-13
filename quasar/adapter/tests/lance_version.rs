@@ -114,7 +114,7 @@ async fn test_create_and_describe_version() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/version/create")
+                .uri("/lance/v1/table/default%24prod%24users/version/create")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{"version": 1, "manifest_path": "s3://bucket/warehouse/prod/users/_versions/1.manifest"}"#,
@@ -136,7 +136,7 @@ async fn test_create_and_describe_version() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/version/describe")
+                .uri("/lance/v1/table/default%24prod%24users/version/describe")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"version": 1}"#))
                 .unwrap(),
@@ -178,7 +178,7 @@ async fn test_create_duplicate_returns_409() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/version/create")
+                .uri("/lance/v1/table/default%24prod%24users/version/create")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{"version": 1, "manifest_path": "s3://bucket/v1.manifest"}"#,
@@ -193,7 +193,7 @@ async fn test_create_duplicate_returns_409() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/version/create")
+                .uri("/lance/v1/table/default%24prod%24users/version/create")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{"version": 1, "manifest_path": "s3://bucket/v1.manifest"}"#,
@@ -258,7 +258,7 @@ async fn test_list_versions() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/lance/v1/table/prod%24users/version/list")
+                .uri("/lance/v1/table/default%24prod%24users/version/list")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -297,7 +297,7 @@ async fn test_describe_not_found() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/version/describe")
+                .uri("/lance/v1/table/default%24prod%24users/version/describe")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"version": 99}"#))
                 .unwrap(),
@@ -322,7 +322,7 @@ async fn test_create_table_not_found() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/version/create")
+                .uri("/lance/v1/table/default%24prod%24users/version/create")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{"version": 1, "manifest_path": "s3://bucket/v1.manifest"}"#,
@@ -375,7 +375,7 @@ async fn test_describe_current_version_in_describe_table() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod%24users/describe")
+                .uri("/lance/v1/table/default%24prod%24users/describe")
                 .body(Body::empty())
                 .unwrap(),
         )

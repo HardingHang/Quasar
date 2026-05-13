@@ -8,9 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::error::{store_error_to_lance_version, ProblemDetails};
-use super::table::parse_table_id;
-use crate::DEFAULT_DOMAIN;
+use super::error::{store_error_to_lance_version, LanceError, ProblemDetails};
+use super::id::parse_table_id;
 
 // ── Request DTOs ───────────────────────────────────────────
 
@@ -49,11 +48,11 @@ pub async fn create_version(
     Json(req): Json<CreateVersionRequest>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
     let instance = format!("/lance/v1/table/{}/version/create", id);
-    let (namespace, table) = parse_table_id(&id)?;
+    let parsed = parse_table_id(&id, &instance).map_err(LanceError::to_problem_details)?;
 
     // Resolve asset id first; V3 version operations are keyed on asset_id.
     let (asset, _) = store
-        .get_tabular_asset(DEFAULT_DOMAIN, namespace, "lance", table)
+        .get_tabular_asset(&parsed.domain, &parsed.namespace, "lance", &parsed.table)
         .await
         .map_err(|e| store_error_to_lance_version(e, &instance).to_problem_details())?;
 
@@ -74,7 +73,7 @@ pub async fn create_version(
     let version_id = version.version_order.ok_or_else(|| {
         tracing::error!(asset_id = %asset.id, version_key = %version.version_key,
             "lance create_version returned version without version_order");
-        super::error::LanceError::InternalError {
+        LanceError::InternalError {
             detail: "An internal error occurred".to_string(),
             instance: instance.clone(),
         }
@@ -96,10 +95,10 @@ pub async fn list_versions(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
     let instance = format!("/lance/v1/table/{}/version/list", id);
-    let (namespace, table) = parse_table_id(&id)?;
+    let parsed = parse_table_id(&id, &instance).map_err(LanceError::to_problem_details)?;
 
     let (asset, _) = store
-        .get_tabular_asset(DEFAULT_DOMAIN, namespace, "lance", table)
+        .get_tabular_asset(&parsed.domain, &parsed.namespace, "lance", &parsed.table)
         .await
         .map_err(|e| store_error_to_lance_version(e, &instance).to_problem_details())?;
 
@@ -114,7 +113,7 @@ pub async fn list_versions(
             v.version_order.ok_or_else(|| {
                 tracing::error!(asset_id = %asset.id, version_key = %v.version_key,
                     "lance list_versions encountered version without version_order");
-                super::error::LanceError::InternalError {
+                LanceError::InternalError {
                     detail: "An internal error occurred".to_string(),
                     instance: instance.clone(),
                 }
@@ -138,10 +137,10 @@ pub async fn describe_version(
     Json(req): Json<DescribeVersionRequest>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
     let instance = format!("/lance/v1/table/{}/version/describe", id);
-    let (namespace, table) = parse_table_id(&id)?;
+    let parsed = parse_table_id(&id, &instance).map_err(LanceError::to_problem_details)?;
 
     let (asset, _) = store
-        .get_tabular_asset(DEFAULT_DOMAIN, namespace, "lance", table)
+        .get_tabular_asset(&parsed.domain, &parsed.namespace, "lance", &parsed.table)
         .await
         .map_err(|e| store_error_to_lance_version(e, &instance).to_problem_details())?;
 
@@ -154,7 +153,7 @@ pub async fn describe_version(
     let version_id = version.version_order.ok_or_else(|| {
         tracing::error!(asset_id = %asset.id, version_key = %version.version_key,
             "lance describe_version returned version without version_order");
-        super::error::LanceError::InternalError {
+        LanceError::InternalError {
             detail: "An internal error occurred".to_string(),
             instance: instance.clone(),
         }

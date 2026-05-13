@@ -136,7 +136,7 @@ async fn test_dual_instance_stateless_smoke() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod$users/declare")
+                .uri("/lance/v1/table/default$prod$users/declare")
                 .header("Content-Type", "application/json")
                 .body(Body::from("{}"))
                 .unwrap(),
@@ -234,7 +234,7 @@ async fn test_dual_instance_stateless_smoke() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/table/prod$users/exists")
+                .uri("/lance/v1/table/default$prod$users/exists")
                 .body(Body::empty())
                 .unwrap(),
         )

@@ -9,21 +9,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::error::{store_error_to_lance_table, LanceError, ProblemDetails};
+use super::id::parse_table_id;
 use super::LanceConfig;
-use crate::DEFAULT_DOMAIN;
 use quasar_core::validate_name;
-
-// ── Path Parsing ───────────────────────────────────────────
-
-pub(crate) fn parse_table_id(id: &str) -> Result<(&str, &str), LanceError> {
-    id.rsplit_once('$').ok_or_else(|| LanceError::InvalidInput {
-        detail: format!(
-            "invalid table id '{}': expected '{{namespace}}${{table}}'",
-            id
-        ),
-        instance: format!("/lance/v1/table/{}", id),
-    })
-}
 
 // ── Request DTOs ───────────────────────────────────────────
 
@@ -79,16 +67,21 @@ pub async fn declare_table(
     Json(req): Json<DeclareTableRequest>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
     let instance = format!("/lance/v1/table/{}/declare", id);
-    let (namespace, table) = parse_table_id(&id)?;
-    validate_name(namespace)
+    let parsed = parse_table_id(&id, &instance).map_err(LanceError::to_problem_details)?;
+    validate_name(&parsed.namespace)
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
-    validate_name(table)
+    validate_name(&parsed.table)
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
 
     let location = if let Some(ref wp) = config.warehouse_path {
-        format!("{}/{}/{}/", wp.trim_end_matches('/'), namespace, table)
+        format!(
+            "{}/{}/{}/",
+            wp.trim_end_matches('/'),
+            parsed.namespace,
+            parsed.table
+        )
     } else {
-        format!("lance://{}/{}", namespace, table)
+        format!("lance://{}/{}", parsed.namespace, parsed.table)
     };
 
     // Persist storage options into properties with prefix for later retrieval.
@@ -99,9 +92,9 @@ pub async fn declare_table(
 
     let (asset, _tabular) = store
         .create_tabular_asset(
-            DEFAULT_DOMAIN,
-            namespace,
-            table,
+            &parsed.domain,
+            &parsed.namespace,
+            &parsed.table,
             "lance",
             &location,
             None,
@@ -127,11 +120,16 @@ pub async fn describe_table(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
     let instance = format!("/lance/v1/table/{}/describe", id);
-    let (namespace, table) = parse_table_id(&id)?;
+    let parsed = parse_table_id(&id, &instance).map_err(LanceError::to_problem_details)?;
 
     // Use single query to get asset and current version
     let (asset, tabular, current_version) = store
-        .get_tabular_asset_with_current_version(DEFAULT_DOMAIN, namespace, "lance", table)
+        .get_tabular_asset_with_current_version(
+            &parsed.domain,
+            &parsed.namespace,
+            "lance",
+            &parsed.table,
+        )
         .await
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
 
@@ -153,19 +151,19 @@ pub async fn register_table(
     Json(req): Json<RegisterTableRequest>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
     let instance = format!("/lance/v1/table/{}/register", id);
-    let (namespace, table) = parse_table_id(&id)?;
-    validate_name(namespace)
+    let parsed = parse_table_id(&id, &instance).map_err(LanceError::to_problem_details)?;
+    validate_name(&parsed.namespace)
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
-    validate_name(table)
+    validate_name(&parsed.table)
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
 
     let properties = req.options;
 
     let (asset, _tabular) = store
         .create_tabular_asset(
-            DEFAULT_DOMAIN,
-            namespace,
-            table,
+            &parsed.domain,
+            &parsed.namespace,
+            &parsed.table,
             "lance",
             &req.location,
             None,
@@ -191,10 +189,10 @@ pub async fn deregister_table(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
     let instance = format!("/lance/v1/table/{}/deregister", id);
-    let (namespace, table) = parse_table_id(&id)?;
+    let parsed = parse_table_id(&id, &instance).map_err(LanceError::to_problem_details)?;
 
     store
-        .drop_asset(DEFAULT_DOMAIN, namespace, table)
+        .drop_asset(&parsed.domain, &parsed.namespace, &parsed.table)
         .await
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
 
@@ -207,10 +205,10 @@ pub async fn drop_table(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
     let instance = format!("/lance/v1/table/{}/drop", id);
-    let (namespace, table) = parse_table_id(&id)?;
+    let parsed = parse_table_id(&id, &instance).map_err(LanceError::to_problem_details)?;
 
     store
-        .drop_asset(DEFAULT_DOMAIN, namespace, table)
+        .drop_asset(&parsed.domain, &parsed.namespace, &parsed.table)
         .await
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
 
@@ -223,13 +221,13 @@ pub async fn table_exists(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
     let instance = format!("/lance/v1/table/{}/exists", id);
-    let (namespace, table) = parse_table_id(&id)?;
+    let parsed = parse_table_id(&id, &instance).map_err(LanceError::to_problem_details)?;
 
     // V3 stores the format on `tabular_assets.format`; an Iceberg-format
     // asset under the same name still satisfies `asset_exists`, so we
     // ask the format-filtered lookup instead.
     let exists = match store
-        .get_tabular_asset(DEFAULT_DOMAIN, namespace, "lance", table)
+        .get_tabular_asset(&parsed.domain, &parsed.namespace, "lance", &parsed.table)
         .await
     {
         Ok(_) => true,
@@ -247,16 +245,21 @@ pub async fn rename_table(
     Json(req): Json<RenameTableRequest>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
     let instance = format!("/lance/v1/table/{}/rename", id);
-    let (namespace, table) = parse_table_id(&id)?;
-    validate_name(namespace)
+    let parsed = parse_table_id(&id, &instance).map_err(LanceError::to_problem_details)?;
+    validate_name(&parsed.namespace)
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
-    validate_name(table)
+    validate_name(&parsed.table)
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
     validate_name(&req.new_name)
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
 
     store
-        .rename_asset(DEFAULT_DOMAIN, namespace, table, &req.new_name)
+        .rename_asset(
+            &parsed.domain,
+            &parsed.namespace,
+            &parsed.table,
+            &req.new_name,
+        )
         .await
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
 
