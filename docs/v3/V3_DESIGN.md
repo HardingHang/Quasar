@@ -681,7 +681,7 @@ Domain 映射规则：`{prefix}` 为 `Domain.name`。
 | POST | `/{prefix}/namespaces/{ns}/tables/{table}` | `table::commit_table` | 执行 Iceberg CAS commit；校验 requirements，写入新 metadata 后原子更新 `metadata_location`。 |
 | DELETE | `/{prefix}/namespaces/{ns}/tables/{table}` | `table::drop_table` | 删除 Iceberg 表 catalog 记录；`purgeRequested` 的数据清理语义由适配器配置决定，V3 可先只做 catalog drop。 |
 | HEAD | `/{prefix}/namespaces/{ns}/tables/{table}` | `table::table_exists` | 检查 Iceberg 表是否存在；只认 `format='iceberg'` 的表，不返回响应体。 |
-| POST | `/{prefix}/tables/rename` | `table::rename_table` | 按 Iceberg rename 请求将表移动到目标 Namespace/名称；需校验源表存在、目标 Namespace 存在且目标名未被占用。 |
+| POST | `/{prefix}/tables/rename` | `table::rename_table` | 按 Iceberg rename 请求将表移动到目标 Namespace/名称；同 domain 支持跨 namespace，目标 Namespace 存在且目标名未被占用。 |
 
 #### 4.1.2 Lance REST API
 
@@ -716,7 +716,7 @@ V3 对 Lance Namespace ID 的解析规则：
 | POST | `/table/{id}/deregister` | `table::deregister_table` | 注销 catalog 记录但保留对象存储数据；用于断开 Catalog 与已有 Lance 数据集的绑定。 |
 | POST | `/table/{id}/drop` | `table::drop_table` | 删除 Lance 表 catalog 记录；是否清理对象存储数据由 Lance 请求语义和服务端配置决定。 |
 | POST | `/table/{id}/exists` | `table::table_exists` | 检查 Lance 表是否存在；只认 `format='lance'` 的表。 |
-| POST | `/table/{id}/rename` | `table::rename_table` | 重命名 Lance 表；需保证目标 `domain$namespace$table` 的 Namespace 存在且目标名未被占用。 |
+| POST | `/table/{id}/rename` | `table::rename_table` | 重命名 Lance 表；支持同 domain 跨 namespace，按官方 `new_table_name` + `new_namespace_id` 语义；跨 domain 拒绝。 |
 | POST | `/table/{id}/version/create` | `version::create_version` | 注册已由 Lance 客户端写入对象存储的版本；写入 `asset_versions` 与 `tabular_asset_versions`。 |
 | GET | `/table/{id}/version/list` | `version::list_versions` | 按 `version_order` 升序列出 Lance 表版本；禁止从 `version_key` 字符串解析排序。 |
 | POST | `/table/{id}/version/describe` | `version::describe_version` | 返回指定 Lance 表版本的元数据位置和版本信息；版本不存在返回 Lance 版本 not found 语义。 |
@@ -742,7 +742,7 @@ V3 对 Lance Namespace ID 的解析规则：
 | GET | `/domains/{domain}/namespaces/{ns}/assets/{name}` | `asset::get_asset` | 获取单个 Asset 的统一视图；活动资产名唯一，因此无需 `?format=`。 |
 | DELETE | `/domains/{domain}/namespaces/{ns}/assets/{name}` | `asset::drop_asset` | 删除 Asset 的 catalog 记录并清理扩展表/版本记录；不默认删除对象存储数据。 |
 | PATCH | `/domains/{domain}/namespaces/{ns}/assets/{name}` | `asset::update_asset` | 更新 Asset 描述和 properties；不允许修改 `asset_type` 或表格式。 |
-| POST | `/domains/{domain}/namespaces/{ns}/assets/{name}/rename` | `asset::rename_asset` | 重命名 Asset；目标名称在同一 Namespace 内必须未被活动资产占用。 |
+| POST | `/domains/{domain}/namespaces/{ns}/assets/{name}/rename` | `asset::rename_asset` | 重命名 Asset；支持同 domain 跨 namespace，目标名称在目标 Namespace 内必须未被活动资产占用。 |
 
 ### 4.2 Iceberg REST Catalog API
 

@@ -645,10 +645,7 @@ impl AssetStore for PgCatalogStore {
             if target_ns != namespace_name {
                 // Cross-namespace rename: look up target namespace id first.
                 let target_row = client
-                    .query_opt(
-                        queries::namespace::GET_BY_NAME,
-                        &[&domain_name, &target_ns],
-                    )
+                    .query_opt(queries::namespace::GET_BY_NAME, &[&domain_name, &target_ns])
                     .await
                     .map_err(internal_err("rename_asset lookup target namespace"))?;
 

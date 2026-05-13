@@ -334,8 +334,18 @@ pub async fn rename_asset(
     validate_name(&name).map_err(|e| map_asset_error(e, &instance, &request_id))?;
     validate_name(&req.new_name).map_err(|e| map_asset_error(e, &instance, &request_id))?;
 
+    if let Some(ref new_ns) = req.new_namespace {
+        validate_name(new_ns).map_err(|e| map_asset_error(e, &instance, &request_id))?;
+    }
+
     store
-        .rename_asset(&domain, &ns, &name, &req.new_name, None)
+        .rename_asset(
+            &domain,
+            &ns,
+            &name,
+            &req.new_name,
+            req.new_namespace.as_deref(),
+        )
         .await
         .map_err(|e| map_asset_error(e, &instance, &request_id))?;
 

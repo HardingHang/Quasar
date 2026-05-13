@@ -861,6 +861,59 @@ async fn test_rename_asset_invalid_new_name() {
 
 #[tokio::test]
 #[serial]
+async fn test_rename_asset_cross_namespace() {
+    let store = setup().await;
+    create_test_namespace(&store, "prod").await;
+    create_test_namespace(&store, "staging").await;
+    create_test_asset(&store, "prod", AssetFormat::Iceberg, "users").await;
+
+    let app = test_app(store);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/users/rename")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"new_name": "users", "new_namespace": "staging"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let old = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/users")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(old.status(), StatusCode::NOT_FOUND);
+
+    let new = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/unified/v1/domains/default/namespaces/staging/assets/users")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(new.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+#[serial]
 async fn test_list_assets_invalid_format() {
     let store = setup().await;
     create_test_namespace(&store, "prod").await;

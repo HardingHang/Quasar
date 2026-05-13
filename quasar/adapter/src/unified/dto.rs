@@ -140,6 +140,7 @@ pub struct UpdateAssetRequest {
 #[derive(Debug, Deserialize)]
 pub struct RenameAssetRequest {
     pub new_name: String,
+    pub new_namespace: Option<String>,
 }
 
 /// List assets response body.
