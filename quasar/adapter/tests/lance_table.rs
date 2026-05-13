@@ -437,7 +437,7 @@ async fn test_rename_table() {
                 .method("POST")
                 .uri("/lance/v1/table/default%24prod%24users/rename")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"new_name": "customers"}"#))
+                .body(Body::from(r#"{"new_table_name": "customers"}"#))
                 .unwrap(),
         )
         .await
@@ -603,7 +603,7 @@ async fn test_rename_to_existing_name_returns_409() {
                 .method("POST")
                 .uri("/lance/v1/table/default%24prod%24users/rename")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"new_name": "customers"}"#))
+                .body(Body::from(r#"{"new_table_name": "customers"}"#))
                 .unwrap(),
         )
         .await
@@ -652,7 +652,7 @@ async fn test_rename_table_not_found() {
                 .method("POST")
                 .uri("/lance/v1/table/default%24prod%24missing/rename")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"new_name": "newname"}"#))
+                .body(Body::from(r#"{"new_table_name": "newname"}"#))
                 .unwrap(),
         )
         .await
@@ -662,6 +662,113 @@ async fn test_rename_table_not_found() {
     let json = body_json(response).await;
     assert_eq!(json["error"], "TableNotFound");
     assert_eq!(json["code"], 404);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_rename_cross_namespace() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    create_namespace(&store, "staging").await;
+    store
+        .create_tabular_asset(
+            "default",
+            "prod",
+            "users",
+            "lance",
+            "lance://prod/users",
+            None,
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let app = test_app(store);
+
+    let rename = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/lance/v1/table/default%24prod%24users/rename")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"new_table_name": "users", "new_namespace_id": ["default", "staging"]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rename.status(), StatusCode::OK);
+
+    let old = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/lance/v1/table/default%24prod%24users/exists")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let json = body_json(old).await;
+    assert_eq!(json["exists"], false);
+
+    let new = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/lance/v1/table/default%24staging%24users/exists")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let json = body_json(new).await;
+    assert_eq!(json["exists"], true);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_rename_cross_domain_rejected() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    store
+        .create_tabular_asset(
+            "default",
+            "prod",
+            "users",
+            "lance",
+            "lance://prod/users",
+            None,
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/lance/v1/table/default%24prod%24users/rename")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"new_table_name": "users", "new_namespace_id": ["other", "prod"]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(json["error"], "InvalidInput");
 }
 
 #[tokio::test]

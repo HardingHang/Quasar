@@ -442,7 +442,8 @@ async fn test_rename_cross_namespace() {
         .unwrap();
     let app = test_app(store);
 
-    let response = app
+    let rename = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -456,9 +457,32 @@ async fn test_rename_cross_namespace() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let json = body_json(response).await;
-    assert_eq!(json["error"]["type"], "BadRequestException");
+    assert_eq!(rename.status(), StatusCode::OK);
+
+    let old = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(old.status(), StatusCode::NOT_FOUND);
+
+    let new = app
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri("/iceberg/v1/default/namespaces/staging/tables/users")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(new.status(), StatusCode::OK);
 }
 
 #[tokio::test]

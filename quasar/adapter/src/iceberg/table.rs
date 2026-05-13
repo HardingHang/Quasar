@@ -357,11 +357,11 @@ pub async fn rename_table(
                 message: "destination namespace must not be empty".to_string(),
             })?;
 
-    if src_ns != dst_ns {
-        return Err(IcebergError::BadRequestException {
-            message: "cross-namespace rename not supported".to_string(),
-        });
-    }
+    let new_namespace = if src_ns == dst_ns {
+        None
+    } else {
+        Some(dst_ns.as_str())
+    };
 
     // V3 endpoint-level isolation: same rationale as drop_table —
     // Iceberg rename cannot operate on a Lance-format source asset.
@@ -376,7 +376,7 @@ pub async fn rename_table(
             src_ns,
             &req.source.name,
             &req.destination.name,
-            None,
+            new_namespace,
         )
         .await
         .map_err(store_error_to_iceberg_table)?;

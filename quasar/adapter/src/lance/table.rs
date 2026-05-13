@@ -30,7 +30,8 @@ pub struct RegisterTableRequest {
 
 #[derive(Deserialize)]
 pub struct RenameTableRequest {
-    pub new_name: String,
+    pub new_table_name: String,
+    pub new_namespace_id: Option<Vec<String>>,
 }
 
 // ── Response DTOs ──────────────────────────────────────────
@@ -266,8 +267,33 @@ pub async fn rename_table(
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
     validate_name(&parsed.table)
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
-    validate_name(&req.new_name)
+    validate_name(&req.new_table_name)
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+
+    let new_namespace = if let Some(ref segments) = req.new_namespace_id {
+        if segments.len() != 2 {
+            return Err(LanceError::InvalidInput {
+                detail: format!(
+                    "new_namespace_id must be 2 segments (domain$namespace), got {}",
+                    segments.len()
+                ),
+                instance,
+            }
+            .to_problem_details());
+        }
+        if segments[0] != parsed.domain {
+            return Err(LanceError::InvalidInput {
+                detail: "cross-domain rename not supported".to_string(),
+                instance,
+            }
+            .to_problem_details());
+        }
+        validate_name(&segments[1])
+            .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+        Some(segments[1].as_str())
+    } else {
+        None
+    };
 
     // V3 endpoint-level isolation: only Lance-format assets are visible
     // through the Lance rename endpoint. An Iceberg asset with the same
@@ -283,8 +309,8 @@ pub async fn rename_table(
             &parsed.domain,
             &parsed.namespace,
             &parsed.table,
-            &req.new_name,
-            None,
+            &req.new_table_name,
+            new_namespace,
         )
         .await
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;

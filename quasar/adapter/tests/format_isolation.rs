@@ -305,7 +305,7 @@ async fn test_lance_rename_cannot_target_iceberg_asset() {
                 .method("POST")
                 .uri("/lance/v1/table/default%24prod%24users/rename")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"new_name":"customers"}"#))
+                .body(Body::from(r#"{"new_table_name":"customers"}"#))
                 .unwrap(),
         )
         .await
