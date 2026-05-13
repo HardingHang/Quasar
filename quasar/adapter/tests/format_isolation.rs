@@ -148,7 +148,7 @@ async fn test_cross_format_list_isolation() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/iceberg/v1/namespaces/prod/tables")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -203,7 +203,7 @@ async fn test_cross_format_load_isolation() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -294,7 +294,7 @@ async fn test_cross_format_drop_isolation() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -357,7 +357,7 @@ async fn test_cross_format_rename_isolation() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/tables/rename")
+                .uri("/iceberg/v1/default/tables/rename")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{"source": {"namespace": ["prod"], "name": "users"}, "destination": {"namespace": ["prod"], "name": "customers"}}"#,
@@ -445,7 +445,7 @@ async fn test_cross_format_commit_isolation() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{"requirements": [{"type": "assert-create"}], "updates": []}"#,
@@ -471,7 +471,7 @@ async fn test_standard_protocol_errors_do_not_use_unified_problem_details() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/iceberg/v1/namespaces/prod/tables/missing")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/missing")
                 .body(Body::empty())
                 .unwrap(),
         )

@@ -101,7 +101,7 @@ async fn test_create_and_load_table() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{"name": "users", "location": "s3://bucket/warehouse/prod/users"}"#,
@@ -131,7 +131,7 @@ async fn test_create_and_load_table() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -168,7 +168,7 @@ async fn test_create_duplicate_returns_409() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"name": "users"}"#))
                 .unwrap(),
@@ -219,7 +219,7 @@ async fn test_list_tables() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/iceberg/v1/namespaces/prod/tables")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -249,7 +249,7 @@ async fn test_load_table_not_found() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/iceberg/v1/namespaces/prod/tables/missing")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/missing")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -287,7 +287,7 @@ async fn test_drop_table() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -300,7 +300,7 @@ async fn test_drop_table() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -335,7 +335,7 @@ async fn test_table_exists() {
         .oneshot(
             Request::builder()
                 .method("HEAD")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -348,7 +348,7 @@ async fn test_table_exists() {
         .oneshot(
             Request::builder()
                 .method("HEAD")
-                .uri("/iceberg/v1/namespaces/prod/tables/missing")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/missing")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -383,7 +383,7 @@ async fn test_rename_table() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/tables/rename")
+                .uri("/iceberg/v1/default/tables/rename")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{"source": {"namespace": ["prod"], "name": "users"}, "destination": {"namespace": ["prod"], "name": "customers"}}"#,
@@ -400,7 +400,7 @@ async fn test_rename_table() {
         .oneshot(
             Request::builder()
                 .method("HEAD")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -412,7 +412,7 @@ async fn test_rename_table() {
         .oneshot(
             Request::builder()
                 .method("HEAD")
-                .uri("/iceberg/v1/namespaces/prod/tables/customers")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/customers")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -446,7 +446,7 @@ async fn test_rename_cross_namespace() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/tables/rename")
+                .uri("/iceberg/v1/default/tables/rename")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{"source": {"namespace": ["prod"], "name": "users"}, "destination": {"namespace": ["staging"], "name": "users"}}"#,
@@ -470,7 +470,7 @@ async fn test_create_table_namespace_not_found() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"name": "users"}"#))
                 .unwrap(),
@@ -494,7 +494,7 @@ async fn test_rename_table_source_not_found() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/tables/rename")
+                .uri("/iceberg/v1/default/tables/rename")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{"source": {"namespace": ["prod"], "name": "users"}, "destination": {"namespace": ["prod"], "name": "customers"}}"#,
@@ -547,7 +547,7 @@ async fn test_rename_table_destination_already_exists() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/tables/rename")
+                .uri("/iceberg/v1/default/tables/rename")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{"source": {"namespace": ["prod"], "name": "users"}, "destination": {"namespace": ["prod"], "name": "customers"}}"#,
@@ -574,7 +574,7 @@ async fn test_drop_table_not_found() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri("/iceberg/v1/namespaces/prod/tables/nonexistent")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/nonexistent")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -598,7 +598,7 @@ async fn test_list_tables_empty_namespace() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/iceberg/v1/namespaces/prod/tables")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
                 .body(Body::empty())
                 .unwrap(),
         )

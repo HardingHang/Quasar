@@ -102,7 +102,7 @@ async fn test_commit_success() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"name": "users"}"#))
                 .unwrap(),
@@ -119,7 +119,7 @@ async fn test_commit_success() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{
@@ -201,7 +201,7 @@ async fn test_commit_conflict() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{
@@ -279,7 +279,7 @@ async fn test_commit_requirement_failure() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{
@@ -315,7 +315,7 @@ async fn test_commit_table_not_found() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables/nonexistent")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/nonexistent")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"requirements": [], "updates": []}"#))
                 .unwrap(),
@@ -341,7 +341,7 @@ async fn test_commit_updates_persisted() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"name": "users"}"#))
                 .unwrap(),
@@ -354,7 +354,7 @@ async fn test_commit_updates_persisted() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{
@@ -386,7 +386,7 @@ async fn test_commit_updates_persisted() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -497,7 +497,7 @@ async fn test_concurrent_cas_conflict_end_to_end() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"name": "users"}"#))
                 .unwrap(),
@@ -512,7 +512,7 @@ async fn test_concurrent_cas_conflict_end_to_end() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{
@@ -543,7 +543,7 @@ async fn test_concurrent_cas_conflict_end_to_end() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .header("Content-Type", "application/json")
                 // Expecting snapshot-id=null but it's now 1 after commit1
                 .body(Body::from(
@@ -632,7 +632,7 @@ async fn test_assert_ref_snapshot_id_custom_branch() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{
@@ -703,7 +703,7 @@ async fn test_assert_ref_snapshot_id_custom_branch_fail() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{
@@ -775,7 +775,7 @@ async fn test_assert_table_uuid_failure() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{
@@ -813,7 +813,7 @@ async fn test_multiple_commit_version_increment() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"name": "users"}"#))
                 .unwrap(),
@@ -831,7 +831,7 @@ async fn test_multiple_commit_version_increment() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{
@@ -856,7 +856,7 @@ async fn test_multiple_commit_version_increment() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{
@@ -890,7 +890,7 @@ async fn test_set_snapshot_ref_with_tag_type() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"name": "users"}"#))
                 .unwrap(),
@@ -904,7 +904,7 @@ async fn test_set_snapshot_ref_with_tag_type() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{
@@ -927,7 +927,7 @@ async fn test_set_snapshot_ref_with_tag_type() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -951,7 +951,7 @@ async fn test_commit_namespace_not_found() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/nonexistent/tables/users")
+                .uri("/iceberg/v1/default/namespaces/nonexistent/tables/users")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"requirements": [], "updates": []}"#))
                 .unwrap(),
@@ -978,7 +978,7 @@ async fn test_commit_empty_updates() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"name": "users"}"#))
                 .unwrap(),
@@ -991,7 +991,7 @@ async fn test_commit_empty_updates() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{
@@ -1021,7 +1021,7 @@ async fn test_remove_properties_commit() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"name": "users"}"#))
                 .unwrap(),
@@ -1034,7 +1034,7 @@ async fn test_remove_properties_commit() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{
@@ -1056,7 +1056,7 @@ async fn test_remove_properties_commit() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{
@@ -1076,7 +1076,7 @@ async fn test_remove_properties_commit() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .body(Body::empty())
                 .unwrap(),
         )

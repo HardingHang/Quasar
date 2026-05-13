@@ -17,7 +17,6 @@ use super::error::{store_error_to_iceberg_table, IcebergError};
 use super::table_metadata::TableMetadata;
 use super::IcebergConfig;
 use crate::object_store_util::{object_exists, read_json, s3_url_to_path, write_json};
-use crate::DEFAULT_DOMAIN;
 use quasar_core::validate_name;
 
 // ── Object Store Helpers ───────────────────────────────────
@@ -171,16 +170,16 @@ fn build_initial_metadata(
 
 // ── Handlers ───────────────────────────────────────────────
 
-/// GET /iceberg/v1/namespaces/{ns}/tables
+/// GET /iceberg/v1/{prefix}/namespaces/{ns}/tables
 pub async fn list_tables(
     State(store): State<Arc<dyn CatalogStore>>,
-    Path(ns): Path<String>,
+    Path((prefix, ns)): Path<(String, String)>,
     Query(query): Query<ListTablesQuery>,
 ) -> Result<impl IntoResponse, IcebergError> {
     let _ = query; // pagination placeholder for MVP
 
     let assets = store
-        .list_tabular_assets(DEFAULT_DOMAIN, &ns, Some("iceberg"))
+        .list_tabular_assets(&prefix, &ns, Some("iceberg"))
         .await
         .map_err(store_error_to_iceberg_table)?;
 
@@ -199,11 +198,11 @@ pub async fn list_tables(
     ))
 }
 
-/// POST /iceberg/v1/namespaces/{ns}/tables
+/// POST /iceberg/v1/{prefix}/namespaces/{ns}/tables
 pub async fn create_table(
     State(store): State<Arc<dyn CatalogStore>>,
     Extension(config): Extension<IcebergConfig>,
-    Path(ns): Path<String>,
+    Path((prefix, ns)): Path<(String, String)>,
     Json(req): Json<CreateTableRequest>,
 ) -> Result<impl IntoResponse, IcebergError> {
     validate_name(&ns).map_err(store_error_to_iceberg_table)?;
@@ -232,7 +231,7 @@ pub async fn create_table(
 
     let _ = store
         .create_tabular_asset(
-            DEFAULT_DOMAIN,
+            &prefix,
             &ns,
             &req.name,
             "iceberg",
@@ -253,14 +252,14 @@ pub async fn create_table(
     ))
 }
 
-/// GET /iceberg/v1/namespaces/{ns}/tables/{table}
+/// GET /iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}
 pub async fn load_table(
     State(store): State<Arc<dyn CatalogStore>>,
     Extension(config): Extension<IcebergConfig>,
-    Path((ns, table)): Path<(String, String)>,
+    Path((prefix, ns, table)): Path<(String, String, String)>,
 ) -> Result<impl IntoResponse, IcebergError> {
     let (asset, tabular) = store
-        .get_tabular_asset(DEFAULT_DOMAIN, &ns, "iceberg", &table)
+        .get_tabular_asset(&prefix, &ns, "iceberg", &table)
         .await
         .map_err(store_error_to_iceberg_table)?;
 
@@ -290,26 +289,26 @@ pub async fn load_table(
     ))
 }
 
-/// DELETE /iceberg/v1/namespaces/{ns}/tables/{table}
+/// DELETE /iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}
 pub async fn drop_table(
     State(store): State<Arc<dyn CatalogStore>>,
-    Path((ns, table)): Path<(String, String)>,
+    Path((prefix, ns, table)): Path<(String, String, String)>,
 ) -> Result<impl IntoResponse, IcebergError> {
     store
-        .drop_asset(DEFAULT_DOMAIN, &ns, &table)
+        .drop_asset(&prefix, &ns, &table)
         .await
         .map_err(store_error_to_iceberg_table)?;
 
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// HEAD /iceberg/v1/namespaces/{ns}/tables/{table}
+/// HEAD /iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}
 pub async fn table_exists(
     State(store): State<Arc<dyn CatalogStore>>,
-    Path((ns, table)): Path<(String, String)>,
+    Path((prefix, ns, table)): Path<(String, String, String)>,
 ) -> Result<impl IntoResponse, IcebergError> {
     let exists = match store
-        .get_tabular_asset(DEFAULT_DOMAIN, &ns, "iceberg", &table)
+        .get_tabular_asset(&prefix, &ns, "iceberg", &table)
         .await
     {
         Ok(_) => true,
@@ -326,9 +325,10 @@ pub async fn table_exists(
     }
 }
 
-/// POST /iceberg/v1/tables/rename
+/// POST /iceberg/v1/{prefix}/tables/rename
 pub async fn rename_table(
     State(store): State<Arc<dyn CatalogStore>>,
+    Path(prefix): Path<String>,
     Json(req): Json<RenameTableRequest>,
 ) -> Result<impl IntoResponse, IcebergError> {
     validate_name(&req.source.name).map_err(store_error_to_iceberg_table)?;
@@ -356,31 +356,26 @@ pub async fn rename_table(
     }
 
     store
-        .rename_asset(
-            DEFAULT_DOMAIN,
-            src_ns,
-            &req.source.name,
-            &req.destination.name,
-        )
+        .rename_asset(&prefix, src_ns, &req.source.name, &req.destination.name)
         .await
         .map_err(store_error_to_iceberg_table)?;
 
     Ok(StatusCode::OK)
 }
 
-/// POST /iceberg/v1/namespaces/{ns}/tables/{table}
+/// POST /iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}
 /// Commit table updates (CAS).
 pub async fn commit_table(
     State(store): State<Arc<dyn CatalogStore>>,
     Extension(config): Extension<IcebergConfig>,
     metrics: Option<Extension<MetricsState>>,
-    Path((ns, table)): Path<(String, String)>,
+    Path((prefix, ns, table)): Path<(String, String, String)>,
     Json(req): Json<CommitTableRequest>,
 ) -> Result<impl IntoResponse, IcebergError> {
     let metrics = metrics.map(|e| e.0);
     // 1. Load the current asset with tabular detail
     let (_asset, tabular) = store
-        .get_tabular_asset(DEFAULT_DOMAIN, &ns, "iceberg", &table)
+        .get_tabular_asset(&prefix, &ns, "iceberg", &table)
         .await
         .map_err(store_error_to_iceberg_table)?;
 
@@ -449,7 +444,7 @@ pub async fn commit_table(
     // 11. CAS update via storage layer (atomically updates metadata_location, schema_snapshot, and properties)
     store
         .cas_update_metadata_location(
-            DEFAULT_DOMAIN,
+            &prefix,
             &ns,
             &table,
             "iceberg",

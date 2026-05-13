@@ -100,7 +100,7 @@ async fn test_create_and_get_namespace() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces")
+                .uri("/iceberg/v1/default/namespaces")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"namespace": ["prod"]}"#))
                 .unwrap(),
@@ -116,7 +116,7 @@ async fn test_create_and_get_namespace() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/iceberg/v1/namespaces/prod")
+                .uri("/iceberg/v1/default/namespaces/prod")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -139,7 +139,7 @@ async fn test_create_duplicate_returns_409() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces")
+                .uri("/iceberg/v1/default/namespaces")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"namespace": ["prod"]}"#))
                 .unwrap(),
@@ -165,7 +165,7 @@ async fn test_list_namespaces() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/iceberg/v1/namespaces")
+                .uri("/iceberg/v1/default/namespaces")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -187,7 +187,7 @@ async fn test_get_namespace_not_found() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/iceberg/v1/namespaces/missing")
+                .uri("/iceberg/v1/default/namespaces/missing")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -212,7 +212,7 @@ async fn test_drop_namespace() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri("/iceberg/v1/namespaces/prod")
+                .uri("/iceberg/v1/default/namespaces/prod")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -225,7 +225,7 @@ async fn test_drop_namespace() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/iceberg/v1/namespaces/prod")
+                .uri("/iceberg/v1/default/namespaces/prod")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -259,7 +259,7 @@ async fn test_drop_non_empty_namespace() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri("/iceberg/v1/namespaces/prod")
+                .uri("/iceberg/v1/default/namespaces/prod")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -290,7 +290,7 @@ async fn test_update_namespace_properties() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/properties")
+                .uri("/iceberg/v1/default/namespaces/prod/properties")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{"removals": ["env"], "updates": {"owner": "team-b", "region": "us-west"}}"#,
@@ -316,7 +316,7 @@ async fn test_update_namespace_properties() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/iceberg/v1/namespaces/prod")
+                .uri("/iceberg/v1/default/namespaces/prod")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -339,7 +339,7 @@ async fn test_update_namespace_properties_namespace_not_found() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/properties")
+                .uri("/iceberg/v1/default/namespaces/prod/properties")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{"removals": [], "updates": {"owner": "team-a"}}"#,
@@ -364,7 +364,7 @@ async fn test_list_namespaces_empty() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/iceberg/v1/namespaces")
+                .uri("/iceberg/v1/default/namespaces")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -389,7 +389,7 @@ async fn test_list_namespaces_pagination_offset_beyond_total() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/iceberg/v1/namespaces?pageToken=999")
+                .uri("/iceberg/v1/default/namespaces?pageToken=999")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -415,7 +415,7 @@ async fn test_list_namespaces_pagination_with_limit() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/iceberg/v1/namespaces?pageSize=2")
+                .uri("/iceberg/v1/default/namespaces?pageSize=2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -441,7 +441,7 @@ async fn test_create_namespace_empty_array_returns_400() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces")
+                .uri("/iceberg/v1/default/namespaces")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"namespace": []}"#))
                 .unwrap(),
@@ -464,7 +464,7 @@ async fn test_drop_namespace_not_found() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri("/iceberg/v1/namespaces/nonexistent")
+                .uri("/iceberg/v1/default/namespaces/nonexistent")
                 .body(Body::empty())
                 .unwrap(),
         )

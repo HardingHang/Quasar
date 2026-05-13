@@ -25,29 +25,32 @@ pub fn routes() -> Router<Arc<dyn CatalogStore>> {
     Router::new()
         .route("/iceberg/v1/config", get(config::get_config))
         .route(
-            "/iceberg/v1/namespaces",
+            "/iceberg/v1/{prefix}/namespaces",
             get(namespace::list_namespaces).post(namespace::create_namespace),
         )
         .route(
-            "/iceberg/v1/namespaces/{ns}",
+            "/iceberg/v1/{prefix}/namespaces/{ns}",
             get(namespace::get_namespace).delete(namespace::drop_namespace),
         )
         .route(
-            "/iceberg/v1/namespaces/{ns}/properties",
+            "/iceberg/v1/{prefix}/namespaces/{ns}/properties",
             post(namespace::update_namespace_properties),
         )
         .route(
-            "/iceberg/v1/namespaces/{ns}/tables",
+            "/iceberg/v1/{prefix}/namespaces/{ns}/tables",
             get(table::list_tables).post(table::create_table),
         )
         .route(
-            "/iceberg/v1/namespaces/{ns}/tables/{table}",
+            "/iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}",
             get(table::load_table)
                 .post(table::commit_table)
                 .delete(table::drop_table)
                 .head(table::table_exists),
         )
-        .route("/iceberg/v1/tables/rename", post(table::rename_table))
+        .route(
+            "/iceberg/v1/{prefix}/tables/rename",
+            post(table::rename_table),
+        )
 }
 
 pub mod config {

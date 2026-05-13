@@ -117,7 +117,7 @@ async fn test_create_table_writes_metadata_to_object_store() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"name": "users"}"#))
                 .unwrap(),
@@ -161,7 +161,7 @@ async fn test_commit_table_writes_new_metadata_to_object_store() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"name": "users"}"#))
                 .unwrap(),
@@ -180,7 +180,7 @@ async fn test_commit_table_writes_new_metadata_to_object_store() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{
@@ -248,7 +248,7 @@ async fn test_load_table_reads_from_object_store() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"name": "users"}"#))
                 .unwrap(),
@@ -297,7 +297,7 @@ async fn test_load_table_reads_from_object_store() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -325,7 +325,7 @@ async fn test_load_table_metadata_not_found() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"name": "users"}"#))
                 .unwrap(),
@@ -348,7 +348,7 @@ async fn test_load_table_metadata_not_found() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -376,7 +376,7 @@ async fn test_commit_table_metadata_not_found() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"name": "users"}"#))
                 .unwrap(),
@@ -399,7 +399,7 @@ async fn test_commit_table_metadata_not_found() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces/prod/tables/users")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{

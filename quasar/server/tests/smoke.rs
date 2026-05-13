@@ -169,7 +169,7 @@ async fn test_dual_instance_stateless_smoke() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/namespaces")
+                .uri("/iceberg/v1/default/namespaces")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"namespace":["staging"]}"#))
                 .unwrap(),
@@ -184,7 +184,7 @@ async fn test_dual_instance_stateless_smoke() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/iceberg/v1/namespaces")
+                .uri("/iceberg/v1/default/namespaces")
                 .body(Body::empty())
                 .unwrap(),
         )

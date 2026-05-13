@@ -12,12 +12,12 @@ use super::dto::{
     UpdateNamespacePropertiesRequest, UpdateNamespacePropertiesResponse,
 };
 use super::error::{store_error_to_iceberg_namespace, IcebergError};
-use crate::DEFAULT_DOMAIN;
 use quasar_core::validate_name;
 
-/// GET /iceberg/v1/namespaces
+/// GET /iceberg/v1/{prefix}/namespaces
 pub async fn list_namespaces(
     State(store): State<Arc<dyn CatalogStore>>,
+    Path(prefix): Path<String>,
     Query(query): Query<ListNamespacesQuery>,
 ) -> Result<impl IntoResponse, IcebergError> {
     let limit = query.page_size.unwrap_or(100).clamp(1, 1000);
@@ -28,7 +28,7 @@ pub async fn list_namespaces(
         .unwrap_or(0);
 
     let namespaces = store
-        .list_namespaces(DEFAULT_DOMAIN, offset, limit)
+        .list_namespaces(&prefix, offset, limit)
         .await
         .map_err(store_error_to_iceberg_namespace)?;
 
@@ -47,9 +47,10 @@ pub async fn list_namespaces(
     ))
 }
 
-/// POST /iceberg/v1/namespaces
+/// POST /iceberg/v1/{prefix}/namespaces
 pub async fn create_namespace(
     State(store): State<Arc<dyn CatalogStore>>,
+    Path(prefix): Path<String>,
     Json(req): Json<CreateNamespaceRequest>,
 ) -> Result<impl IntoResponse, IcebergError> {
     let name = req
@@ -62,7 +63,7 @@ pub async fn create_namespace(
     validate_name(name).map_err(store_error_to_iceberg_namespace)?;
 
     let ns = store
-        .create_namespace(DEFAULT_DOMAIN, name, None, req.properties)
+        .create_namespace(&prefix, name, None, req.properties)
         .await
         .map_err(store_error_to_iceberg_namespace)?;
 
@@ -75,13 +76,13 @@ pub async fn create_namespace(
     ))
 }
 
-/// GET /iceberg/v1/namespaces/{ns}
+/// GET /iceberg/v1/{prefix}/namespaces/{ns}
 pub async fn get_namespace(
     State(store): State<Arc<dyn CatalogStore>>,
-    Path(ns): Path<String>,
+    Path((prefix, ns)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, IcebergError> {
     let namespace = store
-        .get_namespace(DEFAULT_DOMAIN, &ns)
+        .get_namespace(&prefix, &ns)
         .await
         .map_err(store_error_to_iceberg_namespace)?;
 
@@ -94,13 +95,13 @@ pub async fn get_namespace(
     ))
 }
 
-/// DELETE /iceberg/v1/namespaces/{ns}
+/// DELETE /iceberg/v1/{prefix}/namespaces/{ns}
 pub async fn drop_namespace(
     State(store): State<Arc<dyn CatalogStore>>,
-    Path(ns): Path<String>,
+    Path((prefix, ns)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, IcebergError> {
     let assets = store
-        .list_tabular_assets(DEFAULT_DOMAIN, &ns, Some("iceberg"))
+        .list_tabular_assets(&prefix, &ns, Some("iceberg"))
         .await
         .map_err(store_error_to_iceberg_namespace)?;
 
@@ -111,28 +112,28 @@ pub async fn drop_namespace(
     }
 
     store
-        .drop_namespace(DEFAULT_DOMAIN, &ns)
+        .drop_namespace(&prefix, &ns)
         .await
         .map_err(store_error_to_iceberg_namespace)?;
 
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// POST /iceberg/v1/namespaces/{ns}/properties
+/// POST /iceberg/v1/{prefix}/namespaces/{ns}/properties
 pub async fn update_namespace_properties(
     State(store): State<Arc<dyn CatalogStore>>,
-    Path(ns): Path<String>,
+    Path((prefix, ns)): Path<(String, String)>,
     Json(req): Json<UpdateNamespacePropertiesRequest>,
 ) -> Result<impl IntoResponse, IcebergError> {
     // Read pre-update namespace to distinguish removed vs missing keys.
     let before = store
-        .get_namespace(DEFAULT_DOMAIN, &ns)
+        .get_namespace(&prefix, &ns)
         .await
         .map_err(store_error_to_iceberg_namespace)?;
 
     let updated_ns = store
         .update_namespace(
-            DEFAULT_DOMAIN,
+            &prefix,
             &ns,
             PatchField::Missing,
             &req.removals,
