@@ -12,7 +12,6 @@ use super::dto::{
     PaginationQuery, UpdateNamespaceRequest,
 };
 use super::error::{map_namespace_error, UnifiedError, UnifiedErrorCode};
-use crate::DEFAULT_DOMAIN;
 use quasar_core::validate_name;
 
 fn namespace_to_response(ns: quasar_core::Namespace) -> NamespaceResponse {
@@ -25,29 +24,39 @@ fn namespace_to_response(ns: quasar_core::Namespace) -> NamespaceResponse {
     }
 }
 
-/// GET /unified/v1/namespaces
+fn namespaces_instance(domain: &str) -> String {
+    format!("/unified/v1/domains/{}/namespaces", domain)
+}
+
+fn namespace_instance(domain: &str, ns: &str) -> String {
+    format!("/unified/v1/domains/{}/namespaces/{}", domain, ns)
+}
+
+/// GET /unified/v1/domains/{domain}/namespaces
 pub async fn list_namespaces(
     State(store): State<Arc<dyn CatalogStore>>,
     Extension(request_id): Extension<String>,
+    Path(domain): Path<String>,
     Query(query): Query<PaginationQuery>,
 ) -> Result<impl IntoResponse, UnifiedError> {
+    let instance = namespaces_instance(&domain);
     let page_size = query
         .resolved_page_size()
-        .map_err(|e| map_page_size_error(e, "/unified/v1/namespaces", request_id.as_str()))?;
+        .map_err(|e| map_page_size_error(e, &instance, request_id.as_str()))?;
 
     let offset = query.resolved_offset().map_err(|_| {
         UnifiedError::new(
             UnifiedErrorCode::InvalidPageToken,
             "invalid page token",
-            "/unified/v1/namespaces",
+            &instance,
             request_id.clone(),
         )
     })?;
 
     let namespaces = store
-        .list_namespaces(DEFAULT_DOMAIN, offset, page_size)
+        .list_namespaces(&domain, offset, page_size)
         .await
-        .map_err(|e| map_namespace_error(e, "/unified/v1/namespaces", &request_id))?;
+        .map_err(|e| map_namespace_error(e, &instance, &request_id))?;
 
     let next_page_token = if namespaces.len() as i32 >= page_size {
         Some(PaginationQuery::encode_token(
@@ -66,86 +75,72 @@ pub async fn list_namespaces(
     ))
 }
 
-/// POST /unified/v1/namespaces
+/// POST /unified/v1/domains/{domain}/namespaces
 pub async fn create_namespace(
     State(store): State<Arc<dyn CatalogStore>>,
     Extension(request_id): Extension<String>,
+    Path(domain): Path<String>,
     Json(req): Json<CreateNamespaceRequest>,
 ) -> Result<impl IntoResponse, UnifiedError> {
-    validate_name(&req.name)
-        .map_err(|e| map_namespace_error(e, "/unified/v1/namespaces", &request_id))?;
+    let instance = namespaces_instance(&domain);
+    validate_name(&req.name).map_err(|e| map_namespace_error(e, &instance, &request_id))?;
 
     let ns = store
-        .create_namespace(DEFAULT_DOMAIN, &req.name, req.comment, req.properties)
+        .create_namespace(&domain, &req.name, req.comment, req.properties)
         .await
-        .map_err(|e| map_namespace_error(e, "/unified/v1/namespaces", &request_id))?;
+        .map_err(|e| map_namespace_error(e, &instance, &request_id))?;
 
     Ok((StatusCode::CREATED, Json(namespace_to_response(ns))))
 }
 
-/// GET /unified/v1/namespaces/{ns}
+/// GET /unified/v1/domains/{domain}/namespaces/{ns}
 pub async fn get_namespace(
     State(store): State<Arc<dyn CatalogStore>>,
     Extension(request_id): Extension<String>,
-    Path(ns): Path<String>,
+    Path((domain, ns)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, UnifiedError> {
-    validate_name(&ns).map_err(|e| {
-        map_namespace_error(e, &format!("/unified/v1/namespaces/{}", ns), &request_id)
-    })?;
+    let instance = namespace_instance(&domain, &ns);
+    validate_name(&ns).map_err(|e| map_namespace_error(e, &instance, &request_id))?;
 
     let namespace = store
-        .get_namespace(DEFAULT_DOMAIN, &ns)
+        .get_namespace(&domain, &ns)
         .await
-        .map_err(|e| {
-            map_namespace_error(e, &format!("/unified/v1/namespaces/{}", ns), &request_id)
-        })?;
+        .map_err(|e| map_namespace_error(e, &instance, &request_id))?;
 
     Ok((StatusCode::OK, Json(namespace_to_response(namespace))))
 }
 
-/// DELETE /unified/v1/namespaces/{ns}
+/// DELETE /unified/v1/domains/{domain}/namespaces/{ns}
 pub async fn drop_namespace(
     State(store): State<Arc<dyn CatalogStore>>,
     Extension(request_id): Extension<String>,
-    Path(ns): Path<String>,
+    Path((domain, ns)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, UnifiedError> {
-    validate_name(&ns).map_err(|e| {
-        map_namespace_error(e, &format!("/unified/v1/namespaces/{}", ns), &request_id)
-    })?;
+    let instance = namespace_instance(&domain, &ns);
+    validate_name(&ns).map_err(|e| map_namespace_error(e, &instance, &request_id))?;
 
     store
-        .drop_namespace(DEFAULT_DOMAIN, &ns)
+        .drop_namespace(&domain, &ns)
         .await
-        .map_err(|e| {
-            map_namespace_error(e, &format!("/unified/v1/namespaces/{}", ns), &request_id)
-        })?;
+        .map_err(|e| map_namespace_error(e, &instance, &request_id))?;
 
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// PATCH /unified/v1/namespaces/{ns}
+/// PATCH /unified/v1/domains/{domain}/namespaces/{ns}
 pub async fn update_namespace(
     State(store): State<Arc<dyn CatalogStore>>,
     Extension(request_id): Extension<String>,
-    Path(ns): Path<String>,
+    Path((domain, ns)): Path<(String, String)>,
     Json(req): Json<UpdateNamespaceRequest>,
 ) -> Result<impl IntoResponse, UnifiedError> {
-    validate_name(&ns).map_err(|e| {
-        map_namespace_error(e, &format!("/unified/v1/namespaces/{}", ns), &request_id)
-    })?;
+    let instance = namespace_instance(&domain, &ns);
+    validate_name(&ns).map_err(|e| map_namespace_error(e, &instance, &request_id))?;
 
     let updated = store
-        .update_namespace(
-            DEFAULT_DOMAIN,
-            &ns,
-            req.comment,
-            &req.removals,
-            &req.updates,
-        )
+        .update_namespace(&domain, &ns, req.comment, &req.removals, &req.updates)
         .await
-        .map_err(|e| {
-            map_namespace_error(e, &format!("/unified/v1/namespaces/{}", ns), &request_id)
-        })?;
+        .map_err(|e| map_namespace_error(e, &instance, &request_id))?;
 
     Ok((StatusCode::OK, Json(namespace_to_response(updated))))
 }

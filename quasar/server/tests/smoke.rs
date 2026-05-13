@@ -102,7 +102,7 @@ async fn test_dual_instance_stateless_smoke() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/unified/v1/namespaces")
+                .uri("/unified/v1/domains/default/namespaces")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{"name":"prod","properties":{"team":"data"}}"#,
@@ -119,7 +119,7 @@ async fn test_dual_instance_stateless_smoke() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod")
+                .uri("/unified/v1/domains/default/namespaces/prod")
                 .body(Body::empty())
                 .unwrap(),
         )

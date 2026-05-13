@@ -114,7 +114,7 @@ async fn test_create_namespace() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/unified/v1/namespaces")
+                .uri("/unified/v1/domains/default/namespaces")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{"name": "prod", "comment": "production", "properties": {"team": "data"}}"#,
@@ -156,7 +156,7 @@ async fn test_list_namespaces() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces")
+                .uri("/unified/v1/domains/default/namespaces")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -188,7 +188,7 @@ async fn test_list_namespaces_pagination() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces?pageSize=2")
+                .uri("/unified/v1/domains/default/namespaces?pageSize=2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -206,7 +206,7 @@ async fn test_list_namespaces_pagination() {
             Request::builder()
                 .method("GET")
                 .uri(format!(
-                    "/unified/v1/namespaces?pageSize=2&pageToken={}",
+                    "/unified/v1/domains/default/namespaces?pageSize=2&pageToken={}",
                     token
                 ))
                 .body(Body::empty())
@@ -232,7 +232,7 @@ async fn test_list_namespaces_page_size_too_large() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces?pageSize=1001")
+                .uri("/unified/v1/domains/default/namespaces?pageSize=1001")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -255,7 +255,7 @@ async fn test_list_namespaces_page_size_zero() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces?pageSize=0")
+                .uri("/unified/v1/domains/default/namespaces?pageSize=0")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -287,7 +287,7 @@ async fn test_get_namespace() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod")
+                .uri("/unified/v1/domains/default/namespaces/prod")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -310,7 +310,7 @@ async fn test_get_namespace_not_found() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/missing")
+                .uri("/unified/v1/domains/default/namespaces/missing")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -342,7 +342,7 @@ async fn test_delete_namespace() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri("/unified/v1/namespaces/prod")
+                .uri("/unified/v1/domains/default/namespaces/prod")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -380,7 +380,7 @@ async fn test_delete_non_empty_namespace() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri("/unified/v1/namespaces/prod")
+                .uri("/unified/v1/domains/default/namespaces/prod")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -408,7 +408,7 @@ async fn test_duplicate_create_returns_409() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/unified/v1/namespaces")
+                .uri("/unified/v1/domains/default/namespaces")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"name": "prod"}"#))
                 .unwrap(),
@@ -432,7 +432,7 @@ async fn test_create_namespace_invalid_name() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/unified/v1/namespaces")
+                .uri("/unified/v1/domains/default/namespaces")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"name": "bad name"}"#))
                 .unwrap(),
@@ -460,7 +460,7 @@ async fn test_patch_comment_value() {
         .oneshot(
             Request::builder()
                 .method("PATCH")
-                .uri("/unified/v1/namespaces/prod")
+                .uri("/unified/v1/domains/default/namespaces/prod")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"comment": "updated"}"#))
                 .unwrap(),
@@ -493,7 +493,7 @@ async fn test_patch_comment_null() {
         .oneshot(
             Request::builder()
                 .method("PATCH")
-                .uri("/unified/v1/namespaces/prod")
+                .uri("/unified/v1/domains/default/namespaces/prod")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"comment": null}"#))
                 .unwrap(),
@@ -524,7 +524,7 @@ async fn test_patch_properties() {
         .oneshot(
             Request::builder()
                 .method("PATCH")
-                .uri("/unified/v1/namespaces/prod")
+                .uri("/unified/v1/domains/default/namespaces/prod")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{"removals": ["team"], "updates": {"owner": "platform"}}"#,
@@ -551,7 +551,7 @@ async fn test_problem_details_content_type() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/missing")
+                .uri("/unified/v1/domains/default/namespaces/missing")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -577,7 +577,7 @@ async fn test_request_id_propagation() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/missing")
+                .uri("/unified/v1/domains/default/namespaces/missing")
                 .header("X-Request-Id", "test-req-42")
                 .body(Body::empty())
                 .unwrap(),
@@ -607,7 +607,7 @@ async fn test_generated_request_id_is_uuid() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/missing")
+                .uri("/unified/v1/domains/default/namespaces/missing")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -625,4 +625,195 @@ async fn test_generated_request_id_is_uuid() {
 
     let json = body_json(response).await;
     assert_eq!(json["request_id"], req_id_header);
+}
+
+// ── Domain CRUD smoke (V3 §4.1.3) ───────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn test_domain_crud_smoke() {
+    use quasar_core::DomainStore;
+    let store = setup().await;
+
+    // Ensure clean slate for non-default domains created here.
+    let instance = PG_INSTANCE.get().expect("instance initialised");
+    let pool = test_pool(&instance.url);
+    let client = pool.get().await.expect("client");
+    client
+        .execute("DELETE FROM domains WHERE name <> 'default'", &[])
+        .await
+        .expect("clear non-default domains");
+
+    let app = test_app(store.clone());
+
+    // Create
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/unified/v1/domains")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"name":"prod","comment":"production domain","properties":{"team":"platform"},"warehouse":"s3://warehouse/prod","owner":"data-platform","storage_type":"s3","storage_config":{"role_arn":"arn:aws:iam::123:role/quasar"}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let json = body_json(response).await;
+    assert_eq!(json["name"], "prod");
+    assert_eq!(json["comment"], "production domain");
+    assert_eq!(json["properties"]["team"], "platform");
+    assert_eq!(json["warehouse"], "s3://warehouse/prod");
+    assert_eq!(json["owner"], "data-platform");
+    assert_eq!(json["storage_type"], "s3");
+    // V3 invariant 8 — storage_config never echoed back, even when set.
+    assert!(json.get("storage_config").is_none());
+
+    // List
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/unified/v1/domains")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let names: Vec<&str> = json["domains"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"default"));
+    assert!(names.contains(&"prod"));
+    // storage_config is never present, regardless of which domain.
+    for domain in json["domains"].as_array().unwrap() {
+        assert!(domain.get("storage_config").is_none());
+    }
+
+    // Get
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/unified/v1/domains/prod")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["name"], "prod");
+    assert!(json.get("storage_config").is_none());
+
+    // Update
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/unified/v1/domains/prod")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"comment":"prod (updated)","updates":{"region":"us-west-2"}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["comment"], "prod (updated)");
+    assert_eq!(json["properties"]["region"], "us-west-2");
+
+    // Delete
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/unified/v1/domains/prod")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    // Get after delete → 404
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/unified/v1/domains/prod")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let json = body_json(response).await;
+    assert_eq!(json["code"], "DomainNotFound");
+
+    // domain_exists confirms via the store directly.
+    assert!(!store.domain_exists("prod").await.unwrap());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_drop_non_empty_domain_returns_409() {
+    use quasar_core::DomainStore;
+    let store = setup().await;
+
+    let instance = PG_INSTANCE.get().expect("instance initialised");
+    let pool = test_pool(&instance.url);
+    let client = pool.get().await.expect("client");
+    client
+        .execute("DELETE FROM domains WHERE name <> 'default'", &[])
+        .await
+        .expect("clear non-default domains");
+
+    store
+        .create_domain(
+            "staging",
+            None,
+            HashMap::new(),
+            None,
+            serde_json::json!({}),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .create_namespace("staging", "analytics", None, HashMap::new())
+        .await
+        .unwrap();
+
+    let app = test_app(store);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/unified/v1/domains/staging")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let json = body_json(response).await;
+    assert_eq!(json["code"], "DomainNotEmpty");
+    assert!(json["detail"].as_str().unwrap().contains("staging"));
 }
