@@ -914,6 +914,129 @@ async fn test_rename_asset_cross_namespace() {
 
 #[tokio::test]
 #[serial]
+async fn test_non_tabular_asset_list_and_get() {
+    let store = setup().await;
+    create_test_namespace(&store, "prod").await;
+
+    // Create a non-tabular asset directly (asset_type='table' but no tabular extension).
+    store
+        .create_asset(
+            "default",
+            "prod",
+            "model_asset",
+            "table",
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let app = test_app(store);
+
+    // LIST: asset appears with null format/location.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let assets = json["assets"].as_array().unwrap();
+    assert_eq!(assets.len(), 1);
+    assert_eq!(assets[0]["name"], "model_asset");
+    assert!(assets[0]["format"].is_null());
+    assert!(assets[0]["location"].is_null());
+
+    // GET detail: null format/location/current_version.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/model_asset")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["name"], "model_asset");
+    assert!(json["format"].is_null());
+    assert!(json["location"].is_null());
+    assert!(json["current_version"].is_null());
+
+    // PATCH update: works on non-tabular asset.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/model_asset")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"comment": "a model"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["comment"], "a model");
+    assert!(json["format"].is_null());
+    assert!(json["current_version"].is_null());
+
+    // RENAME: works on non-tabular asset.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/model_asset/rename")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"new_name": "renamed_model"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let old = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/model_asset")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(old.status(), StatusCode::NOT_FOUND);
+
+    let new = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/renamed_model")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(new.status(), StatusCode::OK);
+    let json = body_json(new).await;
+    assert_eq!(json["name"], "renamed_model");
+    assert!(json["format"].is_null());
+}
+
+#[tokio::test]
+#[serial]
 async fn test_list_assets_invalid_format() {
     let store = setup().await;
     create_test_namespace(&store, "prod").await;
