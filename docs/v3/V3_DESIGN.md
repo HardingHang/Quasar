@@ -830,7 +830,7 @@ pub struct AssetResponse {
     pub name: String,
     pub asset_type: String,    // V3 新增：如 "table"
     pub format: Option<String>, // V3：表资产为 "iceberg"/"lance"，非表资产为 None
-    pub location: String,
+    pub location: Option<String>, // V3：非表资产为 None，具体物化位置由 asset_type 扩展表负责
     pub metadata_location: Option<String>,
     pub comment: Option<String>,
     pub properties: HashMap<String, String>,
@@ -850,7 +850,7 @@ pub struct AssetResponse {
 
 **Unified DTOs**：
 - 新增 `DomainResponse` / `DomainListResponse` / `CreateDomainRequest` / `UpdateDomainRequest`。
-- `AssetResponse` / `AssetListItem`：新增 `asset_type: String` 字段，`format` 改为 `Option<String>`。
+- `AssetResponse` / `AssetListItem`：新增 `asset_type: String` 字段，`format` 改为 `Option<String>`，`location` 改为 `Option<String>`（非表资产 location 为 None）。
 - `AssetDetailQuery`：删除 `format` 必填字段（列表过滤仍支持）。
 
 ---

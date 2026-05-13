@@ -86,60 +86,49 @@ fn tabular_format_for_version(
     })
 }
 
-/// Convert (Asset, TabularAsset) to AssetListItem.
+/// Convert (Asset, Option<TabularAsset>) to AssetListItem.
+/// Non-tabular assets surface as `format: None, location: None,
+/// metadata_location: None` (V3_DESIGN §4.4 / §6).
 fn asset_pair_to_list_item(
-    (asset, tabular): (quasar_core::Asset, quasar_core::TabularAsset),
+    (asset, tabular): (quasar_core::Asset, Option<quasar_core::TabularAsset>),
 ) -> AssetListItem {
+    let (format, location, metadata_location) = match tabular {
+        Some(t) => (Some(t.format), Some(t.location), t.metadata_location),
+        None => (None, None, None),
+    };
     AssetListItem {
         id: asset.id.to_string(),
         name: asset.name,
         asset_type: asset.asset_type,
-        format: tabular.format,
-        location: tabular.location,
-        metadata_location: tabular.metadata_location,
+        format,
+        location,
+        metadata_location,
         comment: asset.comment,
         properties: asset.properties,
         created_at: asset.created_at.to_rfc3339(),
     }
 }
 
-/// Convert (Asset, TabularAsset) to AssetResponse with current version.
+/// Convert (Asset, Option<TabularAsset>) to AssetResponse with current version.
 fn asset_pair_to_response(
-    (asset, tabular): (quasar_core::Asset, quasar_core::TabularAsset),
+    (asset, tabular): (quasar_core::Asset, Option<quasar_core::TabularAsset>),
     current_version: Option<CurrentVersionResponse>,
 ) -> AssetResponse {
+    let (format, location, metadata_location) = match tabular {
+        Some(t) => (Some(t.format), Some(t.location), t.metadata_location),
+        None => (None, None, None),
+    };
     AssetResponse {
         id: asset.id.to_string(),
         name: asset.name,
         asset_type: asset.asset_type,
-        format: tabular.format,
-        location: tabular.location,
-        metadata_location: tabular.metadata_location,
+        format,
+        location,
+        metadata_location,
         comment: asset.comment,
         properties: asset.properties,
         current_version,
         created_at: asset.created_at.to_rfc3339(),
-    }
-}
-
-/// Unwrap the tabular extension from a unified read. V3 unified reads
-/// return `(Asset, Option<TabularAsset>)`; today every asset is tabular,
-/// but the V2 trait surface here promises a non-optional pair, so we
-/// surface a clear NotFound when an asset has no extension row.
-fn require_tabular(
-    pair: (quasar_core::Asset, Option<quasar_core::TabularAsset>),
-    name: &str,
-    instance: &str,
-    request_id: &str,
-) -> Result<(quasar_core::Asset, quasar_core::TabularAsset), UnifiedError> {
-    match pair {
-        (asset, Some(tabular)) => Ok((asset, tabular)),
-        (_, None) => Err(UnifiedError::new(
-            UnifiedErrorCode::AssetNotFound,
-            format!("asset '{}' has no tabular extension", name),
-            instance,
-            request_id,
-        )),
     }
 }
 
@@ -196,13 +185,9 @@ pub async fn list_assets(
         None
     };
 
-    // V3 keeps the wire shape that only surfaces tabular assets here;
-    // non-tabular rows from the V3 LEFT JOIN are filtered out. Promoting
-    // them is a future schema item once `AssetListItem` learns to encode
-    // non-tabular assets.
     let assets: Vec<AssetListItem> = rows
         .into_iter()
-        .filter_map(|(asset, tabular)| tabular.map(|t| asset_pair_to_list_item((asset, t))))
+        .map(|(asset, tabular)| asset_pair_to_list_item((asset, tabular)))
         .collect();
 
     Ok((
@@ -229,26 +214,29 @@ pub async fn get_asset(
         .get_asset_unified(&domain, &ns, &name)
         .await
         .map_err(|e| map_asset_error(e, &instance, &request_id))?;
-    let pair = require_tabular(raw, &name, &instance, &request_id)?;
 
-    let format = tabular_format_for_version(&pair.1.format, &instance, &request_id)?;
-
-    let current_version = super::version::get_current_version(
-        store.as_ref(),
-        &config,
-        &domain,
-        &ns,
-        &name,
-        format,
-        pair.1.metadata_location.as_deref(),
-        &instance,
-        &request_id,
-    )
-    .await?;
+    let (asset, tabular) = raw;
+    let current_version = if let Some(ref t) = tabular {
+        let format = tabular_format_for_version(&t.format, &instance, &request_id)?;
+        super::version::get_current_version(
+            store.as_ref(),
+            &config,
+            &domain,
+            &ns,
+            &name,
+            format,
+            t.metadata_location.as_deref(),
+            &instance,
+            &request_id,
+        )
+        .await?
+    } else {
+        None
+    };
 
     Ok((
         StatusCode::OK,
-        Json(asset_pair_to_response(pair, current_version)),
+        Json(asset_pair_to_response((asset, tabular), current_version)),
     ))
 }
 
@@ -299,26 +287,29 @@ pub async fn update_asset(
         .get_asset_unified(&domain, &ns, &name)
         .await
         .map_err(|e| map_asset_error(e, &instance, &request_id))?;
-    let pair = require_tabular(raw, &name, &instance, &request_id)?;
 
-    let format = tabular_format_for_version(&pair.1.format, &instance, &request_id)?;
-
-    let current_version = super::version::get_current_version(
-        store.as_ref(),
-        &config,
-        &domain,
-        &ns,
-        &name,
-        format,
-        pair.1.metadata_location.as_deref(),
-        &instance,
-        &request_id,
-    )
-    .await?;
+    let (asset, tabular) = raw;
+    let current_version = if let Some(ref t) = tabular {
+        let format = tabular_format_for_version(&t.format, &instance, &request_id)?;
+        super::version::get_current_version(
+            store.as_ref(),
+            &config,
+            &domain,
+            &ns,
+            &name,
+            format,
+            t.metadata_location.as_deref(),
+            &instance,
+            &request_id,
+        )
+        .await?
+    } else {
+        None
+    };
 
     Ok((
         StatusCode::OK,
-        Json(asset_pair_to_response(pair, current_version)),
+        Json(asset_pair_to_response((asset, tabular), current_version)),
     ))
 }
 
