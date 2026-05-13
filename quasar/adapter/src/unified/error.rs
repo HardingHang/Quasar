@@ -21,6 +21,9 @@ pub struct ProblemDetails {
 /// Machine-readable error codes for the Unified API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnifiedErrorCode {
+    DomainNotFound,
+    DomainAlreadyExists,
+    DomainNotEmpty,
     NamespaceNotFound,
     NamespaceAlreadyExists,
     NamespaceNotEmpty,
@@ -39,6 +42,9 @@ pub enum UnifiedErrorCode {
 impl UnifiedErrorCode {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::DomainNotFound => "DomainNotFound",
+            Self::DomainAlreadyExists => "DomainAlreadyExists",
+            Self::DomainNotEmpty => "DomainNotEmpty",
             Self::NamespaceNotFound => "NamespaceNotFound",
             Self::NamespaceAlreadyExists => "NamespaceAlreadyExists",
             Self::NamespaceNotEmpty => "NamespaceNotEmpty",
@@ -57,8 +63,12 @@ impl UnifiedErrorCode {
 
     pub fn status_code(&self) -> StatusCode {
         match self {
-            Self::NamespaceNotFound | Self::AssetNotFound => StatusCode::NOT_FOUND,
-            Self::NamespaceAlreadyExists
+            Self::DomainNotFound | Self::NamespaceNotFound | Self::AssetNotFound => {
+                StatusCode::NOT_FOUND
+            }
+            Self::DomainAlreadyExists
+            | Self::DomainNotEmpty
+            | Self::NamespaceAlreadyExists
             | Self::AssetAlreadyExists
             | Self::NamespaceNotEmpty
             | Self::Conflict => StatusCode::CONFLICT,
@@ -74,6 +84,9 @@ impl UnifiedErrorCode {
 
     pub fn problem_slug(&self) -> &'static str {
         match self {
+            Self::DomainNotFound => "domain-not-found",
+            Self::DomainAlreadyExists => "domain-already-exists",
+            Self::DomainNotEmpty => "domain-not-empty",
             Self::NamespaceNotFound => "namespace-not-found",
             Self::NamespaceAlreadyExists => "namespace-already-exists",
             Self::NamespaceNotEmpty => "namespace-not-empty",
@@ -141,6 +154,60 @@ impl IntoResponse for UnifiedError {
     }
 }
 
+/// Map StoreError to UnifiedError for domain operations.
+pub fn map_domain_error(err: StoreError, instance: &str, request_id: &str) -> UnifiedError {
+    match err {
+        StoreError::NotFound(msg) => {
+            UnifiedError::new(UnifiedErrorCode::DomainNotFound, msg, instance, request_id)
+        }
+        StoreError::AlreadyExists(msg) => UnifiedError::new(
+            UnifiedErrorCode::DomainAlreadyExists,
+            msg,
+            instance,
+            request_id,
+        ),
+        StoreError::DomainNotEmpty { domain } => UnifiedError::new(
+            UnifiedErrorCode::DomainNotEmpty,
+            format!("domain '{}' is not empty", domain),
+            instance,
+            request_id,
+        ),
+        StoreError::NamespaceNotEmpty { namespace } => UnifiedError::new(
+            UnifiedErrorCode::NamespaceNotEmpty,
+            format!("namespace '{}' is not empty", namespace),
+            instance,
+            request_id,
+        ),
+        StoreError::Conflict { msg } => {
+            UnifiedError::new(UnifiedErrorCode::Conflict, msg, instance, request_id)
+        }
+        StoreError::InvalidInput(msg) => {
+            UnifiedError::new(UnifiedErrorCode::InvalidInput, msg, instance, request_id)
+        }
+        StoreError::DatabaseUnavailable { .. } => UnifiedError::new(
+            UnifiedErrorCode::ServiceUnavailable,
+            "service temporarily unavailable",
+            instance,
+            request_id,
+        ),
+        StoreError::Timeout { operation } => UnifiedError::new(
+            UnifiedErrorCode::ServiceUnavailable,
+            format!("operation '{}' timed out", operation),
+            instance,
+            request_id,
+        ),
+        StoreError::Internal { msg, source } => {
+            tracing::error!(error = ?source, %msg, "internal store error");
+            UnifiedError::new(
+                UnifiedErrorCode::InternalError,
+                "An internal error occurred",
+                instance,
+                request_id,
+            )
+        }
+    }
+}
+
 /// Map StoreError to UnifiedError for namespace operations.
 pub fn map_namespace_error(err: StoreError, instance: &str, request_id: &str) -> UnifiedError {
     match err {
@@ -163,7 +230,7 @@ pub fn map_namespace_error(err: StoreError, instance: &str, request_id: &str) ->
             request_id,
         ),
         StoreError::DomainNotEmpty { domain } => UnifiedError::new(
-            UnifiedErrorCode::NamespaceNotEmpty,
+            UnifiedErrorCode::DomainNotEmpty,
             format!("domain '{}' is not empty", domain),
             instance,
             request_id,
@@ -217,7 +284,7 @@ pub fn map_asset_error(err: StoreError, instance: &str, request_id: &str) -> Uni
             request_id,
         ),
         StoreError::DomainNotEmpty { domain } => UnifiedError::new(
-            UnifiedErrorCode::NamespaceNotEmpty,
+            UnifiedErrorCode::DomainNotEmpty,
             format!("domain '{}' is not empty", domain),
             instance,
             request_id,
@@ -282,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn domain_not_empty_maps_via_namespace_error() {
+    fn domain_not_empty_maps_to_domain_not_empty() {
         let err = map_namespace_error(
             StoreError::DomainNotEmpty {
                 domain: "prod".into(),
@@ -290,7 +357,17 @@ mod tests {
             "/test",
             "rid",
         );
-        assert_eq!(err.code, UnifiedErrorCode::NamespaceNotEmpty);
+        assert_eq!(err.code, UnifiedErrorCode::DomainNotEmpty);
+        assert!(err.detail.contains("prod"));
+
+        let err = map_domain_error(
+            StoreError::DomainNotEmpty {
+                domain: "prod".into(),
+            },
+            "/test",
+            "rid",
+        );
+        assert_eq!(err.code, UnifiedErrorCode::DomainNotEmpty);
         assert!(err.detail.contains("prod"));
     }
 }

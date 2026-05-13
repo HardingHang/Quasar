@@ -1,4 +1,5 @@
 pub mod asset;
+pub mod domain;
 pub mod dto;
 pub mod error;
 pub mod namespace;

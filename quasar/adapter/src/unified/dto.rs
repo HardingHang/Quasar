@@ -193,3 +193,68 @@ fn resolve_page_size(page_size: Option<i32>) -> Result<i32, PageSizeError> {
         size => Ok(size),
     }
 }
+
+// ── Domain DTOs ─────────────────────────────────────────────────
+
+/// POST /unified/v1/domains
+#[derive(Debug, Deserialize)]
+pub struct CreateDomainRequest {
+    pub name: String,
+    #[serde(default)]
+    pub comment: Option<String>,
+    #[serde(default)]
+    pub properties: HashMap<String, String>,
+    #[serde(default)]
+    pub storage_type: Option<String>,
+    /// JSON storage configuration. May contain secret references or
+    /// pre-encrypted credentials; the server must not echo this field
+    /// back in responses (see `DomainResponse`).
+    #[serde(default)]
+    pub storage_config: Option<serde_json::Value>,
+    #[serde(default)]
+    pub warehouse: Option<String>,
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
+/// PATCH /unified/v1/domains/{domain}
+#[derive(Debug, Deserialize, Default)]
+pub struct UpdateDomainRequest {
+    #[serde(default)]
+    pub comment: PatchField<String>,
+    #[serde(default)]
+    pub removals: Vec<String>,
+    #[serde(default)]
+    pub updates: HashMap<String, String>,
+    #[serde(default)]
+    pub storage_type: PatchField<String>,
+    #[serde(default)]
+    pub storage_config: PatchField<serde_json::Value>,
+    #[serde(default)]
+    pub warehouse: PatchField<String>,
+    #[serde(default)]
+    pub owner: PatchField<String>,
+}
+
+/// Domain response body. **Does not** include `storage_config` because the
+/// field may contain credentials or secret references; V3 §3.1 invariant 8
+/// requires structural redaction of sensitive storage configuration.
+#[derive(Debug, Serialize)]
+pub struct DomainResponse {
+    pub id: String,
+    pub name: String,
+    pub comment: Option<String>,
+    pub properties: HashMap<String, String>,
+    pub storage_type: Option<String>,
+    pub warehouse: Option<String>,
+    pub owner: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// List domains response body.
+#[derive(Debug, Serialize)]
+pub struct ListDomainsResponse {
+    pub domains: Vec<DomainResponse>,
+    pub next_page_token: Option<String>,
+}
