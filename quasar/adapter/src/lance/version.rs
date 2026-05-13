@@ -71,10 +71,20 @@ pub async fn create_version(
         .await
         .map_err(|e| store_error_to_lance_version(e, &instance).to_problem_details())?;
 
+    let version_id = version.version_order.ok_or_else(|| {
+        tracing::error!(asset_id = %asset.id, version_key = %version.version_key,
+            "lance create_version returned version without version_order");
+        super::error::LanceError::InternalError {
+            detail: "An internal error occurred".to_string(),
+            instance: instance.clone(),
+        }
+        .to_problem_details()
+    })?;
+
     Ok((
         StatusCode::OK,
         Json(VersionResponse {
-            version: version.version_order.unwrap_or(0),
+            version: version_id,
             manifest_path: tabular_version.metadata_location,
         }),
     ))
@@ -98,13 +108,25 @@ pub async fn list_versions(
         .await
         .map_err(|e| store_error_to_lance_version(e, &instance).to_problem_details())?;
 
+    let version_ids = versions
+        .into_iter()
+        .map(|(v, _)| {
+            v.version_order.ok_or_else(|| {
+                tracing::error!(asset_id = %asset.id, version_key = %v.version_key,
+                    "lance list_versions encountered version without version_order");
+                super::error::LanceError::InternalError {
+                    detail: "An internal error occurred".to_string(),
+                    instance: instance.clone(),
+                }
+                .to_problem_details()
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
     Ok((
         StatusCode::OK,
         Json(ListVersionsResponse {
-            versions: versions
-                .into_iter()
-                .map(|(v, _)| v.version_order.unwrap_or(0))
-                .collect(),
+            versions: version_ids,
         }),
     ))
 }
@@ -129,10 +151,20 @@ pub async fn describe_version(
         .await
         .map_err(|e| store_error_to_lance_version(e, &instance).to_problem_details())?;
 
+    let version_id = version.version_order.ok_or_else(|| {
+        tracing::error!(asset_id = %asset.id, version_key = %version.version_key,
+            "lance describe_version returned version without version_order");
+        super::error::LanceError::InternalError {
+            detail: "An internal error occurred".to_string(),
+            instance: instance.clone(),
+        }
+        .to_problem_details()
+    })?;
+
     Ok((
         StatusCode::OK,
         Json(VersionResponse {
-            version: version.version_order.unwrap_or(0),
+            version: version_id,
             manifest_path: tabular_version.metadata_location,
         }),
     ))

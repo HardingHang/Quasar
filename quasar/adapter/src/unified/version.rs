@@ -62,24 +62,38 @@ async fn get_lance_current_version(
             )
         })?;
 
-    Ok(version.map(lance_version_to_response))
+    version
+        .map(|pair| lance_version_to_response(pair, instance, request_id))
+        .transpose()
 }
 
-fn lance_version_to_response(pair: (AssetVersion, TabularAssetVersion)) -> CurrentVersionResponse {
+fn lance_version_to_response(
+    pair: (AssetVersion, TabularAssetVersion),
+    instance: &str,
+    request_id: &str,
+) -> Result<CurrentVersionResponse, UnifiedError> {
     let (version, tabular_version) = pair;
-    CurrentVersionResponse::Lance {
-        version_id: version
-            .version_order
-            .unwrap_or_else(|| version.version_key.parse().unwrap_or(0)),
+    let version_id = version.version_order.ok_or_else(|| {
+        tracing::error!(version_id = %version.id, version_key = %version.version_key,
+            "lance current_version returned version without version_order");
+        UnifiedError::new(
+            UnifiedErrorCode::InternalError,
+            "An internal error occurred",
+            instance,
+            request_id,
+        )
+    })?;
+    Ok(CurrentVersionResponse::Lance {
+        version_id,
         metadata_location: tabular_version.metadata_location,
-        // TODO(v3-phase3): V3 model stores previous_version_id as Uuid on
-        // AssetVersion (not as i64 on tabular_version). The Lance protocol
-        // response expects an i64 version number. Until the storage layer
-        // exposes a Uuid -> version_order resolver, expose None and rely
-        // on the explicit version chain that V3 will surface from queries.
+        // V3 model stores previous_version_id as Uuid on AssetVersion (not as
+        // i64 on tabular_version). The Lance protocol response expects an i64
+        // version number. Until the storage layer exposes a Uuid ->
+        // version_order resolver, expose None and rely on the explicit version
+        // chain that V3 will surface from queries.
         previous_version_id: None,
         timestamp: version.created_at.to_rfc3339(),
-    }
+    })
 }
 
 // ── Iceberg ─────────────────────────────────────────────────────
