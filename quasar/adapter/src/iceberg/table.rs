@@ -371,7 +371,13 @@ pub async fn rename_table(
         .map_err(store_error_to_iceberg_table)?;
 
     store
-        .rename_asset(&prefix, src_ns, &req.source.name, &req.destination.name)
+        .rename_asset(
+            &prefix,
+            src_ns,
+            &req.source.name,
+            &req.destination.name,
+            None,
+        )
         .await
         .map_err(store_error_to_iceberg_table)?;
 

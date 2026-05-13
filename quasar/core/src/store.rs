@@ -145,6 +145,7 @@ pub trait AssetStore: Send + Sync {
         namespace_name: &str,
         name: &str,
         new_name: &str,
+        new_namespace_name: Option<&str>,
     ) -> Result<(), StoreError>;
 
     async fn update_asset(

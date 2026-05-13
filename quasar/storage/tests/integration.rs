@@ -191,7 +191,7 @@ async fn test_asset_crud() {
     assert!(matches!(err, StoreError::AlreadyExists(_)));
 
     store
-        .rename_asset(DEFAULT, "ns1", "asset_a", "asset_b")
+        .rename_asset(DEFAULT, "ns1", "asset_a", "asset_b", None)
         .await
         .unwrap();
     assert!(store.asset_exists(DEFAULT, "ns1", "asset_b").await.unwrap());
@@ -212,7 +212,7 @@ async fn test_asset_crud() {
         .unwrap();
 
     let err = store
-        .rename_asset(DEFAULT, "ns1", "asset_b", "asset_c")
+        .rename_asset(DEFAULT, "ns1", "asset_b", "asset_c", None)
         .await
         .unwrap_err();
     assert!(matches!(err, StoreError::AlreadyExists(_)));
@@ -225,6 +225,71 @@ async fn test_asset_crud() {
         .await
         .unwrap();
     assert!(list.is_empty());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_rename_asset_cross_namespace() {
+    let store = setup().await;
+
+    store
+        .create_namespace(DEFAULT, "ns1", None, HashMap::new())
+        .await
+        .unwrap();
+    store
+        .create_namespace(DEFAULT, "ns2", None, HashMap::new())
+        .await
+        .unwrap();
+
+    let (_, _) = store
+        .create_tabular_asset(
+            DEFAULT,
+            "ns1",
+            "asset_x",
+            "lance",
+            "s3://bucket/data/asset_x",
+            None,
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    // Cross-namespace rename: ns1 -> ns2.
+    store
+        .rename_asset(DEFAULT, "ns1", "asset_x", "asset_x", Some("ns2"))
+        .await
+        .unwrap();
+
+    assert!(!store.asset_exists(DEFAULT, "ns1", "asset_x").await.unwrap());
+    assert!(store.asset_exists(DEFAULT, "ns2", "asset_x").await.unwrap());
+
+    // Target namespace does not exist.
+    let err = store
+        .rename_asset(DEFAULT, "ns2", "asset_x", "asset_x", Some("missing_ns"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, StoreError::NotFound(_)));
+
+    // Target namespace already has an asset with the same name.
+    let (_, _) = store
+        .create_tabular_asset(
+            DEFAULT,
+            "ns1",
+            "asset_y",
+            "lance",
+            "s3://bucket/data/asset_y",
+            None,
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let err = store
+        .rename_asset(DEFAULT, "ns2", "asset_x", "asset_y", Some("ns1"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, StoreError::AlreadyExists(_)));
 }
 
 // ── Versions ───────────────────────────────────────────────────────────────

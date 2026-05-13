@@ -621,28 +621,78 @@ impl AssetStore for PgCatalogStore {
         namespace_name: &str,
         name: &str,
         new_name: &str,
+        new_namespace_name: Option<&str>,
     ) -> Result<(), StoreError> {
         let client = self.get_client().await?;
-        let n = client
-            .execute(
-                queries::asset::RENAME,
-                &[&domain_name, &namespace_name, &name, &new_name],
-            )
-            .await
-            .map_err(|e| {
-                if let Some(db_err) = e.as_db_error() {
-                    if db_err.code() == &SqlState::UNIQUE_VIOLATION {
-                        return StoreError::AlreadyExists(format!(
-                            "asset '{}' in namespace '{}'",
-                            new_name, namespace_name
-                        ));
+
+        let map_err = |e: tokio_postgres::Error| -> StoreError {
+            if let Some(db_err) = e.as_db_error() {
+                if db_err.code() == &SqlState::UNIQUE_VIOLATION {
+                    let target_ns = new_namespace_name.unwrap_or(namespace_name);
+                    return StoreError::AlreadyExists(format!(
+                        "asset '{}' in namespace '{}'",
+                        new_name, target_ns
+                    ));
+                }
+            }
+            StoreError::Internal {
+                msg: format!("rename_asset failed: {}", &e),
+                source: Some(Box::new(e)),
+            }
+        };
+
+        let n = if let Some(target_ns) = new_namespace_name {
+            if target_ns != namespace_name {
+                // Cross-namespace rename: look up target namespace id first.
+                let target_row = client
+                    .query_opt(
+                        queries::namespace::GET_BY_NAME,
+                        &[&domain_name, &target_ns],
+                    )
+                    .await
+                    .map_err(internal_err("rename_asset lookup target namespace"))?;
+
+                let target_ns_id: Uuid = match target_row {
+                    Some(row) => row.get("id"),
+                    None => {
+                        return Err(StoreError::NotFound(format!(
+                            "target namespace '{}'",
+                            target_ns
+                        )));
                     }
-                }
-                StoreError::Internal {
-                    msg: format!("rename_asset failed: {}", &e),
-                    source: Some(Box::new(e)),
-                }
-            })?;
+                };
+
+                client
+                    .execute(
+                        queries::asset::RENAME_WITH_NAMESPACE,
+                        &[
+                            &domain_name,
+                            &namespace_name,
+                            &name,
+                            &new_name,
+                            &target_ns_id,
+                        ],
+                    )
+                    .await
+                    .map_err(map_err)?
+            } else {
+                client
+                    .execute(
+                        queries::asset::RENAME,
+                        &[&domain_name, &namespace_name, &name, &new_name],
+                    )
+                    .await
+                    .map_err(map_err)?
+            }
+        } else {
+            client
+                .execute(
+                    queries::asset::RENAME,
+                    &[&domain_name, &namespace_name, &name, &new_name],
+                )
+                .await
+                .map_err(map_err)?
+        };
 
         if n == 0 {
             return Err(StoreError::NotFound(format!("asset '{}'", name)));

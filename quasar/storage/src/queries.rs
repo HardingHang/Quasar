@@ -224,12 +224,27 @@ pub mod asset {
                   created_by, updated_by, created_at, updated_at
     "#;
 
-    /// Rename an active asset within a namespace.
+    /// Rename an active asset within the same namespace.
     /// Parameters: $1 domain_name, $2 namespace_name, $3 current_name,
     /// $4 new_name.
     pub const RENAME: &str = r#"
         UPDATE assets a
         SET name = $4,
+            updated_at = NOW()
+        FROM namespaces ns, domains d
+        WHERE ns.id = a.namespace_id
+          AND d.id = ns.domain_id
+          AND d.name = $1 AND ns.name = $2 AND a.name = $3
+          AND a.deleted_at IS NULL
+    "#;
+
+    /// Rename an active asset and move it to a different namespace
+    /// within the same domain. Parameters: $1 domain_name, $2 src_namespace_name,
+    /// $3 current_name, $4 new_name, $5 new_namespace_id.
+    pub const RENAME_WITH_NAMESPACE: &str = r#"
+        UPDATE assets a
+        SET name = $4,
+            namespace_id = $5,
             updated_at = NOW()
         FROM namespaces ns, domains d
         WHERE ns.id = a.namespace_id
@@ -456,6 +471,7 @@ mod tests {
         assert_constant("asset::CREATE_TABULAR", asset::CREATE_TABULAR);
         assert_constant("asset::UPDATE_PROPERTIES", asset::UPDATE_PROPERTIES);
         assert_constant("asset::RENAME", asset::RENAME);
+        assert_constant("asset::RENAME_WITH_NAMESPACE", asset::RENAME_WITH_NAMESPACE);
         assert_constant("asset::DELETE", asset::DELETE);
         assert_constant("asset::EXISTS_TABULAR", asset::EXISTS_TABULAR);
         assert_constant(

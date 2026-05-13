@@ -977,6 +977,7 @@ pub trait AssetStore: Send + Sync {
         namespace_name: &str,
         name: &str,
         new_name: &str,
+        new_namespace_name: Option<&str>,
     ) -> Result<(), StoreError>;
 
     async fn update_asset(
@@ -1155,7 +1156,7 @@ UnifiedQueryStore (独立，内部组合查询)
 | `get_asset(ns, format, name)` | `AssetStore::get_asset` | 移除 `format`（格式无关） |
 | `get_asset_with_tabular(ns, format, name)` | `TabularStore::get_tabular_asset` | 增加 `domain_name` |
 | `drop_asset(ns, format, name)` | `AssetStore::drop_asset` | 移除 `format` |
-| `rename_asset(ns, format, name, new)` | `AssetStore::rename_asset` | 移除 `format` |
+| `rename_asset(ns, format, name, new)` | `AssetStore::rename_asset` | 移除 `format`，新增 `new_namespace_name` 参数（同 domain 跨 namespace） |
 | `create_version(ns, format, asset, ver, loc, prev)` | `TabularVersionStore::create_tabular_version` | 改为 `asset_id` 直接定位 |
 | `load_version(ns, format, asset, ver_key)` | `TabularVersionStore::get_tabular_version` | 改为 `asset_id` 直接定位 |
 | `list_versions(ns, format, asset)` | `TabularVersionStore::list_tabular_versions` | 改为 `asset_id` 直接定位 |

@@ -335,7 +335,7 @@ pub async fn rename_asset(
     validate_name(&req.new_name).map_err(|e| map_asset_error(e, &instance, &request_id))?;
 
     store
-        .rename_asset(&domain, &ns, &name, &req.new_name)
+        .rename_asset(&domain, &ns, &name, &req.new_name, None)
         .await
         .map_err(|e| map_asset_error(e, &instance, &request_id))?;
 

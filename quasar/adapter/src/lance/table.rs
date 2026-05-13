@@ -284,6 +284,7 @@ pub async fn rename_table(
             &parsed.namespace,
             &parsed.table,
             &req.new_name,
+            None,
         )
         .await
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
