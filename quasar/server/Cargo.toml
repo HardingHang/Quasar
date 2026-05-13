@@ -10,7 +10,7 @@ path = "src/main.rs"
 [features]
 default = ["lance", "iceberg", "unified"]
 lance = ["quasar-adapter/lance"]
-iceberg = ["quasar-adapter/iceberg", "dep:object_store"]
+iceberg = ["quasar-adapter/iceberg"]
 unified = ["lance", "iceberg", "quasar-adapter/unified"]
 
 [dependencies]
@@ -28,7 +28,7 @@ tower-http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
-object_store = { workspace = true, optional = true }
+object_store = { workspace = true }
 
 [dev-dependencies]
 quasar-storage = { workspace = true }

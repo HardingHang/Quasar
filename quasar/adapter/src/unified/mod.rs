@@ -12,9 +12,7 @@ use quasar_core::CatalogStore;
 /// Unified API configuration.
 #[derive(Clone, Default)]
 pub struct UnifiedConfig {
-    #[cfg(feature = "iceberg")]
     pub object_store: Option<Arc<dyn object_store::ObjectStore>>,
-    #[cfg(feature = "iceberg")]
     pub s3_bucket: Option<String>,
 }
 

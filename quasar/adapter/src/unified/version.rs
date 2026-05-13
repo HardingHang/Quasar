@@ -22,13 +22,7 @@ pub async fn get_current_version(
         AssetFormat::Lance => {
             get_lance_current_version(store, namespace, name, instance, request_id).await
         }
-        #[cfg(feature = "iceberg")]
         AssetFormat::Iceberg => get_iceberg_current_version(config, metadata_location).await,
-        #[cfg(not(feature = "iceberg"))]
-        AssetFormat::Iceberg => {
-            let _ = (config, metadata_location);
-            Ok(None)
-        }
     }
 }
 
@@ -90,7 +84,6 @@ fn lance_version_to_response(pair: (AssetVersion, TabularAssetVersion)) -> Curre
 
 // ── Iceberg ─────────────────────────────────────────────────────
 
-#[cfg(feature = "iceberg")]
 async fn get_iceberg_current_version(
     config: &UnifiedConfig,
     metadata_location: Option<&str>,
