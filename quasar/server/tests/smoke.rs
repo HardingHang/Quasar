@@ -151,7 +151,7 @@ async fn test_dual_instance_stateless_smoke() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/lance/v1/namespace/prod/table/list")
+                .uri("/lance/v1/namespace/default$prod/table/list")
                 .body(Body::empty())
                 .unwrap(),
         )

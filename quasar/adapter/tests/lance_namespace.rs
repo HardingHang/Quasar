@@ -7,7 +7,7 @@ use deadpool_postgres::{Pool, Runtime};
 use http_body_util::BodyExt;
 use postgresql_embedded::PostgreSQL;
 use quasar_adapter::lance;
-use quasar_core::NamespaceStore;
+use quasar_core::{DomainStore, NamespaceStore};
 use quasar_storage::PgCatalogStore;
 use serde_json::Value;
 use serial_test::serial;
@@ -67,6 +67,13 @@ async fn setup() -> Arc<PgCatalogStore> {
         )
         .await
         .expect("failed to truncate tables");
+    // Domains are not truncated above (they hold the seeded "default" domain).
+    // Remove every non-seeded domain so tests that create additional domains
+    // can start from a clean state.
+    client
+        .execute("DELETE FROM domains WHERE name <> 'default'", &[])
+        .await
+        .expect("failed to clear non-default domains");
 
     store
 }
@@ -95,7 +102,7 @@ async fn test_create_and_describe_namespace() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/namespace/prod/create")
+                .uri("/lance/v1/namespace/default$prod/create")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"properties":{"team":"data"}}"#))
                 .unwrap(),
@@ -111,7 +118,7 @@ async fn test_create_and_describe_namespace() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/namespace/prod/describe")
+                .uri("/lance/v1/namespace/default$prod/describe")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -137,7 +144,7 @@ async fn test_create_duplicate_returns_409() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/namespace/prod/create")
+                .uri("/lance/v1/namespace/default$prod/create")
                 .header("Content-Type", "application/json")
                 .body(Body::from("{}"))
                 .unwrap(),
@@ -169,7 +176,7 @@ async fn test_list_namespaces() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/lance/v1/namespace/$/list")
+                .uri("/lance/v1/namespace/default/list")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -199,7 +206,7 @@ async fn test_namespace_exists() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/namespace/prod/exists")
+                .uri("/lance/v1/namespace/default$prod/exists")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -213,7 +220,7 @@ async fn test_namespace_exists() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/namespace/missing/exists")
+                .uri("/lance/v1/namespace/default$missing/exists")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -239,7 +246,7 @@ async fn test_drop_namespace() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/namespace/prod/drop")
+                .uri("/lance/v1/namespace/default$prod/drop")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -251,7 +258,7 @@ async fn test_drop_namespace() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/namespace/prod/drop")
+                .uri("/lance/v1/namespace/default$prod/drop")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -270,7 +277,7 @@ async fn test_describe_not_found() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/lance/v1/namespace/missing/describe")
+                .uri("/lance/v1/namespace/default$missing/describe")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -299,7 +306,7 @@ async fn test_list_namespaces_pagination_with_limit() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/lance/v1/namespace/$/list?limit=2")
+                .uri("/lance/v1/namespace/default/list?limit=2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -311,4 +318,117 @@ async fn test_list_namespaces_pagination_with_limit() {
     let namespaces = json["namespaces"].as_array().unwrap();
     assert_eq!(namespaces.len(), 2);
     assert_eq!(json["next_page_token"], "2");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_root_list_returns_domains() {
+    let store = setup().await;
+    store
+        .create_domain(
+            "prod",
+            None,
+            HashMap::new(),
+            None,
+            serde_json::json!({}),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let app = test_app(store);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/lance/v1/namespace/$/list")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let namespaces = json["namespaces"].as_array().unwrap();
+    let names: Vec<&str> = namespaces
+        .iter()
+        .filter_map(|n| n["name"].as_str())
+        .collect();
+    assert!(names.contains(&"default"));
+    assert!(names.contains(&"prod"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_single_segment_id_rejected_on_create() {
+    let store = setup().await;
+    let app = test_app(store);
+
+    // A single-segment id targets a Domain; V3 forbids Lance from creating
+    // Domains. Expect 400 InvalidInput.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/lance/v1/namespace/prod/create")
+                .header("Content-Type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(json["error"], "InvalidInput");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_namespace_in_non_default_domain() {
+    let store = setup().await;
+    store
+        .create_domain(
+            "prod",
+            None,
+            HashMap::new(),
+            None,
+            serde_json::json!({}),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let app = test_app(store);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/lance/v1/namespace/prod$analytics/create")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"properties":{"region":"us"}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/lance/v1/namespace/prod$analytics/describe")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["name"], "analytics");
+    assert_eq!(json["properties"]["region"], "us");
 }
