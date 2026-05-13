@@ -379,12 +379,14 @@ async fn test_list_assets_empty_format_returns_invalid_format() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "TODO(v3-phase3): cross-format same-name setup violates V3 active-name uniqueness"]
-async fn test_list_assets_order_by_name_then_format() {
+async fn test_list_assets_order_by_name() {
+    // V3 active-name uniqueness forbids the V2 "same name in two formats"
+    // fixture. The test now seeds *distinct* names and asserts the V3 list
+    // ordering (ascending by name).
     let store = setup().await;
     create_test_namespace(&store, "prod").await;
-    create_test_asset(&store, "prod", AssetFormat::Lance, "users").await;
-    create_test_asset(&store, "prod", AssetFormat::Iceberg, "users").await;
+    create_test_asset(&store, "prod", AssetFormat::Iceberg, "events").await;
+    create_test_asset(&store, "prod", AssetFormat::Lance, "metrics").await;
 
     let app = test_app(store);
 
@@ -392,7 +394,7 @@ async fn test_list_assets_order_by_name_then_format() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/domains/default/namespaces/prod/assets?name=users")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -403,7 +405,9 @@ async fn test_list_assets_order_by_name_then_format() {
     let json = body_json(response).await;
     let assets = json["assets"].as_array().unwrap();
     assert_eq!(assets.len(), 2);
+    assert_eq!(assets[0]["name"], "events");
     assert_eq!(assets[0]["format"], "iceberg");
+    assert_eq!(assets[1]["name"], "metrics");
     assert_eq!(assets[1]["format"], "lance");
 }
 

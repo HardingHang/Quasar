@@ -294,6 +294,14 @@ pub async fn drop_table(
     State(store): State<Arc<dyn CatalogStore>>,
     Path((prefix, ns, table)): Path<(String, String, String)>,
 ) -> Result<impl IntoResponse, IcebergError> {
+    // V3 endpoint-level isolation: only Iceberg-format assets are
+    // visible to the Iceberg drop endpoint. An asset with the same
+    // name in another format must surface as NoSuchTableException.
+    store
+        .get_tabular_asset(&prefix, &ns, "iceberg", &table)
+        .await
+        .map_err(store_error_to_iceberg_table)?;
+
     store
         .drop_asset(&prefix, &ns, &table)
         .await
@@ -354,6 +362,13 @@ pub async fn rename_table(
             message: "cross-namespace rename not supported".to_string(),
         });
     }
+
+    // V3 endpoint-level isolation: same rationale as drop_table —
+    // Iceberg rename cannot operate on a Lance-format source asset.
+    store
+        .get_tabular_asset(&prefix, src_ns, "iceberg", &req.source.name)
+        .await
+        .map_err(store_error_to_iceberg_table)?;
 
     store
         .rename_asset(&prefix, src_ns, &req.source.name, &req.destination.name)

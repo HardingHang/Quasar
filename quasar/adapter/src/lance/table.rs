@@ -191,6 +191,16 @@ pub async fn deregister_table(
     let instance = format!("/lance/v1/table/{}/deregister", id);
     let parsed = parse_table_id(&id, &instance).map_err(LanceError::to_problem_details)?;
 
+    // V3 endpoint-level isolation: only Lance-format assets can be
+    // deregistered through this endpoint. Iceberg assets with the same
+    // name are not visible here and must return 404 — V3 active-name
+    // uniqueness already prevents same-name coexistence, so the gate
+    // exists for the "wrong-endpoint" case.
+    store
+        .get_tabular_asset(&parsed.domain, &parsed.namespace, "lance", &parsed.table)
+        .await
+        .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+
     store
         .drop_asset(&parsed.domain, &parsed.namespace, &parsed.table)
         .await
@@ -206,6 +216,12 @@ pub async fn drop_table(
 ) -> Result<impl IntoResponse, ProblemDetails> {
     let instance = format!("/lance/v1/table/{}/drop", id);
     let parsed = parse_table_id(&id, &instance).map_err(LanceError::to_problem_details)?;
+
+    // V3 endpoint-level isolation: see deregister_table for the rationale.
+    store
+        .get_tabular_asset(&parsed.domain, &parsed.namespace, "lance", &parsed.table)
+        .await
+        .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
 
     store
         .drop_asset(&parsed.domain, &parsed.namespace, &parsed.table)
@@ -251,6 +267,15 @@ pub async fn rename_table(
     validate_name(&parsed.table)
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
     validate_name(&req.new_name)
+        .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+
+    // V3 endpoint-level isolation: only Lance-format assets are visible
+    // through the Lance rename endpoint. An Iceberg asset with the same
+    // source name must surface as 404 (TableNotFound) rather than be
+    // renamed by the wrong protocol.
+    store
+        .get_tabular_asset(&parsed.domain, &parsed.namespace, "lance", &parsed.table)
+        .await
         .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
 
     store

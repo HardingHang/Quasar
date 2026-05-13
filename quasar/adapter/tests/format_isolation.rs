@@ -100,82 +100,56 @@ async fn create_namespace(store: &Arc<PgCatalogStore>, name: &str) {
         .unwrap();
 }
 
-// Phase 2 V3 schema change: `uq_assets_active_name(namespace_id, name)
+// V3 schema invariant: `uq_assets_active_name(namespace_id, name)
 // WHERE deleted_at IS NULL` makes active asset names unique within a
-// namespace regardless of format. The three tests below seed the same
-// asset name in both Iceberg and Lance — that is no longer legal in V3
-// and must be redesigned in Phase 3 (the adapter is the right place to
-// surface the cross-format conflict per V3_DESIGN §11.2).
-// TODO(v3-phase3): redesign the cross-format conflict tests against the
-// V3 active-name uniqueness invariant; until then they are #[ignore]d.
+// namespace regardless of format (`docs/v3/V3_DESIGN.md` §3.3.4 and
+// §11.2). The three tests below verify that the protocol adapters
+// surface this invariant correctly:
+//   - same-name across formats on create → 409
+//   - drop / rename through the wrong protocol → 404
+// The Phase 2 same-name fixtures that violated the invariant are gone.
 
 #[tokio::test]
 #[serial]
-#[ignore = "TODO(v3-phase3): cross-format same-name setup violates V3 active-name uniqueness"]
-async fn test_cross_format_list_isolation() {
+async fn test_cross_format_create_conflicts() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
 
-    store
-        .create_tabular_asset(
-            "default",
-            "prod",
-            "users",
-            "iceberg",
-            "s3://bucket/warehouse/prod/users",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    store
-        .create_tabular_asset(
-            "default",
-            "prod",
-            "users",
-            "lance",
-            "lance://prod/users",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-
     let ice_app = iceberg_app(store.clone());
-    let ice_response = ice_app
+    let create_iceberg = ice_app
         .oneshot(
             Request::builder()
-                .method("GET")
+                .method("POST")
                 .uri("/iceberg/v1/default/namespaces/prod/tables")
-                .body(Body::empty())
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"name": "users", "location": "s3://bucket/warehouse/prod/users"}"#,
+                ))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(ice_response.status(), StatusCode::OK);
-    let json = body_json(ice_response).await;
-    let identifiers = json["identifiers"].as_array().unwrap();
-    assert_eq!(identifiers.len(), 1);
-    assert_eq!(identifiers[0]["name"].as_str().unwrap(), "users");
+    assert_eq!(create_iceberg.status(), StatusCode::OK);
 
+    // Lance declare with the same `domain$namespace$table` id must reject
+    // because the V3 active-name index is on (namespace_id, name) WHERE
+    // deleted_at IS NULL — format is not part of the uniqueness key.
     let lance_app = lance_app(store);
-    let lance_response = lance_app
+    let create_lance = lance_app
         .oneshot(
             Request::builder()
-                .method("GET")
-                .uri("/lance/v1/namespace/default$prod/table/list")
-                .body(Body::empty())
+                .method("POST")
+                .uri("/lance/v1/table/default%24prod%24users/declare")
+                .header("Content-Type", "application/json")
+                .body(Body::from("{}"))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(lance_response.status(), StatusCode::OK);
-    let json = body_json(lance_response).await;
-    let tables = json["tables"].as_array().unwrap();
-    assert_eq!(tables.len(), 1);
-    assert_eq!(tables[0]["name"].as_str().unwrap(), "users");
+    assert_eq!(create_lance.status(), StatusCode::CONFLICT);
+    let json = body_json(create_lance).await;
+    assert_eq!(json["error"], "TableAlreadyExists");
+    assert_eq!(json["code"], 409);
 }
 
 #[tokio::test]
@@ -256,8 +230,7 @@ async fn test_cross_format_describe_isolation() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "TODO(v3-phase3): cross-format same-name setup violates V3 active-name uniqueness"]
-async fn test_cross_format_drop_isolation() {
+async fn test_lance_drop_cannot_target_iceberg_asset() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
 
@@ -274,53 +247,40 @@ async fn test_cross_format_drop_isolation() {
         )
         .await
         .unwrap();
-    store
-        .create_tabular_asset(
-            "default",
-            "prod",
-            "users",
-            "lance",
-            "lance://prod/users",
-            None,
-            None,
-            HashMap::new(),
+
+    let lance_app = lance_app(store.clone());
+    let drop = lance_app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/lance/v1/table/default%24prod%24users/drop")
+                .body(Body::empty())
+                .unwrap(),
         )
         .await
         .unwrap();
+    assert_eq!(drop.status(), StatusCode::NOT_FOUND);
+    let json = body_json(drop).await;
+    assert_eq!(json["error"], "TableNotFound");
 
-    let ice_app = iceberg_app(store.clone());
-    let drop = ice_app
-        .clone()
+    // Iceberg asset is still intact.
+    let ice_app = iceberg_app(store);
+    let load = ice_app
         .oneshot(
             Request::builder()
-                .method("DELETE")
+                .method("GET")
                 .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(drop.status(), StatusCode::NO_CONTENT);
-
-    let lance_exists = lance_app(store)
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/lance/v1/table/default%24prod%24users/exists")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(lance_exists.status(), StatusCode::OK);
-    let json = body_json(lance_exists).await;
-    assert_eq!(json["exists"], true);
+    assert_eq!(load.status(), StatusCode::OK);
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "TODO(v3-phase3): cross-format same-name setup violates V3 active-name uniqueness"]
-async fn test_cross_format_rename_isolation() {
+async fn test_lance_rename_cannot_target_iceberg_asset() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
 
@@ -337,50 +297,36 @@ async fn test_cross_format_rename_isolation() {
         )
         .await
         .unwrap();
-    store
-        .create_tabular_asset(
-            "default",
-            "prod",
-            "users",
-            "lance",
-            "lance://prod/users",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
 
-    let ice_app = iceberg_app(store.clone());
-    let rename = ice_app
-        .clone()
+    let lance_app = lance_app(store.clone());
+    let rename = lance_app
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/iceberg/v1/default/tables/rename")
+                .uri("/lance/v1/table/default%24prod%24users/rename")
                 .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"source": {"namespace": ["prod"], "name": "users"}, "destination": {"namespace": ["prod"], "name": "customers"}}"#,
-                ))
+                .body(Body::from(r#"{"new_name":"customers"}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(rename.status(), StatusCode::OK);
+    assert_eq!(rename.status(), StatusCode::NOT_FOUND);
+    let json = body_json(rename).await;
+    assert_eq!(json["error"], "TableNotFound");
 
-    let lance_exists = lance_app(store)
+    // Iceberg asset is unchanged.
+    let ice_app = iceberg_app(store);
+    let load = ice_app
         .oneshot(
             Request::builder()
-                .method("POST")
-                .uri("/lance/v1/table/default%24prod%24users/exists")
+                .method("GET")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(lance_exists.status(), StatusCode::OK);
-    let json = body_json(lance_exists).await;
-    assert_eq!(json["exists"], true);
+    assert_eq!(load.status(), StatusCode::OK);
 }
 
 #[tokio::test]
