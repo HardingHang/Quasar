@@ -201,7 +201,7 @@ async fn test_dual_instance_stateless_smoke() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod/assets")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -220,7 +220,7 @@ async fn test_dual_instance_stateless_smoke() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri("/unified/v1/namespaces/prod/assets/users?format=lance")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/users")
                 .body(Body::empty())
                 .unwrap(),
         )

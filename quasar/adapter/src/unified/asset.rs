@@ -9,43 +9,37 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use super::dto::{
-    AssetDetailQuery, AssetListItem, AssetListQuery, AssetResponse, CurrentVersionResponse,
-    ListAssetsResponse, PageSizeError, PaginationQuery, RenameAssetRequest, UpdateAssetRequest,
+    AssetListItem, AssetListQuery, AssetResponse, CurrentVersionResponse, ListAssetsResponse,
+    PageSizeError, PaginationQuery, RenameAssetRequest, UpdateAssetRequest,
 };
 use super::error::{map_asset_error, UnifiedError, UnifiedErrorCode};
-use crate::DEFAULT_DOMAIN;
 
-/// Parse and validate the `format` query parameter.
-fn parse_format(
-    format: Option<String>,
-    instance: &str,
-    request_id: &str,
-) -> Result<AssetFormat, UnifiedError> {
-    match format {
-        None => Err(UnifiedError::new(
-            UnifiedErrorCode::InvalidInput,
-            "format query parameter is required",
-            instance,
-            request_id,
-        )),
-        Some(ref s) if s.is_empty() => Err(UnifiedError::new(
-            UnifiedErrorCode::InvalidFormat,
-            "format query parameter cannot be empty",
-            instance,
-            request_id,
-        )),
-        Some(s) => AssetFormat::from_str(&s).map_err(|_| {
-            UnifiedError::new(
-                UnifiedErrorCode::InvalidFormat,
-                format!("invalid format '{}', expected 'iceberg' or 'lance'", s),
-                instance,
-                request_id,
-            )
-        }),
-    }
+const NAMESPACES_PREFIX: &str = "/unified/v1/domains";
+
+fn list_assets_instance(domain: &str, ns: &str) -> String {
+    format!("{}/{}/namespaces/{}/assets", NAMESPACES_PREFIX, domain, ns)
+}
+
+fn asset_instance(domain: &str, ns: &str, name: &str) -> String {
+    format!(
+        "{}/{}/namespaces/{}/assets/{}",
+        NAMESPACES_PREFIX, domain, ns, name
+    )
+}
+
+fn rename_instance(domain: &str, ns: &str, name: &str) -> String {
+    format!(
+        "{}/{}/namespaces/{}/assets/{}/rename",
+        NAMESPACES_PREFIX, domain, ns, name
+    )
 }
 
 /// Parse and validate the optional `format` query parameter for list endpoints.
+///
+/// V3 list endpoints continue to accept `?format=` as an optional filter
+/// (`docs/v3/V3_DESIGN.md` §4.4). Single-asset endpoints (GET/DELETE/PATCH/
+/// rename) no longer require or accept the parameter — the unique active
+/// asset name within a namespace makes format redundant for identity.
 fn parse_optional_format(
     format: Option<String>,
     instance: &str,
@@ -68,6 +62,28 @@ fn parse_optional_format(
             )
         }),
     }
+}
+
+/// Convert a stored `tabular.format` string into the typed `AssetFormat`
+/// enum that the version helper expects. An unrecognised format from
+/// storage is an internal data integrity issue; surface it as 500.
+fn tabular_format_for_version(
+    tabular_format: &str,
+    instance: &str,
+    request_id: &str,
+) -> Result<AssetFormat, UnifiedError> {
+    AssetFormat::from_str(tabular_format).map_err(|_| {
+        tracing::error!(
+            tabular_format = %tabular_format,
+            "unified asset has unrecognised tabular format"
+        );
+        UnifiedError::new(
+            UnifiedErrorCode::InternalError,
+            "An internal error occurred",
+            instance,
+            request_id,
+        )
+    })
 }
 
 /// Convert (Asset, TabularAsset) to AssetListItem.
@@ -127,14 +143,14 @@ fn require_tabular(
     }
 }
 
-/// GET /unified/v1/namespaces/{ns}/assets
+/// GET /unified/v1/domains/{domain}/namespaces/{ns}/assets
 pub async fn list_assets(
     State(store): State<Arc<dyn CatalogStore>>,
     Extension(request_id): Extension<String>,
-    Path(ns): Path<String>,
+    Path((domain, ns)): Path<(String, String)>,
     Query(query): Query<AssetListQuery>,
 ) -> Result<impl IntoResponse, UnifiedError> {
-    let instance = format!("/unified/v1/namespaces/{}/assets", ns);
+    let instance = list_assets_instance(&domain, &ns);
     validate_name(&ns).map_err(|e| map_asset_error(e, &instance, &request_id))?;
 
     let page_size = query
@@ -162,7 +178,7 @@ pub async fn list_assets(
 
     let rows = store
         .list_assets_unified(
-            DEFAULT_DOMAIN,
+            &domain,
             &ns,
             format_str,
             name_filter.as_deref(),
@@ -180,10 +196,10 @@ pub async fn list_assets(
         None
     };
 
-    // Phase 2 keeps the V2 wire shape, which only surfaces tabular assets;
-    // non-tabular rows from the V3 LEFT JOIN are filtered out here. Phase 3
-    // can promote them once `AssetListItem` learns to encode non-tabular
-    // assets.
+    // V3 keeps the wire shape that only surfaces tabular assets here;
+    // non-tabular rows from the V3 LEFT JOIN are filtered out. Promoting
+    // them is a future schema item once `AssetListItem` learns to encode
+    // non-tabular assets.
     let assets: Vec<AssetListItem> = rows
         .into_iter()
         .filter_map(|(asset, tabular)| tabular.map(|t| asset_pair_to_list_item((asset, t))))
@@ -198,28 +214,29 @@ pub async fn list_assets(
     ))
 }
 
-/// GET /unified/v1/namespaces/{ns}/assets/{name}
+/// GET /unified/v1/domains/{domain}/namespaces/{ns}/assets/{name}
 pub async fn get_asset(
     State(store): State<Arc<dyn CatalogStore>>,
     Extension(request_id): Extension<String>,
-    Path((ns, name)): Path<(String, String)>,
-    Query(query): Query<AssetDetailQuery>,
+    Path((domain, ns, name)): Path<(String, String, String)>,
     Extension(config): Extension<super::UnifiedConfig>,
 ) -> Result<impl IntoResponse, UnifiedError> {
-    let instance = format!("/unified/v1/namespaces/{}/assets/{}", ns, name);
+    let instance = asset_instance(&domain, &ns, &name);
     validate_name(&ns).map_err(|e| map_asset_error(e, &instance, &request_id))?;
     validate_name(&name).map_err(|e| map_asset_error(e, &instance, &request_id))?;
-    let format = parse_format(query.format, &instance, &request_id)?;
 
     let raw = store
-        .get_asset_unified(DEFAULT_DOMAIN, &ns, &name)
+        .get_asset_unified(&domain, &ns, &name)
         .await
         .map_err(|e| map_asset_error(e, &instance, &request_id))?;
     let pair = require_tabular(raw, &name, &instance, &request_id)?;
 
+    let format = tabular_format_for_version(&pair.1.format, &instance, &request_id)?;
+
     let current_version = super::version::get_current_version(
         store.as_ref(),
         &config,
+        &domain,
         &ns,
         &name,
         format,
@@ -235,46 +252,39 @@ pub async fn get_asset(
     ))
 }
 
-/// DELETE /unified/v1/namespaces/{ns}/assets/{name}
+/// DELETE /unified/v1/domains/{domain}/namespaces/{ns}/assets/{name}
 pub async fn drop_asset(
     State(store): State<Arc<dyn CatalogStore>>,
     Extension(request_id): Extension<String>,
-    Path((ns, name)): Path<(String, String)>,
-    Query(query): Query<AssetDetailQuery>,
+    Path((domain, ns, name)): Path<(String, String, String)>,
 ) -> Result<impl IntoResponse, UnifiedError> {
-    let instance = format!("/unified/v1/namespaces/{}/assets/{}", ns, name);
+    let instance = asset_instance(&domain, &ns, &name);
     validate_name(&ns).map_err(|e| map_asset_error(e, &instance, &request_id))?;
     validate_name(&name).map_err(|e| map_asset_error(e, &instance, &request_id))?;
-    // Phase 2 still requires the `format` query parameter for wire
-    // compatibility; the storage drop is format-agnostic, so we validate
-    // and discard. Phase 3 will drop the parameter entirely.
-    let _ = parse_format(query.format, &instance, &request_id)?;
 
     store
-        .drop_asset(DEFAULT_DOMAIN, &ns, &name)
+        .drop_asset(&domain, &ns, &name)
         .await
         .map_err(|e| map_asset_error(e, &instance, &request_id))?;
 
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// PATCH /unified/v1/namespaces/{ns}/assets/{name}
+/// PATCH /unified/v1/domains/{domain}/namespaces/{ns}/assets/{name}
 pub async fn update_asset(
     State(store): State<Arc<dyn CatalogStore>>,
     Extension(request_id): Extension<String>,
-    Path((ns, name)): Path<(String, String)>,
-    Query(query): Query<AssetDetailQuery>,
+    Path((domain, ns, name)): Path<(String, String, String)>,
     Extension(config): Extension<super::UnifiedConfig>,
     Json(req): Json<UpdateAssetRequest>,
 ) -> Result<impl IntoResponse, UnifiedError> {
-    let instance = format!("/unified/v1/namespaces/{}/assets/{}", ns, name);
+    let instance = asset_instance(&domain, &ns, &name);
     validate_name(&ns).map_err(|e| map_asset_error(e, &instance, &request_id))?;
     validate_name(&name).map_err(|e| map_asset_error(e, &instance, &request_id))?;
-    let format = parse_format(query.format, &instance, &request_id)?;
 
     store
         .update_asset(
-            DEFAULT_DOMAIN,
+            &domain,
             &ns,
             &name,
             req.comment,
@@ -286,14 +296,17 @@ pub async fn update_asset(
 
     // Re-fetch to get full asset + tabular for response
     let raw = store
-        .get_asset_unified(DEFAULT_DOMAIN, &ns, &name)
+        .get_asset_unified(&domain, &ns, &name)
         .await
         .map_err(|e| map_asset_error(e, &instance, &request_id))?;
     let pair = require_tabular(raw, &name, &instance, &request_id)?;
 
+    let format = tabular_format_for_version(&pair.1.format, &instance, &request_id)?;
+
     let current_version = super::version::get_current_version(
         store.as_ref(),
         &config,
+        &domain,
         &ns,
         &name,
         format,
@@ -309,38 +322,36 @@ pub async fn update_asset(
     ))
 }
 
-/// POST /unified/v1/namespaces/{ns}/assets/{name}/rename
+/// POST /unified/v1/domains/{domain}/namespaces/{ns}/assets/{name}/rename
 pub async fn rename_asset(
     State(store): State<Arc<dyn CatalogStore>>,
     Extension(request_id): Extension<String>,
-    Path((ns, name)): Path<(String, String)>,
-    Query(query): Query<AssetDetailQuery>,
+    Path((domain, ns, name)): Path<(String, String, String)>,
     Json(req): Json<RenameAssetRequest>,
 ) -> Result<impl IntoResponse, UnifiedError> {
-    let instance = format!("/unified/v1/namespaces/{}/assets/{}/rename", ns, name);
+    let instance = rename_instance(&domain, &ns, &name);
     validate_name(&ns).map_err(|e| map_asset_error(e, &instance, &request_id))?;
     validate_name(&name).map_err(|e| map_asset_error(e, &instance, &request_id))?;
     validate_name(&req.new_name).map_err(|e| map_asset_error(e, &instance, &request_id))?;
-    // V2 wire shape requires format; storage rename is format-agnostic.
-    let _ = parse_format(query.format, &instance, &request_id)?;
 
     store
-        .rename_asset(DEFAULT_DOMAIN, &ns, &name, &req.new_name)
+        .rename_asset(&domain, &ns, &name, &req.new_name)
         .await
         .map_err(|e| map_asset_error(e, &instance, &request_id))?;
 
     Ok(StatusCode::OK)
 }
 
-/// POST /unified/v1/namespaces/{ns}/assets is intentionally not supported in V2.
+/// POST /unified/v1/domains/{domain}/namespaces/{ns}/assets is intentionally
+/// not supported in V3.
 pub async fn create_asset_not_allowed(
     Extension(request_id): Extension<String>,
-    Path(ns): Path<String>,
+    Path((domain, ns)): Path<(String, String)>,
 ) -> Result<StatusCode, UnifiedError> {
-    let instance = format!("/unified/v1/namespaces/{}/assets", ns);
+    let instance = list_assets_instance(&domain, &ns);
     Err(UnifiedError::new(
         UnifiedErrorCode::MethodNotAllowed,
-        "Unified Asset creation is not supported in V2",
+        "Unified Asset creation is not supported in V3",
         instance,
         request_id,
     ))

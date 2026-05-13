@@ -173,12 +173,6 @@ impl AssetListQuery {
     }
 }
 
-/// Query parameters for single-asset operations (get/delete/patch/rename).
-#[derive(Debug, Deserialize)]
-pub struct AssetDetailQuery {
-    pub format: Option<String>,
-}
-
 /// Page size validation error for Unified list endpoints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageSizeError {

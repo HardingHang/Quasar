@@ -45,21 +45,19 @@ pub fn routes() -> Router<Arc<dyn CatalogStore>> {
                 .delete(namespace::drop_namespace)
                 .patch(namespace::update_namespace),
         )
-        // Asset routes (still on the Phase 2 path until C7 lands the
-        // domain-scoped form. Adding the `/domains/{domain}` prefix is
-        // C7 because asset.rs still uses the DEFAULT_DOMAIN shim.)
+        // Asset routes scoped under a Domain + Namespace
         .route(
-            "/unified/v1/namespaces/{ns}/assets",
+            "/unified/v1/domains/{domain}/namespaces/{ns}/assets",
             get(asset::list_assets).post(asset::create_asset_not_allowed),
         )
         .route(
-            "/unified/v1/namespaces/{ns}/assets/{name}",
+            "/unified/v1/domains/{domain}/namespaces/{ns}/assets/{name}",
             get(asset::get_asset)
                 .delete(asset::drop_asset)
                 .patch(asset::update_asset),
         )
         .route(
-            "/unified/v1/namespaces/{ns}/assets/{name}/rename",
+            "/unified/v1/domains/{domain}/namespaces/{ns}/assets/{name}/rename",
             post(asset::rename_asset),
         )
 }

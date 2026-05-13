@@ -4,13 +4,13 @@ use super::dto::CurrentVersionResponse;
 use super::error::{UnifiedError, UnifiedErrorCode};
 
 use super::UnifiedConfig;
-use crate::DEFAULT_DOMAIN;
 
 /// Get the current version for an asset, format-specific.
 #[allow(clippy::too_many_arguments)]
 pub async fn get_current_version(
     store: &dyn CatalogStore,
     config: &UnifiedConfig,
+    domain: &str,
     namespace: &str,
     name: &str,
     format: AssetFormat,
@@ -20,7 +20,7 @@ pub async fn get_current_version(
 ) -> Result<Option<CurrentVersionResponse>, UnifiedError> {
     match format {
         AssetFormat::Lance => {
-            get_lance_current_version(store, namespace, name, instance, request_id).await
+            get_lance_current_version(store, domain, namespace, name, instance, request_id).await
         }
         AssetFormat::Iceberg => get_iceberg_current_version(config, metadata_location).await,
     }
@@ -30,6 +30,7 @@ pub async fn get_current_version(
 
 async fn get_lance_current_version(
     store: &dyn CatalogStore,
+    domain: &str,
     namespace: &str,
     name: &str,
     instance: &str,
@@ -39,7 +40,7 @@ async fn get_lance_current_version(
     // the latest tabular version; V3 splits the lookup from the version
     // operation.
     let (asset, _) = store
-        .get_tabular_asset(DEFAULT_DOMAIN, namespace, "lance", name)
+        .get_tabular_asset(domain, namespace, "lance", name)
         .await
         .map_err(|e| {
             UnifiedError::new(

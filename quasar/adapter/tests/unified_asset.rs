@@ -151,7 +151,7 @@ async fn test_list_assets_cross_format() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod/assets")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -184,7 +184,7 @@ async fn test_list_assets_filter_by_format_iceberg() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod/assets?format=iceberg")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets?format=iceberg")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -213,7 +213,7 @@ async fn test_list_assets_filter_by_format_lance() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod/assets?format=lance")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets?format=lance")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -241,7 +241,7 @@ async fn test_list_assets_filter_by_name() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod/assets?name=users")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets?name=users")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -271,7 +271,7 @@ async fn test_list_assets_pagination() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod/assets?pageSize=2")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets?pageSize=2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -289,7 +289,7 @@ async fn test_list_assets_pagination() {
             Request::builder()
                 .method("GET")
                 .uri(format!(
-                    "/unified/v1/namespaces/prod/assets?pageSize=2&pageToken={}",
+                    "/unified/v1/domains/default/namespaces/prod/assets?pageSize=2&pageToken={}",
                     token
                 ))
                 .body(Body::empty())
@@ -317,7 +317,7 @@ async fn test_list_assets_page_size_too_large() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod/assets?pageSize=1001")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets?pageSize=1001")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -341,7 +341,7 @@ async fn test_list_assets_page_size_zero() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod/assets?pageSize=0")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets?pageSize=0")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -365,7 +365,7 @@ async fn test_list_assets_empty_format_returns_invalid_format() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod/assets?format=")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets?format=")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -392,7 +392,7 @@ async fn test_list_assets_order_by_name_then_format() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod/assets?name=users")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets?name=users")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -420,7 +420,7 @@ async fn test_create_asset_not_allowed() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/unified/v1/namespaces/prod/assets")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"name":"users"}"#))
                 .unwrap(),
@@ -442,7 +442,7 @@ async fn test_create_asset_not_allowed() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod/assets")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -467,7 +467,7 @@ async fn test_get_asset_detail() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod/assets/users?format=iceberg")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/users")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -485,7 +485,9 @@ async fn test_get_asset_detail() {
 
 #[tokio::test]
 #[serial]
-async fn test_get_asset_missing_format() {
+async fn test_get_asset_without_format_returns_200() {
+    // V3 §4.4: GET on a single asset no longer requires the `format`
+    // query parameter; active asset names are unique per namespace.
     let store = setup().await;
     create_test_namespace(&store, "prod").await;
     create_test_asset(&store, "prod", AssetFormat::Iceberg, "users").await;
@@ -496,21 +498,27 @@ async fn test_get_asset_missing_format() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod/assets/users")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/users")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response).await;
-    assert_eq!(json["code"], "InvalidInput");
+    assert_eq!(json["name"], "users");
+    assert_eq!(json["format"], "iceberg");
+    assert_eq!(json["asset_type"], "table");
 }
 
 #[tokio::test]
 #[serial]
-async fn test_get_asset_invalid_format() {
+async fn test_get_asset_ignores_unknown_format_query() {
+    // V3 §4.4: GET on a single asset does not consume `?format=`. Stale
+    // V2 clients that still attach the query MUST NOT see a 400 — axum's
+    // serde extractor silently ignores unknown fields and the response
+    // is the V3 200.
     let store = setup().await;
     create_test_namespace(&store, "prod").await;
     create_test_asset(&store, "prod", AssetFormat::Iceberg, "users").await;
@@ -521,16 +529,16 @@ async fn test_get_asset_invalid_format() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod/assets/users?format=parquet")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/users?format=parquet")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response).await;
-    assert_eq!(json["code"], "InvalidFormat");
+    assert_eq!(json["name"], "users");
 }
 
 #[tokio::test]
@@ -545,7 +553,7 @@ async fn test_get_asset_not_found() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod/assets/missing?format=iceberg")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/missing")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -572,7 +580,7 @@ async fn test_delete_asset() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri("/unified/v1/namespaces/prod/assets/users?format=iceberg")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/users")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -594,7 +602,7 @@ async fn test_delete_asset_not_found() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri("/unified/v1/namespaces/prod/assets/missing?format=iceberg")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/missing")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -621,7 +629,7 @@ async fn test_patch_asset_comment() {
         .oneshot(
             Request::builder()
                 .method("PATCH")
-                .uri("/unified/v1/namespaces/prod/assets/users?format=iceberg")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/users")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"comment": "updated comment"}"#))
                 .unwrap(),
@@ -658,7 +666,7 @@ async fn test_patch_asset_comment_null() {
         .oneshot(
             Request::builder()
                 .method("PATCH")
-                .uri("/unified/v1/namespaces/prod/assets/users?format=iceberg")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/users")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"comment": null}"#))
                 .unwrap(),
@@ -695,7 +703,7 @@ async fn test_patch_asset_comment_missing_keeps_existing() {
         .oneshot(
             Request::builder()
                 .method("PATCH")
-                .uri("/unified/v1/namespaces/prod/assets/users?format=iceberg")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/users")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"updates": {"owner": "platform"}}"#))
                 .unwrap(),
@@ -722,7 +730,7 @@ async fn test_patch_asset_properties() {
         .oneshot(
             Request::builder()
                 .method("PATCH")
-                .uri("/unified/v1/namespaces/prod/assets/users?format=iceberg")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/users")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{"removals": ["old_key"], "updates": {"new_key": "new_value"}}"#,
@@ -754,7 +762,7 @@ async fn test_rename_asset() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/unified/v1/namespaces/prod/assets/users/rename?format=iceberg")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/users/rename")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"new_name": "customers"}"#))
                 .unwrap(),
@@ -770,7 +778,7 @@ async fn test_rename_asset() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod/assets/users?format=iceberg")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/users")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -783,7 +791,7 @@ async fn test_rename_asset() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod/assets/customers?format=iceberg")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/customers")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -808,7 +816,7 @@ async fn test_rename_asset_to_existing_name() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/unified/v1/namespaces/prod/assets/users/rename?format=iceberg")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/users/rename")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"new_name": "customers"}"#))
                 .unwrap(),
@@ -834,7 +842,7 @@ async fn test_rename_asset_invalid_new_name() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/unified/v1/namespaces/prod/assets/users/rename?format=iceberg")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/users/rename")
                 .header("Content-Type", "application/json")
                 .body(Body::from(r#"{"new_name": "bad name"}"#))
                 .unwrap(),
@@ -859,7 +867,7 @@ async fn test_list_assets_invalid_format() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod/assets?format=parquet")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets?format=parquet")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -886,7 +894,7 @@ async fn test_get_lance_asset_no_version() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod/assets/items?format=lance")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/items")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -930,7 +938,7 @@ async fn test_get_lance_asset_with_version() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod/assets/items?format=lance")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/items")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -964,7 +972,7 @@ async fn test_get_iceberg_asset_no_metadata() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod/assets/users?format=iceberg")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/users")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1015,7 +1023,7 @@ async fn test_get_iceberg_asset_with_metadata() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod/assets/users?format=iceberg")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/users")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1061,7 +1069,7 @@ async fn test_get_iceberg_asset_no_snapshot() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/unified/v1/namespaces/prod/assets/users?format=iceberg")
+                .uri("/unified/v1/domains/default/namespaces/prod/assets/users")
                 .body(Body::empty())
                 .unwrap(),
         )
