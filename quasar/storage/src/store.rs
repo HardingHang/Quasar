@@ -52,13 +52,17 @@ macro_rules! try_get {
 
 // ── Row mappers ────────────────────────────────────────────────────────────
 
+/// Parse JSONB properties column into HashMap.
+fn parse_properties(props: serde_json::Value) -> Result<HashMap<String, String>, StoreError> {
+    serde_json::from_value(props).map_err(|e| StoreError::Internal {
+        msg: format!("properties JSON: {}", &e),
+        source: Some(Box::new(e)),
+    })
+}
+
 fn row_to_domain(row: &Row) -> Result<Domain, StoreError> {
     let props: serde_json::Value = try_get!(row, "properties");
-    let properties: HashMap<String, String> =
-        serde_json::from_value(props).map_err(|e| StoreError::Internal {
-            msg: format!("properties JSON: {}", &e),
-            source: Some(Box::new(e)),
-        })?;
+    let properties = parse_properties(props)?;
 
     Ok(Domain {
         id: try_get!(row, "id"),
@@ -76,11 +80,7 @@ fn row_to_domain(row: &Row) -> Result<Domain, StoreError> {
 
 fn row_to_namespace(row: &Row) -> Result<Namespace, StoreError> {
     let props: serde_json::Value = try_get!(row, "properties");
-    let properties: HashMap<String, String> =
-        serde_json::from_value(props).map_err(|e| StoreError::Internal {
-            msg: format!("properties JSON: {}", &e),
-            source: Some(Box::new(e)),
-        })?;
+    let properties = parse_properties(props)?;
 
     Ok(Namespace {
         id: try_get!(row, "id"),
@@ -95,11 +95,7 @@ fn row_to_namespace(row: &Row) -> Result<Namespace, StoreError> {
 
 fn row_to_asset(row: &Row) -> Result<Asset, StoreError> {
     let props: serde_json::Value = try_get!(row, "properties");
-    let properties: HashMap<String, String> =
-        serde_json::from_value(props).map_err(|e| StoreError::Internal {
-            msg: format!("properties JSON: {}", &e),
-            source: Some(Box::new(e)),
-        })?;
+    let properties = parse_properties(props)?;
 
     Ok(Asset {
         id: try_get!(row, "id"),
@@ -143,11 +139,7 @@ fn row_to_tabular_asset_optional(row: &Row) -> Result<Option<TabularAsset>, Stor
 
 fn row_to_asset_version(row: &Row) -> Result<AssetVersion, StoreError> {
     let props: serde_json::Value = try_get!(row, "properties");
-    let properties: HashMap<String, String> =
-        serde_json::from_value(props).map_err(|e| StoreError::Internal {
-            msg: format!("properties JSON: {}", &e),
-            source: Some(Box::new(e)),
-        })?;
+    let properties = parse_properties(props)?;
 
     Ok(AssetVersion {
         id: try_get!(row, "id"),
