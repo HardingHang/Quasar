@@ -76,7 +76,7 @@ POST /lance/v1/table/prod$analytics$embeddings/describe
 | GET | `/v1/{prefix}/namespaces` | 列出 Namespace | 必须实现 |
 | POST | `/v1/{prefix}/namespaces` | 创建 Namespace | 必须实现 |
 | GET | `/v1/{prefix}/namespaces/{namespace}` | 加载 Namespace 属性 | 必须实现 |
-| HEAD | `/v1/{prefix}/namespaces/{namespace}` | 检查 Namespace 是否存在 | 应实现 |
+| HEAD | `/v1/{prefix}/namespaces/{namespace}` | 检查 Namespace 是否存在 | 必须实现 |
 | DELETE | `/v1/{prefix}/namespaces/{namespace}` | 删除空 Namespace | 必须实现 |
 | POST | `/v1/{prefix}/namespaces/{namespace}/properties` | 更新 Namespace 属性 | 必须实现 |
 

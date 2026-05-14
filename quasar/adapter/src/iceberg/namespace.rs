@@ -119,6 +119,27 @@ pub async fn drop_namespace(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// HEAD /iceberg/v1/{prefix}/namespaces/{ns}
+/// Check if a namespace exists.
+pub async fn namespace_exists(
+    State(store): State<Arc<dyn CatalogStore>>,
+    Path((prefix, ns)): Path<(String, String)>,
+) -> Result<impl IntoResponse, IcebergError> {
+    let exists = match store.get_namespace(&prefix, &ns).await {
+        Ok(_) => true,
+        Err(quasar_core::StoreError::NotFound(_)) => false,
+        Err(e) => return Err(store_error_to_iceberg_namespace(e)),
+    };
+
+    if exists {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(IcebergError::NoSuchNamespaceException {
+            message: format!("Namespace '{}' not found", ns),
+        })
+    }
+}
+
 /// POST /iceberg/v1/{prefix}/namespaces/{ns}/properties
 pub async fn update_namespace_properties(
     State(store): State<Arc<dyn CatalogStore>>,

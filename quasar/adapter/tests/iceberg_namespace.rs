@@ -476,3 +476,46 @@ async fn test_drop_namespace_not_found() {
     assert_eq!(json["error"]["type"], "NoSuchNamespaceException");
     assert_eq!(json["error"]["code"], 404);
 }
+
+#[tokio::test]
+#[serial]
+async fn test_namespace_exists_returns_204() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri("/iceberg/v1/default/namespaces/prod")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_namespace_exists_not_found() {
+    let app = test_app(setup().await);
+
+    // HEAD request returns 404 status, but body may not be readable via HEAD method
+    // Per Iceberg spec, the error should still be an IcebergErrorResponse
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri("/iceberg/v1/default/namespaces/nonexistent")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Verify 404 status code per Iceberg REST spec
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}

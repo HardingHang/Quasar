@@ -30,7 +30,9 @@ pub fn routes() -> Router<Arc<dyn CatalogStore>> {
         )
         .route(
             "/iceberg/v1/{prefix}/namespaces/{ns}",
-            get(namespace::get_namespace).delete(namespace::drop_namespace),
+            get(namespace::get_namespace)
+                .head(namespace::namespace_exists)
+                .delete(namespace::drop_namespace),
         )
         .route(
             "/iceberg/v1/{prefix}/namespaces/{ns}/properties",
