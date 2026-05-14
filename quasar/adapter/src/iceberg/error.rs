@@ -35,6 +35,8 @@ pub enum IcebergError {
     BadRequestException { message: String },
     CommitFailedException { message: String },
     InternalServerError { message: String },
+    ServiceUnavailableException { message: String },
+    TimeoutException { message: String },
     MetadataNotFoundException { message: String },
 }
 
@@ -65,6 +67,14 @@ impl IcebergError {
             }
             IcebergError::InternalServerError { message } => {
                 (message.clone(), "InternalServerError".to_string(), 500)
+            }
+            IcebergError::ServiceUnavailableException { message } => (
+                message.clone(),
+                "ServiceUnavailableException".to_string(),
+                503,
+            ),
+            IcebergError::TimeoutException { message } => {
+                (message.clone(), "TimeoutException".to_string(), 504)
             }
             IcebergError::MetadataNotFoundException { message } => (
                 message.clone(),
@@ -105,10 +115,10 @@ pub fn store_error_to_iceberg_namespace(err: StoreError) -> IcebergError {
             IcebergError::NamespaceAlreadyExistsException { message: msg }
         }
         StoreError::InvalidInput(msg) => IcebergError::BadRequestException { message: msg },
-        StoreError::DatabaseUnavailable { .. } => IcebergError::InternalServerError {
+        StoreError::DatabaseUnavailable { .. } => IcebergError::ServiceUnavailableException {
             message: "service temporarily unavailable".to_string(),
         },
-        StoreError::Timeout { operation } => IcebergError::InternalServerError {
+        StoreError::Timeout { operation } => IcebergError::TimeoutException {
             message: format!("operation '{}' timed out", operation),
         },
         StoreError::Internal { msg, source } => {
@@ -134,10 +144,10 @@ pub fn store_error_to_iceberg_table(err: StoreError) -> IcebergError {
         },
         StoreError::Conflict { msg } => IcebergError::CommitFailedException { message: msg },
         StoreError::InvalidInput(msg) => IcebergError::BadRequestException { message: msg },
-        StoreError::DatabaseUnavailable { .. } => IcebergError::InternalServerError {
+        StoreError::DatabaseUnavailable { .. } => IcebergError::ServiceUnavailableException {
             message: "service temporarily unavailable".to_string(),
         },
-        StoreError::Timeout { operation } => IcebergError::InternalServerError {
+        StoreError::Timeout { operation } => IcebergError::TimeoutException {
             message: format!("operation '{}' timed out", operation),
         },
         StoreError::Internal { msg, source } => {
@@ -240,6 +250,28 @@ mod tests {
     }
 
     #[test]
+    fn test_iceberg_error_service_unavailable_to_response() {
+        let err = IcebergError::ServiceUnavailableException {
+            message: "service temporarily unavailable".to_string(),
+        };
+        let resp = err.to_error_response();
+        assert_eq!(resp.error.error_type, "ServiceUnavailableException");
+        assert_eq!(resp.error.code, 503);
+        assert_eq!(resp.error.message, "service temporarily unavailable");
+    }
+
+    #[test]
+    fn test_iceberg_error_timeout_to_response() {
+        let err = IcebergError::TimeoutException {
+            message: "operation 'list_tables' timed out".to_string(),
+        };
+        let resp = err.to_error_response();
+        assert_eq!(resp.error.error_type, "TimeoutException");
+        assert_eq!(resp.error.code, 504);
+        assert_eq!(resp.error.message, "operation 'list_tables' timed out");
+    }
+
+    #[test]
     fn test_error_response_serde() {
         let resp = ErrorResponse {
             error: ErrorBody {
@@ -286,6 +318,16 @@ mod tests {
             }),
             IcebergError::CommitFailedException { message } if message.contains("'prod'")
         ));
+        assert!(matches!(
+            store_error_to_iceberg_namespace(StoreError::DatabaseUnavailable { source: None }),
+            IcebergError::ServiceUnavailableException { message } if message == "service temporarily unavailable"
+        ));
+        assert!(matches!(
+            store_error_to_iceberg_namespace(StoreError::Timeout {
+                operation: "list_namespaces".into()
+            }),
+            IcebergError::TimeoutException { message } if message.contains("list_namespaces")
+        ));
     }
 
     #[test]
@@ -314,6 +356,16 @@ mod tests {
                 source: None
             }),
             IcebergError::InternalServerError { message } if message == "An internal error occurred"
+        ));
+        assert!(matches!(
+            store_error_to_iceberg_table(StoreError::DatabaseUnavailable { source: None }),
+            IcebergError::ServiceUnavailableException { message } if message == "service temporarily unavailable"
+        ));
+        assert!(matches!(
+            store_error_to_iceberg_table(StoreError::Timeout {
+                operation: "load_table".into()
+            }),
+            IcebergError::TimeoutException { message } if message.contains("load_table")
         ));
     }
 }

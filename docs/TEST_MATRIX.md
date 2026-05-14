@@ -13,9 +13,9 @@
 |-------|---------|---------|------|
 | quasar-core | 35 | 0 | 35 |
 | quasar-server | 9 | 11 | 20 |
-| quasar-adapter | 67 | 141 | 208 |
-| quasar-storage | 15 | 16 | 31 |
-| **合计** | **126** | **168** | **294** |
+| quasar-adapter | 72 | 141 | 213 |
+| quasar-storage | 18 | 16 | 34 |
+| **合计** | **134** | **168** | **302** |
 
 > 注：统计基于 `cargo test --workspace --all-features --all-targets` 的测试函数数量，不含 doc-tests（当前为 0）。
 
@@ -135,9 +135,11 @@
 | `test_lance_error_table_version_already_exists_to_problem_details` | 单元 | TableVersionAlreadyExists → ProblemDetails | code=409, error="TableVersionAlreadyExists" |
 | `test_lance_error_invalid_input_to_problem_details` | 单元 | InvalidInput → ProblemDetails | code=400, detail 原样保留 |
 | `test_lance_error_internal_error_to_problem_details` | 单元 | InternalError → ProblemDetails | code=500, error="InternalError" |
+| `test_lance_error_service_unavailable_to_problem_details` | 单元 | ServiceUnavailable → ProblemDetails | code=503, error="ServiceUnavailable" |
+| `test_lance_error_timeout_to_problem_details` | 单元 | Timeout → ProblemDetails | code=504, error="Timeout" |
 | `test_problem_details_serde` | 单元 | ProblemDetails 序列化 | JSON 包含 error/code/detail/instance 字段 |
-| `test_store_error_to_lance_mapping` | 单元 | StoreError → LanceError（namespace） | 5 种 StoreError 全变体正确映射 |
-| `test_store_error_to_lance_table_mapping` | 单元 | StoreError → LanceError（table） | NotFound/AlreadyExists 映射为 TableNotFound/TableAlreadyExists |
+| `test_store_error_to_lance_mapping` | 单元 | StoreError → LanceError（namespace） | 业务错误 + DatabaseUnavailable/Timeout 正确映射 |
+| `test_store_error_to_lance_table_mapping` | 单元 | StoreError → LanceError（table） | 业务错误 + DatabaseUnavailable/Timeout 正确映射 |
 | `test_store_error_to_lance_version_already_exists_maps_to_table_exists` | 单元 | version AlreadyExists 解析 | 映射为 TableAlreadyExists |
 | `test_store_error_to_lance_version_not_found` | 单元 | StoreError::NotFound → LanceError（version） | 映射为 TableNotFound |
 | `test_store_error_to_lance_version_conflict` | 单元 | StoreError::Conflict → LanceError（version） | 映射为 TableNotEmpty |
@@ -218,6 +220,7 @@
 |---------|------|------|--------|
 | `internal_error_redacts_msg` | 单元 | Internal → UnifiedError | detail 固定为 "An internal error occurred"，不泄露内部信息 |
 | `domain_not_empty_maps_to_domain_not_empty` | 单元 | DomainNotEmpty → UnifiedError | code=DomainNotEmpty，detail 含 domain 名 |
+| `transient_store_errors_use_service_status_codes` | 单元 | DatabaseUnavailable/Timeout → UnifiedError | DatabaseUnavailable 返回 503，Timeout 返回 504 |
 
 ### Iceberg 错误映射 (`src/iceberg/error.rs`)
 
@@ -231,9 +234,11 @@
 | `test_iceberg_error_commit_failed_to_response` | 单元 | CommitFailedException → ErrorResponse | code=409, type="CommitFailedException" |
 | `test_iceberg_error_internal_to_response` | 单元 | InternalServerError → ErrorResponse | code=500, type="InternalServerError" |
 | `test_iceberg_error_metadata_not_found_to_response` | 单元 | MetadataNotFoundException → ErrorResponse | code=404, type="MetadataNotFoundException" |
+| `test_iceberg_error_service_unavailable_to_response` | 单元 | ServiceUnavailableException → ErrorResponse | code=503, type="ServiceUnavailableException" |
+| `test_iceberg_error_timeout_to_response` | 单元 | TimeoutException → ErrorResponse | code=504, type="TimeoutException" |
 | `test_error_response_serde` | 单元 | ErrorResponse 序列化 | JSON 包含 error/message/type/code 字段 |
-| `test_store_error_to_iceberg_namespace_mapping` | 单元 | StoreError → IcebergError（namespace） | 5 种 StoreError 全变体正确映射 |
-| `test_store_error_to_iceberg_table_mapping` | 单元 | StoreError → IcebergError（table） | 5 种 StoreError 全变体正确映射 |
+| `test_store_error_to_iceberg_namespace_mapping` | 单元 | StoreError → IcebergError（namespace） | 业务错误 + DatabaseUnavailable/Timeout 正确映射 |
+| `test_store_error_to_iceberg_table_mapping` | 单元 | StoreError → IcebergError（table） | 业务错误 + DatabaseUnavailable/Timeout 正确映射 |
 
 ### Iceberg TableMetadata (`src/iceberg/table_metadata.rs`)
 
@@ -450,6 +455,14 @@
 | `init_sql_seeds_default_domain` | 单元 | 默认 Domain seed | 名称为 `"default"` |
 | `init_sql_uses_partial_unique_for_active_assets` | 单元 | active 资产唯一索引 | 使用 `WHERE deleted_at IS NULL` 部分唯一索引 |
 
+### PostgreSQL 错误分类 (`src/store.rs`)
+
+| 测试函数 | 类型 | 场景 | 验证点 |
+|---------|------|------|--------|
+| `classifies_connection_sqlstates_as_database_unavailable` | 单元 | 连接类 / shutdown SQLSTATE | 映射为 DatabaseUnavailable 分类 |
+| `classifies_timeout_sqlstates_as_timeout` | 单元 | query canceled / lock not available | 映射为 Timeout 分类 |
+| `leaves_business_sqlstates_to_callers` | 单元 | unique/FK/restrict/check 业务 SQLSTATE | 不被通用分类吞掉，留给调用方映射 |
+
 ### CatalogStore 集成 (`tests/integration.rs`)
 
 | 测试函数 | 类型 | 场景 | 验证点 |
@@ -474,6 +487,14 @@
 ---
 
 ## 修订记录
+
+### V5.1（2026-05-14）
+
+- 更新：测试统计总览表（134 单元 + 168 集成 = 302 合计）
+- 新增：PostgreSQL transient 错误分类单元测试（3 个，连接不可用 / 超时 / 业务 SQLSTATE 不被吞掉）
+- 新增：Iceberg 错误映射 503/504 测试（2 个），并扩展 StoreError 映射断言
+- 新增：Lance 错误映射 503/504 测试（2 个），并扩展 StoreError 映射断言
+- 新增：Unified transient StoreError 状态码测试（1 个，DatabaseUnavailable=503、Timeout=504）
 
 ### V5.0（2026-05-13）
 

@@ -1,7 +1,7 @@
 use quasar_core::{AssetFormat, AssetVersion, CatalogStore, TabularAssetVersion};
 
 use super::dto::CurrentVersionResponse;
-use super::error::{UnifiedError, UnifiedErrorCode};
+use super::error::{map_asset_error, UnifiedError, UnifiedErrorCode};
 
 use super::UnifiedConfig;
 
@@ -42,26 +42,12 @@ async fn get_lance_current_version(
     let (asset, _) = store
         .get_tabular_asset(domain, namespace, "lance", name)
         .await
-        .map_err(|e| {
-            UnifiedError::new(
-                UnifiedErrorCode::InternalError,
-                format!("failed to resolve lance asset: {}", e),
-                instance,
-                request_id,
-            )
-        })?;
+        .map_err(|e| map_asset_error(e, instance, request_id))?;
 
     let version = store
         .get_latest_tabular_version(asset.id)
         .await
-        .map_err(|e| {
-            UnifiedError::new(
-                UnifiedErrorCode::InternalError,
-                format!("failed to load current version: {}", e),
-                instance,
-                request_id,
-            )
-        })?;
+        .map_err(|e| map_asset_error(e, instance, request_id))?;
 
     version
         .map(|pair| lance_version_to_response(pair, instance, request_id))

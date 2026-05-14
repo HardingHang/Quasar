@@ -39,6 +39,8 @@ pub enum LanceError {
     // --- Generic errors ---
     InvalidInput { detail: String, instance: String },
     InternalError { detail: String, instance: String },
+    ServiceUnavailable { detail: String, instance: String },
+    Timeout { detail: String, instance: String },
 }
 
 impl LanceError {
@@ -98,6 +100,18 @@ impl LanceError {
                 detail,
                 instance,
             },
+            LanceError::ServiceUnavailable { detail, instance } => ProblemDetails {
+                error: "ServiceUnavailable".to_string(),
+                code: 503,
+                detail,
+                instance,
+            },
+            LanceError::Timeout { detail, instance } => ProblemDetails {
+                error: "Timeout".to_string(),
+                code: 504,
+                detail,
+                instance,
+            },
         }
     }
 }
@@ -134,11 +148,11 @@ pub fn store_error_to_lance(err: StoreError, instance: &str) -> LanceError {
             detail: msg,
             instance: instance.to_string(),
         },
-        StoreError::DatabaseUnavailable { .. } => LanceError::InternalError {
+        StoreError::DatabaseUnavailable { .. } => LanceError::ServiceUnavailable {
             detail: "service temporarily unavailable".to_string(),
             instance: instance.to_string(),
         },
-        StoreError::Timeout { operation } => LanceError::InternalError {
+        StoreError::Timeout { operation } => LanceError::Timeout {
             detail: format!("operation '{}' timed out", operation),
             instance: instance.to_string(),
         },
@@ -178,11 +192,11 @@ pub fn store_error_to_lance_table(err: StoreError, instance: &str) -> LanceError
             detail: msg,
             instance: instance.to_string(),
         },
-        StoreError::DatabaseUnavailable { .. } => LanceError::InternalError {
+        StoreError::DatabaseUnavailable { .. } => LanceError::ServiceUnavailable {
             detail: "service temporarily unavailable".to_string(),
             instance: instance.to_string(),
         },
-        StoreError::Timeout { operation } => LanceError::InternalError {
+        StoreError::Timeout { operation } => LanceError::Timeout {
             detail: format!("operation '{}' timed out", operation),
             instance: instance.to_string(),
         },
@@ -222,11 +236,11 @@ pub fn store_error_to_lance_version(err: StoreError, instance: &str) -> LanceErr
             detail: msg,
             instance: instance.to_string(),
         },
-        StoreError::DatabaseUnavailable { .. } => LanceError::InternalError {
+        StoreError::DatabaseUnavailable { .. } => LanceError::ServiceUnavailable {
             detail: "service temporarily unavailable".to_string(),
             instance: instance.to_string(),
         },
-        StoreError::Timeout { operation } => LanceError::InternalError {
+        StoreError::Timeout { operation } => LanceError::Timeout {
             detail: format!("operation '{}' timed out", operation),
             instance: instance.to_string(),
         },
@@ -319,6 +333,30 @@ mod tests {
     }
 
     #[test]
+    fn test_lance_error_service_unavailable_to_problem_details() {
+        let err = LanceError::ServiceUnavailable {
+            detail: "service temporarily unavailable".to_string(),
+            instance: "/lance/v1/namespace/foo/list".to_string(),
+        };
+        let pd = err.to_problem_details();
+        assert_eq!(pd.error, "ServiceUnavailable");
+        assert_eq!(pd.code, 503);
+        assert_eq!(pd.detail, "service temporarily unavailable");
+    }
+
+    #[test]
+    fn test_lance_error_timeout_to_problem_details() {
+        let err = LanceError::Timeout {
+            detail: "operation 'list_namespaces' timed out".to_string(),
+            instance: "/lance/v1/namespace/foo/list".to_string(),
+        };
+        let pd = err.to_problem_details();
+        assert_eq!(pd.error, "Timeout");
+        assert_eq!(pd.code, 504);
+        assert_eq!(pd.detail, "operation 'list_namespaces' timed out");
+    }
+
+    #[test]
     fn test_problem_details_serde() {
         let pd = ProblemDetails {
             error: "NotFound".to_string(),
@@ -356,6 +394,14 @@ mod tests {
             store_error_to_lance(StoreError::Internal { msg: "oops".into(), source: None }, "/test"),
             LanceError::InternalError { detail, .. } if detail == "An internal error occurred"
         ));
+        assert!(matches!(
+            store_error_to_lance(StoreError::DatabaseUnavailable { source: None }, "/test"),
+            LanceError::ServiceUnavailable { detail, .. } if detail == "service temporarily unavailable"
+        ));
+        assert!(matches!(
+            store_error_to_lance(StoreError::Timeout { operation: "list".into() }, "/test"),
+            LanceError::Timeout { detail, .. } if detail.contains("list")
+        ));
     }
 
     #[test]
@@ -367,6 +413,14 @@ mod tests {
         assert!(matches!(
             store_error_to_lance_table(StoreError::AlreadyExists("bar".into()), "/test"),
             LanceError::TableAlreadyExists { name, .. } if name == "bar"
+        ));
+        assert!(matches!(
+            store_error_to_lance_table(StoreError::DatabaseUnavailable { source: None }, "/test"),
+            LanceError::ServiceUnavailable { detail, .. } if detail == "service temporarily unavailable"
+        ));
+        assert!(matches!(
+            store_error_to_lance_table(StoreError::Timeout { operation: "describe".into() }, "/test"),
+            LanceError::Timeout { detail, .. } if detail.contains("describe")
         ));
     }
 

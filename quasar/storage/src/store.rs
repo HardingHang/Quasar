@@ -23,10 +23,12 @@ impl PgCatalogStore {
     }
 
     async fn get_client(&self) -> Result<deadpool_postgres::Client, StoreError> {
-        self.pool.get().await.map_err(|e| StoreError::Internal {
-            msg: format!("connection pool error: {}", &e),
-            source: Some(Box::new(e)),
-        })
+        self.pool
+            .get()
+            .await
+            .map_err(|e| StoreError::DatabaseUnavailable {
+                source: Some(Box::new(e)),
+            })
     }
 
     /// Bootstrap (or repair) the V3 catalog schema for this pool. Replaces
@@ -174,14 +176,59 @@ fn props_to_json(props: &HashMap<String, String>) -> Result<serde_json::Value, S
     })
 }
 
-fn internal_err<E>(op: &'static str) -> impl FnOnce(E) -> StoreError
-where
-    E: std::error::Error + Send + Sync + 'static,
-{
-    move |e| StoreError::Internal {
-        msg: format!("{} failed: {}", op, &e),
-        source: Some(Box::new(e)),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PgFailureClass {
+    DatabaseUnavailable,
+    Timeout,
+}
+
+fn classify_sql_state(code: &SqlState) -> Option<PgFailureClass> {
+    if code == &SqlState::QUERY_CANCELED || code == &SqlState::LOCK_NOT_AVAILABLE {
+        return Some(PgFailureClass::Timeout);
     }
+
+    if code == &SqlState::CONNECTION_EXCEPTION
+        || code == &SqlState::CONNECTION_DOES_NOT_EXIST
+        || code == &SqlState::CONNECTION_FAILURE
+        || code == &SqlState::SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION
+        || code == &SqlState::SQLSERVER_REJECTED_ESTABLISHMENT_OF_SQLCONNECTION
+        || code == &SqlState::TRANSACTION_RESOLUTION_UNKNOWN
+        || code == &SqlState::PROTOCOL_VIOLATION
+        || code == &SqlState::OPERATOR_INTERVENTION
+        || code == &SqlState::ADMIN_SHUTDOWN
+        || code == &SqlState::CRASH_SHUTDOWN
+        || code == &SqlState::CANNOT_CONNECT_NOW
+        || code == &SqlState::DATABASE_DROPPED
+    {
+        return Some(PgFailureClass::DatabaseUnavailable);
+    }
+
+    None
+}
+
+fn classify_pg_error(op: &'static str, e: tokio_postgres::Error) -> StoreError {
+    if e.is_closed() {
+        return StoreError::DatabaseUnavailable {
+            source: Some(Box::new(e)),
+        };
+    }
+
+    match e.code().and_then(classify_sql_state) {
+        Some(PgFailureClass::DatabaseUnavailable) => StoreError::DatabaseUnavailable {
+            source: Some(Box::new(e)),
+        },
+        Some(PgFailureClass::Timeout) => StoreError::Timeout {
+            operation: op.to_string(),
+        },
+        None => StoreError::Internal {
+            msg: format!("{} failed: {}", op, &e),
+            source: Some(Box::new(e)),
+        },
+    }
+}
+
+fn internal_err(op: &'static str) -> impl FnOnce(tokio_postgres::Error) -> StoreError {
+    move |e| classify_pg_error(op, e)
 }
 
 /// Apply a `PatchField` to an existing optional value.
@@ -230,10 +277,7 @@ impl DomainStore for PgCatalogStore {
                         return StoreError::AlreadyExists(format!("domain '{}'", name));
                     }
                 }
-                StoreError::Internal {
-                    msg: format!("create_domain failed: {}", &e),
-                    source: Some(Box::new(e)),
-                }
+                classify_pg_error("create_domain", e)
             })?;
 
         row_to_domain(&row)
@@ -284,14 +328,7 @@ impl DomainStore for PgCatalogStore {
                         domain: name.to_string(),
                     }
                 }
-                Some(code) => StoreError::Internal {
-                    msg: format!("drop_domain failed: {} (sqlstate: {})", &e, code.code()),
-                    source: Some(Box::new(e)),
-                },
-                None => StoreError::Internal {
-                    msg: format!("drop_domain failed: {}", &e),
-                    source: Some(Box::new(e)),
-                },
+                _ => classify_pg_error("drop_domain", e),
             })?;
 
         if n == 0 {
@@ -378,10 +415,7 @@ impl NamespaceStore for PgCatalogStore {
                         ));
                     }
                 }
-                StoreError::Internal {
-                    msg: format!("create_namespace failed: {}", &e),
-                    source: Some(Box::new(e)),
-                }
+                classify_pg_error("create_namespace", e)
             })?
             .ok_or_else(|| StoreError::NotFound(format!("domain '{}'", domain_name)))?;
 
@@ -441,14 +475,7 @@ impl NamespaceStore for PgCatalogStore {
                         namespace: name.to_string(),
                     }
                 }
-                Some(code) => StoreError::Internal {
-                    msg: format!("drop_namespace failed: {} (sqlstate: {})", &e, code.code()),
-                    source: Some(Box::new(e)),
-                },
-                None => StoreError::Internal {
-                    msg: format!("drop_namespace failed: {}", &e),
-                    source: Some(Box::new(e)),
-                },
+                _ => classify_pg_error("drop_namespace", e),
             })?;
 
         if n == 0 {
@@ -539,10 +566,7 @@ impl AssetStore for PgCatalogStore {
                         ));
                     }
                 }
-                StoreError::Internal {
-                    msg: format!("create_asset failed: {}", &e),
-                    source: Some(Box::new(e)),
-                }
+                classify_pg_error("create_asset", e)
             })?
             .ok_or_else(|| StoreError::NotFound(format!("namespace '{}'", namespace_name)))?;
 
@@ -635,10 +659,7 @@ impl AssetStore for PgCatalogStore {
                     ));
                 }
             }
-            StoreError::Internal {
-                msg: format!("rename_asset failed: {}", &e),
-                source: Some(Box::new(e)),
-            }
+            classify_pg_error("rename_asset", e)
         };
 
         let n = if let Some(target_ns) = new_namespace_name {
@@ -791,10 +812,7 @@ impl TabularStore for PgCatalogStore {
                         ));
                     }
                 }
-                StoreError::Internal {
-                    msg: format!("create_tabular_asset failed: {}", &e),
-                    source: Some(Box::new(e)),
-                }
+                classify_pg_error("create_tabular_asset", e)
             })?
             .ok_or_else(|| StoreError::NotFound(format!("namespace '{}'", namespace_name)))?;
 
@@ -957,10 +975,7 @@ impl VersionStore for PgCatalogStore {
                         };
                     }
                 }
-                StoreError::Internal {
-                    msg: format!("create_version failed: {}", &e),
-                    source: Some(Box::new(e)),
-                }
+                classify_pg_error("create_version", e)
             })?;
 
         row_to_asset_version(&row)
@@ -1051,10 +1066,7 @@ impl TabularVersionStore for PgCatalogStore {
                         };
                     }
                 }
-                StoreError::Internal {
-                    msg: format!("create_tabular_version failed: {}", &e),
-                    source: Some(Box::new(e)),
-                }
+                classify_pg_error("create_tabular_version", e)
             })?;
 
         let version = row_to_asset_version(&version_row)?;
@@ -1300,5 +1312,52 @@ impl UnifiedQueryStore for PgCatalogStore {
         let asset = row_to_asset(&row)?;
         let tabular = row_to_tabular_asset_optional(&row)?;
         Ok((asset, tabular))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_connection_sqlstates_as_database_unavailable() {
+        for code in [
+            SqlState::CONNECTION_EXCEPTION,
+            SqlState::CONNECTION_DOES_NOT_EXIST,
+            SqlState::CONNECTION_FAILURE,
+            SqlState::SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION,
+            SqlState::SQLSERVER_REJECTED_ESTABLISHMENT_OF_SQLCONNECTION,
+            SqlState::TRANSACTION_RESOLUTION_UNKNOWN,
+            SqlState::PROTOCOL_VIOLATION,
+            SqlState::OPERATOR_INTERVENTION,
+            SqlState::ADMIN_SHUTDOWN,
+            SqlState::CRASH_SHUTDOWN,
+            SqlState::CANNOT_CONNECT_NOW,
+            SqlState::DATABASE_DROPPED,
+        ] {
+            assert_eq!(
+                classify_sql_state(&code),
+                Some(PgFailureClass::DatabaseUnavailable)
+            );
+        }
+    }
+
+    #[test]
+    fn classifies_timeout_sqlstates_as_timeout() {
+        for code in [SqlState::QUERY_CANCELED, SqlState::LOCK_NOT_AVAILABLE] {
+            assert_eq!(classify_sql_state(&code), Some(PgFailureClass::Timeout));
+        }
+    }
+
+    #[test]
+    fn leaves_business_sqlstates_to_callers() {
+        for code in [
+            SqlState::UNIQUE_VIOLATION,
+            SqlState::FOREIGN_KEY_VIOLATION,
+            SqlState::RESTRICT_VIOLATION,
+            SqlState::CHECK_VIOLATION,
+        ] {
+            assert_eq!(classify_sql_state(&code), None);
+        }
     }
 }

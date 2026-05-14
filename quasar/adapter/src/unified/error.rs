@@ -36,6 +36,7 @@ pub enum UnifiedErrorCode {
     MethodNotAllowed,
     Conflict,
     ServiceUnavailable,
+    Timeout,
     InternalError,
 }
 
@@ -57,6 +58,7 @@ impl UnifiedErrorCode {
             Self::MethodNotAllowed => "MethodNotAllowed",
             Self::Conflict => "Conflict",
             Self::ServiceUnavailable => "ServiceUnavailable",
+            Self::Timeout => "Timeout",
             Self::InternalError => "InternalError",
         }
     }
@@ -78,6 +80,7 @@ impl UnifiedErrorCode {
             | Self::PageSizeTooLarge => StatusCode::BAD_REQUEST,
             Self::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
             Self::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Timeout => StatusCode::GATEWAY_TIMEOUT,
             Self::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -99,6 +102,7 @@ impl UnifiedErrorCode {
             Self::MethodNotAllowed => "method-not-allowed",
             Self::Conflict => "conflict",
             Self::ServiceUnavailable => "service-unavailable",
+            Self::Timeout => "timeout",
             Self::InternalError => "internal-error",
         }
     }
@@ -191,7 +195,7 @@ pub fn map_domain_error(err: StoreError, instance: &str, request_id: &str) -> Un
             request_id,
         ),
         StoreError::Timeout { operation } => UnifiedError::new(
-            UnifiedErrorCode::ServiceUnavailable,
+            UnifiedErrorCode::Timeout,
             format!("operation '{}' timed out", operation),
             instance,
             request_id,
@@ -248,7 +252,7 @@ pub fn map_namespace_error(err: StoreError, instance: &str, request_id: &str) ->
             request_id,
         ),
         StoreError::Timeout { operation } => UnifiedError::new(
-            UnifiedErrorCode::ServiceUnavailable,
+            UnifiedErrorCode::Timeout,
             format!("operation '{}' timed out", operation),
             instance,
             request_id,
@@ -302,7 +306,7 @@ pub fn map_asset_error(err: StoreError, instance: &str, request_id: &str) -> Uni
             request_id,
         ),
         StoreError::Timeout { operation } => UnifiedError::new(
-            UnifiedErrorCode::ServiceUnavailable,
+            UnifiedErrorCode::Timeout,
             format!("operation '{}' timed out", operation),
             instance,
             request_id,
@@ -369,5 +373,31 @@ mod tests {
         );
         assert_eq!(err.code, UnifiedErrorCode::DomainNotEmpty);
         assert!(err.detail.contains("prod"));
+    }
+
+    #[test]
+    fn transient_store_errors_use_service_status_codes() {
+        let unavailable = map_asset_error(
+            StoreError::DatabaseUnavailable { source: None },
+            "/test",
+            "rid",
+        );
+        assert_eq!(unavailable.code, UnifiedErrorCode::ServiceUnavailable);
+        assert_eq!(
+            unavailable.code.status_code(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(unavailable.detail, "service temporarily unavailable");
+
+        let timeout = map_asset_error(
+            StoreError::Timeout {
+                operation: "get_asset".into(),
+            },
+            "/test",
+            "rid",
+        );
+        assert_eq!(timeout.code, UnifiedErrorCode::Timeout);
+        assert_eq!(timeout.code.status_code(), StatusCode::GATEWAY_TIMEOUT);
+        assert!(timeout.detail.contains("get_asset"));
     }
 }
