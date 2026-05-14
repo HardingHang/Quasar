@@ -363,6 +363,18 @@ pub mod asset {
         WHERE d.name = $1 AND ns.name = $2 AND a.name = $3
           AND a.deleted_at IS NULL
     "#;
+
+    /// Check whether an active asset exists by (domain, namespace, name).
+    /// Parameters: $1 domain_name, $2 namespace_name, $3 asset_name.
+    pub const EXISTS: &str = r#"
+        SELECT EXISTS(
+            SELECT 1 FROM assets a
+            JOIN namespaces ns ON a.namespace_id = ns.id
+            JOIN domains d ON ns.domain_id = d.id
+            WHERE d.name = $1 AND ns.name = $2 AND a.name = $3
+              AND a.deleted_at IS NULL
+        )
+    "#;
 }
 
 /// Queries against `asset_versions` and `tabular_asset_versions` (V3 §3.3.6-7).
@@ -420,6 +432,31 @@ pub mod version {
         FROM asset_versions
         WHERE asset_id = $1
         ORDER BY version_order ASC NULLS LAST
+    "#;
+
+    /// Look up a tabular version by (asset_id, version_key) joined with its
+    /// tabular extension. Parameters: $1 asset_id, $2 version_key.
+    pub const GET_TABULAR_BY_KEY: &str = r#"
+        SELECT av.id, av.asset_id, av.version_key, av.version_order, av.previous_version_id,
+               av.comment, av.properties, av.created_at,
+               tav.version_id, tav.metadata_location,
+               tav.created_at AS tabular_created_at
+        FROM asset_versions av
+        JOIN tabular_asset_versions tav ON av.id = tav.version_id
+        WHERE av.asset_id = $1 AND av.version_key = $2
+    "#;
+
+    /// List all tabular versions of an asset in ascending order (NULL orders last).
+    /// Parameter: $1 asset_id.
+    pub const LIST_TABULAR_BY_ASSET: &str = r#"
+        SELECT av.id, av.asset_id, av.version_key, av.version_order, av.previous_version_id,
+               av.comment, av.properties, av.created_at,
+               tav.version_id, tav.metadata_location,
+               tav.created_at AS tabular_created_at
+        FROM asset_versions av
+        JOIN tabular_asset_versions tav ON av.id = tav.version_id
+        WHERE av.asset_id = $1
+        ORDER BY av.version_order ASC NULLS LAST
     "#;
 }
 
@@ -485,6 +522,7 @@ mod tests {
         assert_constant("asset::LIST_UNIFIED", asset::LIST_UNIFIED);
         assert_constant("asset::GET_UNIFIED", asset::GET_UNIFIED);
         assert_constant("asset::LOOKUP_ID_BY_NAME", asset::LOOKUP_ID_BY_NAME);
+        assert_constant("asset::EXISTS", asset::EXISTS);
     }
 
     #[test]
@@ -495,6 +533,11 @@ mod tests {
         assert_constant("version::GET_LATEST_TABULAR", version::GET_LATEST_TABULAR);
         assert_constant("version::GET_BY_KEY", version::GET_BY_KEY);
         assert_constant("version::LIST_BY_ASSET", version::LIST_BY_ASSET);
+        assert_constant("version::GET_TABULAR_BY_KEY", version::GET_TABULAR_BY_KEY);
+        assert_constant(
+            "version::LIST_TABULAR_BY_ASSET",
+            version::LIST_TABULAR_BY_ASSET,
+        );
     }
 
     #[test]

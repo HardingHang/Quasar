@@ -601,15 +601,7 @@ impl AssetStore for PgCatalogStore {
         let client = self.get_client().await?;
         let row = client
             .query_one(
-                r#"
-                SELECT EXISTS(
-                    SELECT 1 FROM assets a
-                    JOIN namespaces ns ON a.namespace_id = ns.id
-                    JOIN domains d ON ns.domain_id = d.id
-                    WHERE d.name = $1 AND ns.name = $2 AND a.name = $3
-                      AND a.deleted_at IS NULL
-                )
-                "#,
+                queries::asset::EXISTS,
                 &[&domain_name, &namespace_name, &name],
             )
             .await
@@ -1095,15 +1087,7 @@ impl TabularVersionStore for PgCatalogStore {
         let client = self.get_client().await?;
         let row = client
             .query_opt(
-                r#"
-                SELECT av.id, av.asset_id, av.version_key, av.version_order, av.previous_version_id,
-                       av.comment, av.properties, av.created_at,
-                       tav.version_id, tav.metadata_location,
-                       tav.created_at AS tabular_created_at
-                FROM asset_versions av
-                JOIN tabular_asset_versions tav ON av.id = tav.version_id
-                WHERE av.asset_id = $1 AND av.version_key = $2
-                "#,
+                queries::version::GET_TABULAR_BY_KEY,
                 &[&asset_id, &version_key],
             )
             .await
@@ -1121,19 +1105,7 @@ impl TabularVersionStore for PgCatalogStore {
     ) -> Result<Vec<(AssetVersion, TabularAssetVersion)>, StoreError> {
         let client = self.get_client().await?;
         let rows = client
-            .query(
-                r#"
-                SELECT av.id, av.asset_id, av.version_key, av.version_order, av.previous_version_id,
-                       av.comment, av.properties, av.created_at,
-                       tav.version_id, tav.metadata_location,
-                       tav.created_at AS tabular_created_at
-                FROM asset_versions av
-                JOIN tabular_asset_versions tav ON av.id = tav.version_id
-                WHERE av.asset_id = $1
-                ORDER BY av.version_order ASC NULLS LAST
-                "#,
-                &[&asset_id],
-            )
+            .query(queries::version::LIST_TABULAR_BY_ASSET, &[&asset_id])
             .await
             .map_err(internal_err("list_tabular_versions"))?;
 
