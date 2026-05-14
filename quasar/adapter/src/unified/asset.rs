@@ -1,10 +1,10 @@
+use crate::AssetFormat;
 use axum::{
     extract::{Extension, Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
 };
-use crate::AssetFormat;
 use quasar_core::{validate_name, CatalogStore};
 use std::sync::Arc;
 
@@ -53,9 +53,7 @@ fn parse_optional_format(
             instance,
             request_id,
         )),
-        Some(s) => AssetFormat::parse(&s)
-            .map(Some)
-            .ok_or_else(|| {
+        Some(s) => AssetFormat::parse(&s).map(Some).ok_or_else(|| {
             UnifiedError::new(
                 UnifiedErrorCode::InvalidFormat,
                 format!("invalid format '{}', expected 'iceberg' or 'lance'", s),
