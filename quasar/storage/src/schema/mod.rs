@@ -45,8 +45,8 @@ mod tests {
 
     /// Triggers that enforce cross-row invariants the application also checks.
     const EXPECTED_TRIGGERS: &[&str] = &[
-        "trg_tabular_assets_asset_type",
-        "trg_asset_versions_previous_same_asset",
+        "trg_tabular_assets_type_check",
+        "trg_asset_versions_previous_version_check",
     ];
 
     /// Partial-unique / latest-version indexes that V3 explicitly requires.

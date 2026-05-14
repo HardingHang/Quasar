@@ -158,8 +158,8 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS trg_tabular_assets_asset_type ON tabular_assets;
-CREATE TRIGGER trg_tabular_assets_asset_type
+DROP TRIGGER IF EXISTS trg_tabular_assets_type_check ON tabular_assets;
+CREATE TRIGGER trg_tabular_assets_type_check
 BEFORE INSERT OR UPDATE OF asset_id ON tabular_assets
 FOR EACH ROW
 EXECUTE FUNCTION ensure_tabular_asset_type();
@@ -212,8 +212,8 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS trg_asset_versions_previous_same_asset ON asset_versions;
-CREATE TRIGGER trg_asset_versions_previous_same_asset
+DROP TRIGGER IF EXISTS trg_asset_versions_previous_version_check ON asset_versions;
+CREATE TRIGGER trg_asset_versions_previous_version_check
 BEFORE INSERT OR UPDATE OF asset_id, previous_version_id ON asset_versions
 FOR EACH ROW
 EXECUTE FUNCTION ensure_previous_version_same_asset();
