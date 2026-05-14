@@ -1,4 +1,5 @@
-use quasar_core::{AssetFormat, AssetVersion, CatalogStore, TabularAssetVersion};
+use crate::AssetFormat;
+use quasar_core::{AssetVersion, CatalogStore, TabularAssetVersion};
 
 use super::dto::CurrentVersionResponse;
 use super::error::{map_asset_error, UnifiedError, UnifiedErrorCode};

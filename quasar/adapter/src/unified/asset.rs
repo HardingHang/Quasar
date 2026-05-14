@@ -4,8 +4,8 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use quasar_core::{validate_name, AssetFormat, CatalogStore};
-use std::str::FromStr;
+use crate::AssetFormat;
+use quasar_core::{validate_name, CatalogStore};
 use std::sync::Arc;
 
 use super::dto::{
@@ -53,7 +53,9 @@ fn parse_optional_format(
             instance,
             request_id,
         )),
-        Some(s) => AssetFormat::from_str(&s).map(Some).map_err(|_| {
+        Some(s) => AssetFormat::parse(&s)
+            .map(Some)
+            .ok_or_else(|| {
             UnifiedError::new(
                 UnifiedErrorCode::InvalidFormat,
                 format!("invalid format '{}', expected 'iceberg' or 'lance'", s),
@@ -72,7 +74,7 @@ fn tabular_format_for_version(
     instance: &str,
     request_id: &str,
 ) -> Result<AssetFormat, UnifiedError> {
-    AssetFormat::from_str(tabular_format).map_err(|_| {
+    AssetFormat::parse(tabular_format).ok_or_else(|| {
         tracing::error!(
             tabular_format = %tabular_format,
             "unified asset has unrecognised tabular format"

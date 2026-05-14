@@ -13,8 +13,8 @@ pub mod validation;
 pub use error::StoreError;
 pub use metrics::{Counter, MetricsRegistry, MetricsState};
 pub use models::{
-    Asset, AssetFormat, AssetType, AssetVersion, AssetVersionWithTabular, AssetWithTabular, Domain,
-    Namespace, PatchField, TabularAsset, TabularAssetVersion,
+    Asset, AssetVersion, AssetVersionWithTabular, AssetWithTabular, Domain, Namespace, PatchField,
+    TabularAsset, TabularAssetVersion,
 };
 pub use store::{
     AssetStore, CasCommitStore, CatalogStore, DomainPatch, DomainStore, NamespaceStore,
