@@ -830,12 +830,20 @@ impl TabularStore for PgCatalogStore {
         domain_name: &str,
         namespace_name: &str,
         format: Option<&str>,
+        offset: i64,
+        limit: i32,
     ) -> Result<Vec<(Asset, TabularAsset)>, StoreError> {
         let client = self.get_client().await?;
         let rows = client
             .query(
                 queries::asset::LIST_TABULAR_BY_NAMESPACE,
-                &[&domain_name, &namespace_name, &format],
+                &[
+                    &domain_name,
+                    &namespace_name,
+                    &format,
+                    &(limit as i64),
+                    &offset,
+                ],
             )
             .await
             .map_err(internal_err("list_tabular_assets"))?;

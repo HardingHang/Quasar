@@ -20,6 +20,13 @@ pub async fn list_namespaces(
     Path(prefix): Path<String>,
     Query(query): Query<ListNamespacesQuery>,
 ) -> Result<impl IntoResponse, IcebergError> {
+    // V3 does not support nested namespaces; reject parent query parameter
+    if query.parent.is_some() {
+        return Err(IcebergError::BadRequestException {
+            message: "Nested namespace is not supported in V3".to_string(),
+        });
+    }
+
     let limit = query.page_size.unwrap_or(100).clamp(1, 1000);
     let offset = query
         .page_token
@@ -101,7 +108,7 @@ pub async fn drop_namespace(
     Path((prefix, ns)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, IcebergError> {
     let assets = store
-        .list_tabular_assets(&prefix, &ns, Some("iceberg"))
+        .list_tabular_assets(&prefix, &ns, Some("iceberg"), 0, 1000)
         .await
         .map_err(store_error_to_iceberg_namespace)?;
 

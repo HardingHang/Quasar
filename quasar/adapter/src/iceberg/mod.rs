@@ -56,10 +56,16 @@ pub fn routes() -> Router<Arc<dyn CatalogStore>> {
 }
 
 pub mod config {
-    use axum::{http::StatusCode, response::IntoResponse, Extension, Json};
+    use axum::{
+        extract::{Extension, Query},
+        http::StatusCode,
+        response::IntoResponse,
+        Json,
+    };
     use serde::Serialize;
     use std::collections::HashMap;
 
+    use super::dto::ConfigQuery;
     use super::error::IcebergError;
     use super::IcebergConfig;
 
@@ -67,16 +73,42 @@ pub mod config {
     pub struct ConfigResponse {
         pub defaults: HashMap<String, String>,
         pub overrides: HashMap<String, String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        pub endpoints: Vec<String>,
+    }
+
+    fn supported_endpoints() -> Vec<String> {
+        vec![
+            "GET /v1/config".to_string(),
+            "GET /v1/{prefix}/namespaces".to_string(),
+            "POST /v1/{prefix}/namespaces".to_string(),
+            "GET /v1/{prefix}/namespaces/{namespace}".to_string(),
+            "HEAD /v1/{prefix}/namespaces/{namespace}".to_string(),
+            "DELETE /v1/{prefix}/namespaces/{namespace}".to_string(),
+            "POST /v1/{prefix}/namespaces/{namespace}/properties".to_string(),
+            "GET /v1/{prefix}/namespaces/{namespace}/tables".to_string(),
+            "POST /v1/{prefix}/namespaces/{namespace}/tables".to_string(),
+            "GET /v1/{prefix}/namespaces/{namespace}/tables/{table}".to_string(),
+            "HEAD /v1/{prefix}/namespaces/{namespace}/tables/{table}".to_string(),
+            "DELETE /v1/{prefix}/namespaces/{namespace}/tables/{table}".to_string(),
+            "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}".to_string(),
+            "POST /v1/{prefix}/tables/rename".to_string(),
+        ]
     }
 
     pub async fn get_config(
         Extension(config): Extension<IcebergConfig>,
+        Query(query): Query<ConfigQuery>,
     ) -> Result<impl IntoResponse, IcebergError> {
         let mut defaults = HashMap::new();
-        let overrides = HashMap::new();
+        let mut overrides = HashMap::new();
 
         if let Some(ref warehouse) = config.warehouse_path {
             defaults.insert("warehouse".to_string(), warehouse.clone());
+        }
+
+        if let Some(ref warehouse) = query.warehouse {
+            overrides.insert("warehouse".to_string(), warehouse.clone());
         }
 
         Ok((
@@ -84,6 +116,7 @@ pub mod config {
             Json(ConfigResponse {
                 defaults,
                 overrides,
+                endpoints: supported_endpoints(),
             }),
         ))
     }

@@ -38,6 +38,7 @@ pub enum IcebergError {
     ServiceUnavailableException { message: String },
     TimeoutException { message: String },
     MetadataNotFoundException { message: String },
+    NotImplementedException { message: String },
 }
 
 impl IcebergError {
@@ -81,6 +82,9 @@ impl IcebergError {
                 "MetadataNotFoundException".to_string(),
                 404,
             ),
+            IcebergError::NotImplementedException { message } => {
+                (message.clone(), "NotImplementedException".to_string(), 501)
+            }
         };
 
         ErrorResponse {
@@ -269,6 +273,17 @@ mod tests {
         assert_eq!(resp.error.error_type, "TimeoutException");
         assert_eq!(resp.error.code, 504);
         assert_eq!(resp.error.message, "operation 'list_tables' timed out");
+    }
+
+    #[test]
+    fn test_iceberg_error_not_implemented_to_response() {
+        let err = IcebergError::NotImplementedException {
+            message: "purgeRequested=true is not supported in V3".to_string(),
+        };
+        let resp = err.to_error_response();
+        assert_eq!(resp.error.error_type, "NotImplementedException");
+        assert_eq!(resp.error.code, 501);
+        assert_eq!(resp.error.message, "purgeRequested=true is not supported in V3");
     }
 
     #[test]

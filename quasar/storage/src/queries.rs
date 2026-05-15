@@ -187,7 +187,7 @@ pub mod asset {
 
     /// List active tabular assets in a namespace, optionally filtered by format.
     /// Parameters: $1 domain_name, $2 namespace_name, $3 format filter
-    /// (TEXT, NULL = no filter).
+    /// (TEXT, NULL = no filter), $4 limit, $5 offset.
     pub const LIST_TABULAR_BY_NAMESPACE: &str = r#"
         SELECT a.id, a.namespace_id, a.name, a.asset_type, a.comment, a.properties,
                a.deleted_at, a.created_by, a.updated_by, a.created_at, a.updated_at,
@@ -201,6 +201,7 @@ pub mod asset {
           AND a.deleted_at IS NULL AND a.asset_type = 'table'
           AND ($3::TEXT IS NULL OR ta.format = $3)
         ORDER BY a.name
+        LIMIT $4 OFFSET $5
     "#;
 
     /// Insert a tabular asset extension row. Parameters: $1 asset_id, $2 format,

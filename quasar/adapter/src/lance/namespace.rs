@@ -265,16 +265,27 @@ pub async fn list_tables(
             return Err(require_namespace_id_error(&id, "list_tables", &instance));
         }
     };
-    let _limit = query.limit.unwrap_or(100).clamp(1, 1000);
+    let limit = query.limit.unwrap_or(100).clamp(1, 1000);
+    let offset = query
+        .page_token
+        .as_ref()
+        .and_then(|t| t.parse::<i64>().ok())
+        .unwrap_or(0);
 
     let assets = store
-        .list_tabular_assets(&domain, &namespace, Some("lance"))
+        .list_tabular_assets(&domain, &namespace, Some("lance"), offset, limit)
         .await
         .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
 
+    let next_page_token = if assets.len() as i32 >= limit {
+        Some((offset + assets.len() as i64).to_string())
+    } else {
+        None
+    };
+
     let response = ListTablesResponse {
         tables: assets.into_iter().map(TableResponse::from).collect(),
-        next_page_token: None,
+        next_page_token,
     };
 
     Ok((StatusCode::OK, Json(response)))

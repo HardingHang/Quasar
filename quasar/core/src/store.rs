@@ -181,6 +181,8 @@ pub trait TabularStore: AssetStore {
         domain_name: &str,
         namespace_name: &str,
         format: Option<&str>,
+        offset: i64,
+        limit: i32,
     ) -> Result<Vec<(Asset, TabularAsset)>, StoreError>;
 
     async fn get_tabular_asset(

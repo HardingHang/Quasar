@@ -1,6 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// ── Config DTOs ────────────────────────────────────────────
+
+#[derive(Deserialize, Default)]
+pub struct ConfigQuery {
+    pub warehouse: Option<String>,
+}
+
 // ── Namespace DTOs ─────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -23,6 +30,7 @@ pub struct ListNamespacesQuery {
     pub page_token: Option<String>,
     #[serde(rename = "pageSize")]
     pub page_size: Option<i32>,
+    pub parent: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -46,6 +54,12 @@ pub struct UpdateNamespacePropertiesResponse {
     pub updated: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub missing: Vec<String>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct DropTableQuery {
+    #[serde(rename = "purgeRequested")]
+    pub purge_requested: Option<bool>,
 }
 
 // ── Table DTOs ─────────────────────────────────────────────

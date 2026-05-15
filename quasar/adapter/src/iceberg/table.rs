@@ -176,12 +176,23 @@ pub async fn list_tables(
     Path((prefix, ns)): Path<(String, String)>,
     Query(query): Query<ListTablesQuery>,
 ) -> Result<impl IntoResponse, IcebergError> {
-    let _ = query; // pagination placeholder for MVP
+    let limit = query.page_size.unwrap_or(100).clamp(1, 1000);
+    let offset = query
+        .page_token
+        .as_ref()
+        .and_then(|t| t.parse::<i64>().ok())
+        .unwrap_or(0);
 
     let assets = store
-        .list_tabular_assets(&prefix, &ns, Some("iceberg"))
+        .list_tabular_assets(&prefix, &ns, Some("iceberg"), offset, limit)
         .await
         .map_err(store_error_to_iceberg_table)?;
+
+    let next_page_token = if assets.len() as i32 >= limit {
+        Some((offset + assets.len() as i64).to_string())
+    } else {
+        None
+    };
 
     Ok((
         StatusCode::OK,
@@ -193,7 +204,7 @@ pub async fn list_tables(
                     name: asset.name,
                 })
                 .collect(),
-            next_page_token: None,
+            next_page_token,
         }),
     ))
 }
@@ -293,7 +304,15 @@ pub async fn load_table(
 pub async fn drop_table(
     State(store): State<Arc<dyn CatalogStore>>,
     Path((prefix, ns, table)): Path<(String, String, String)>,
+    Query(query): Query<super::dto::DropTableQuery>,
 ) -> Result<impl IntoResponse, IcebergError> {
+    // V3: purgeRequested data cleanup is not implemented; reject if requested
+    if query.purge_requested == Some(true) {
+        return Err(IcebergError::NotImplementedException {
+            message: "purgeRequested=true is not supported in V3".to_string(),
+        });
+    }
+
     // V3 endpoint-level isolation: only Iceberg-format assets are
     // visible to the Iceberg drop endpoint. An asset with the same
     // name in another format must surface as NoSuchTableException.
@@ -499,4 +518,48 @@ pub async fn commit_table(
             metadata: new_schema_snapshot,
         }),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_next_metadata_location_basic_increment() {
+        let current = "s3://bucket/metadata/00001-abc.metadata.json";
+        let next = next_metadata_location(current);
+        assert_eq!(next, "s3://bucket/metadata/00002-abc.metadata.json");
+    }
+
+    #[test]
+    fn test_next_metadata_location_width_overflow_9_to_10() {
+        let current = "s3://bucket/metadata/00009-abc.metadata.json";
+        let next = next_metadata_location(current);
+        assert_eq!(next, "s3://bucket/metadata/00010-abc.metadata.json");
+    }
+
+    #[test]
+    fn test_next_metadata_location_width_overflow_99_to_100() {
+        let current = "s3://bucket/metadata/00099-abc.metadata.json";
+        let next = next_metadata_location(current);
+        assert_eq!(next, "s3://bucket/metadata/00100-abc.metadata.json");
+    }
+
+    #[test]
+    fn test_next_metadata_location_width_overflow_99999_to_100000() {
+        let current = "s3://bucket/metadata/99999-abc.metadata.json";
+        let next = next_metadata_location(current);
+        assert_eq!(next, "s3://bucket/metadata/100000-abc.metadata.json");
+    }
+
+    #[test]
+    fn test_next_metadata_location_unrecognized_format() {
+        let current = "s3://bucket/unusual/location.json";
+        let next = next_metadata_location(current);
+        // Fallback: since the string does not end with ".metadata.json",
+        // trim_end_matches is a no-op and the format becomes
+        // "{original}-{timestamp}.metadata.json"
+        assert!(next.starts_with("s3://bucket/unusual/location.json-"));
+        assert!(next.ends_with(".metadata.json"));
+    }
 }
