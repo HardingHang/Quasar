@@ -9,6 +9,7 @@ use postgresql_embedded::PostgreSQL;
 use quasar_adapter::iceberg;
 use quasar_storage::PgCatalogStore;
 use serde_json::Value;
+use serial_test::serial;
 use tokio::sync::OnceCell;
 use tower::ServiceExt;
 
@@ -78,6 +79,7 @@ async fn body_json(response: axum::response::Response) -> Value {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_get_config() {
     let store = setup().await;
     let app = test_app(store);
@@ -97,4 +99,63 @@ async fn test_get_config() {
     let json = body_json(response).await;
     assert!(json["defaults"].is_object());
     assert!(json["overrides"].is_object());
+    assert!(json["endpoints"].is_array());
+    assert!(!json["endpoints"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_get_config_with_warehouse() {
+    let store = setup().await;
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/config?warehouse=s3://bucket/prod")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["overrides"]["warehouse"], "s3://bucket/prod");
+    assert!(json["endpoints"].is_array());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_get_config_endpoints_field() {
+    let store = setup().await;
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let endpoints = json["endpoints"].as_array().unwrap();
+    assert!(!endpoints.is_empty());
+
+    // Verify key endpoints are present
+    let endpoint_strings: Vec<String> = endpoints
+        .iter()
+        .map(|e| e.as_str().unwrap().to_string())
+        .collect();
+    assert!(endpoint_strings.contains(&"GET /v1/config".to_string()));
+    assert!(endpoint_strings.contains(&"GET /v1/{prefix}/namespaces".to_string()));
+    assert!(
+        endpoint_strings.contains(&"POST /v1/{prefix}/namespaces/{namespace}/tables".to_string())
+    );
 }

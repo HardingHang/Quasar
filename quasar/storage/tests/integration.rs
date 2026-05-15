@@ -160,7 +160,7 @@ async fn test_asset_crud() {
     assert_eq!(asset.name, "asset_a");
 
     let list = store
-        .list_tabular_assets(DEFAULT, "ns1", Some("lance"))
+        .list_tabular_assets(DEFAULT, "ns1", Some("lance"), 0, 1000)
         .await
         .unwrap();
     assert_eq!(list.len(), 1);
@@ -221,7 +221,7 @@ async fn test_asset_crud() {
     store.drop_asset(DEFAULT, "ns1", "asset_c").await.unwrap();
 
     let list = store
-        .list_tabular_assets(DEFAULT, "ns1", Some("lance"))
+        .list_tabular_assets(DEFAULT, "ns1", Some("lance"), 0, 1000)
         .await
         .unwrap();
     assert!(list.is_empty());

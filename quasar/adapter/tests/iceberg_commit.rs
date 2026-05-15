@@ -1087,3 +1087,295 @@ async fn test_remove_properties_commit() {
     assert_eq!(json["metadata"]["properties"]["owner"], "team-a");
     assert!(json["metadata"]["properties"].get("env").is_none());
 }
+
+#[tokio::test]
+#[serial]
+async fn test_commit_assert_create_fails_on_existing_table() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+
+    // Create table directly through store with initial metadata
+    store
+        .create_tabular_asset(
+            "default",
+            "prod",
+            "users",
+            "iceberg",
+            "s3://bucket/warehouse/prod/users",
+            Some("s3://bucket/warehouse/prod/users/metadata/00001-uuid.metadata.json"),
+            Some(serde_json::json!({
+                "format-version": 2,
+                "table-uuid": "test-uuid",
+                "location": "s3://bucket/warehouse/prod/users",
+                "last-sequence-number": 0,
+                "last-updated-ms": 1000,
+                "last-column-id": 0,
+                "schemas": [],
+                "current-schema-id": 0,
+                "partition-specs": [],
+                "default-spec-id": 0,
+                "last-partition-id": 999,
+                "properties": {},
+                "current-snapshot-id": null,
+                "snapshots": [],
+                "snapshot-log": [],
+                "metadata-log": [],
+                "sort-orders": [],
+                "default-sort-order-id": 0,
+                "refs": {}
+            })),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let app = test_app(store);
+
+    // Commit with assert-create on an existing table should fail with 409
+    let commit = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "requirements": [{"type": "assert-create"}],
+                        "updates": []
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(commit.status(), StatusCode::CONFLICT);
+    let json = body_json(commit).await;
+    assert_eq!(json["error"]["type"], "CommitFailedException");
+    assert_eq!(json["error"]["code"], 409);
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("already exists"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_add_schema() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+
+    store
+        .create_tabular_asset(
+            "default",
+            "prod",
+            "users",
+            "iceberg",
+            "s3://bucket/warehouse/prod/users",
+            Some("s3://bucket/warehouse/prod/users/metadata/00001-uuid.metadata.json"),
+            Some(serde_json::json!({
+                "format-version": 2,
+                "table-uuid": "test-uuid",
+                "location": "s3://bucket/warehouse/prod/users",
+                "last-sequence-number": 0,
+                "last-updated-ms": 1000,
+                "last-column-id": 0,
+                "schemas": [{"schema-id": 0, "fields": []}],
+                "current-schema-id": 0,
+                "partition-specs": [],
+                "default-spec-id": 0,
+                "last-partition-id": 999,
+                "properties": {},
+                "current-snapshot-id": null,
+                "snapshots": [],
+                "snapshot-log": [],
+                "metadata-log": [],
+                "sort-orders": [],
+                "default-sort-order-id": 0,
+                "refs": {}
+            })),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let app = test_app(store);
+
+    let commit = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "requirements": [],
+                        "updates": [
+                            {
+                                "action": "add-schema",
+                                "schema": {
+                                    "schema-id": 1,
+                                    "fields": [
+                                        {"id": 1, "name": "id", "type": "long", "required": true}
+                                    ]
+                                }
+                            }
+                        ]
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(commit.status(), StatusCode::OK);
+    let json = body_json(commit).await;
+    let schemas = json["metadata"]["schemas"].as_array().unwrap();
+    assert_eq!(schemas.len(), 2);
+    assert_eq!(schemas[1]["schema-id"], 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_set_current_schema() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+
+    store
+        .create_tabular_asset(
+            "default",
+            "prod",
+            "users",
+            "iceberg",
+            "s3://bucket/warehouse/prod/users",
+            Some("s3://bucket/warehouse/prod/users/metadata/00001-uuid.metadata.json"),
+            Some(serde_json::json!({
+                "format-version": 2,
+                "table-uuid": "test-uuid",
+                "location": "s3://bucket/warehouse/prod/users",
+                "last-sequence-number": 0,
+                "last-updated-ms": 1000,
+                "last-column-id": 0,
+                "schemas": [
+                    {"schema-id": 0, "fields": []},
+                    {"schema-id": 1, "fields": [{"id": 1, "name": "id", "type": "long"}]}
+                ],
+                "current-schema-id": 0,
+                "partition-specs": [],
+                "default-spec-id": 0,
+                "last-partition-id": 999,
+                "properties": {},
+                "current-snapshot-id": null,
+                "snapshots": [],
+                "snapshot-log": [],
+                "metadata-log": [],
+                "sort-orders": [],
+                "default-sort-order-id": 0,
+                "refs": {}
+            })),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let app = test_app(store);
+
+    let commit = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "requirements": [],
+                        "updates": [
+                            {"action": "set-current-schema", "schema-id": 1}
+                        ]
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(commit.status(), StatusCode::OK);
+    let json = body_json(commit).await;
+    assert_eq!(json["metadata"]["current-schema-id"], 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_add_partition_spec() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+
+    store
+        .create_tabular_asset(
+            "default",
+            "prod",
+            "users",
+            "iceberg",
+            "s3://bucket/warehouse/prod/users",
+            Some("s3://bucket/warehouse/prod/users/metadata/00001-uuid.metadata.json"),
+            Some(serde_json::json!({
+                "format-version": 2,
+                "table-uuid": "test-uuid",
+                "location": "s3://bucket/warehouse/prod/users",
+                "last-sequence-number": 0,
+                "last-updated-ms": 1000,
+                "last-column-id": 0,
+                "schemas": [{"schema-id": 0, "fields": []}],
+                "current-schema-id": 0,
+                "partition-specs": [{"spec-id": 0, "fields": []}],
+                "default-spec-id": 0,
+                "last-partition-id": 999,
+                "properties": {},
+                "current-snapshot-id": null,
+                "snapshots": [],
+                "snapshot-log": [],
+                "metadata-log": [],
+                "sort-orders": [],
+                "default-sort-order-id": 0,
+                "refs": {}
+            })),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let app = test_app(store);
+
+    let commit = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "requirements": [],
+                        "updates": [
+                            {
+                                "action": "add-partition-spec",
+                                "spec": {
+                                    "spec-id": 1,
+                                    "fields": [
+                                        {"name": "date", "transform": "day", "source-id": 1}
+                                    ]
+                                }
+                            }
+                        ]
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(commit.status(), StatusCode::OK);
+    let json = body_json(commit).await;
+    let specs = json["metadata"]["partition-specs"].as_array().unwrap();
+    assert_eq!(specs.len(), 2);
+    assert_eq!(specs[1]["spec-id"], 1);
+}

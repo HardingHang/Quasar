@@ -8,7 +8,7 @@ use http_body_util::BodyExt;
 use postgresql_embedded::PostgreSQL;
 use quasar_adapter::iceberg;
 use quasar_core::CatalogStore;
-use quasar_core::{NamespaceStore, TabularStore};
+use quasar_core::{DomainStore, NamespaceStore, TabularStore};
 use quasar_storage::PgCatalogStore;
 use serde_json::Value;
 use serial_test::serial;
@@ -518,4 +518,260 @@ async fn test_namespace_exists_not_found() {
 
     // Verify 404 status code per Iceberg REST spec
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_list_namespaces_with_parent_rejected() {
+    let app = test_app(setup().await);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/default/namespaces?parent=analytics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["type"], "BadRequestException");
+    assert_eq!(json["error"]["code"], 400);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_list_namespaces_page_size_one() {
+    let store = setup().await;
+    create_namespace(&store, "ns1").await;
+    create_namespace(&store, "ns2").await;
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/default/namespaces?pageSize=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let namespaces = json["namespaces"].as_array().unwrap();
+    assert_eq!(namespaces.len(), 1);
+    assert!(json["nextPageToken"].is_string());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_list_namespaces_page_size_negative() {
+    let store = setup().await;
+    create_namespace(&store, "ns1").await;
+    let app = test_app(store);
+
+    // Negative pageSize is clamped to 1
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/default/namespaces?pageSize=-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let namespaces = json["namespaces"].as_array().unwrap();
+    // clamp(1, 1000) turns -1 into 1
+    assert_eq!(namespaces.len(), 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_list_namespaces_page_size_exceeds_max() {
+    let store = setup().await;
+    // Create 5 namespaces
+    for i in 1..=5 {
+        create_namespace(&store, &format!("ns{}", i)).await;
+    }
+    let app = test_app(store);
+
+    // pageSize=5000 is clamped to 1000
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/default/namespaces?pageSize=5000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let namespaces = json["namespaces"].as_array().unwrap();
+    // Should return all 5, clamped limit is 1000 but only 5 exist
+    assert_eq!(namespaces.len(), 5);
+    // No next page since all results fit
+    assert!(json["nextPageToken"].is_null());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_create_namespace_missing_content_type() {
+    let app = test_app(setup().await);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces")
+                // No Content-Type header
+                .body(Body::from(r#"{"namespace": ["prod"]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Axum Json extractor requires Content-Type: application/json
+    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_create_namespace_wrong_content_type() {
+    let app = test_app(setup().await);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces")
+                .header("Content-Type", "text/plain")
+                .body(Body::from(r#"{"namespace": ["prod"]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_create_namespace_invalid_json() {
+    let app = test_app(setup().await);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"namespace": [}"#)) // invalid JSON
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Axum Json extractor returns 400 for invalid JSON;
+    // the body is a plain-text rejection message, not an IcebergErrorResponse.
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_create_namespace_empty_body() {
+    let app = test_app(setup().await);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces")
+                .header("Content-Type", "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_namespace_domain_isolation() {
+    let store = setup().await;
+    create_namespace(&store, "ns1").await;
+
+    // Create a second domain with its own namespace
+    store
+        .create_domain(
+            "other",
+            None,
+            HashMap::new(),
+            None,
+            serde_json::json!({}),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .create_namespace("other", "other_ns", None, HashMap::new())
+        .await
+        .unwrap();
+
+    let app = test_app(store);
+
+    // Domain 'default' should only see 'ns1', not 'other_ns'
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/default/namespaces")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let namespaces = json["namespaces"].as_array().unwrap();
+    let names: Vec<String> = namespaces
+        .iter()
+        .map(|n| n[0].as_str().unwrap().to_string())
+        .collect();
+    assert!(names.contains(&"ns1".to_string()));
+    assert!(!names.contains(&"other_ns".to_string()));
+
+    // Domain 'other' should see 'other_ns'
+    let response_other = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/other/namespaces")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response_other.status(), StatusCode::OK);
+    let json_other = body_json(response_other).await;
+    let namespaces_other = json_other["namespaces"].as_array().unwrap();
+    assert_eq!(namespaces_other.len(), 1);
+    assert_eq!(namespaces_other[0][0], "other_ns");
 }

@@ -629,9 +629,219 @@ async fn test_list_tables_empty_namespace() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let json = body_json(response).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "unexpected status, body: {:?}",
+        json
+    );
     let identifiers = json["identifiers"].as_array().unwrap();
     assert!(identifiers.is_empty());
     assert!(json["nextPageToken"].is_null());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_list_tables_pagination() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    // Create 5 tables
+    for i in 1..=5 {
+        store
+            .create_tabular_asset(
+                "default",
+                "prod",
+                &format!("table{}", i),
+                "iceberg",
+                &format!("s3://bucket/warehouse/prod/table{}", i),
+                None,
+                None,
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+    }
+    let app = test_app(store);
+
+    // Page 1: pageSize=2
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/default/namespaces/prod/tables?pageSize=2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let identifiers = json["identifiers"].as_array().unwrap();
+    assert_eq!(identifiers.len(), 2);
+    assert!(json["nextPageToken"].is_string());
+
+    // Page 2: use pageToken
+    let token = json["nextPageToken"].as_str().unwrap();
+    let page2 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&format!(
+                    "/iceberg/v1/default/namespaces/prod/tables?pageSize=2&pageToken={}",
+                    token
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(page2.status(), StatusCode::OK);
+    let json2 = body_json(page2).await;
+    let identifiers2 = json2["identifiers"].as_array().unwrap();
+    assert_eq!(identifiers2.len(), 2);
+    assert!(json2["nextPageToken"].is_string());
+
+    // Page 3: last page
+    let token2 = json2["nextPageToken"].as_str().unwrap();
+    let page3 = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&format!(
+                    "/iceberg/v1/default/namespaces/prod/tables?pageSize=2&pageToken={}",
+                    token2
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(page3.status(), StatusCode::OK);
+    let json3 = body_json(page3).await;
+    let identifiers3 = json3["identifiers"].as_array().unwrap();
+    assert_eq!(identifiers3.len(), 1);
+    assert!(json3["nextPageToken"].is_null());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_create_table_with_schema() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    let create = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "name": "users",
+                        "location": "s3://bucket/warehouse/prod/users",
+                        "schema": {
+                            "type": "struct",
+                            "schema-id": 0,
+                            "fields": [
+                                {"id": 1, "name": "id", "type": "int", "required": true},
+                                {"id": 2, "name": "name", "type": "string"}
+                            ]
+                        }
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(create.status(), StatusCode::OK);
+    let json = body_json(create).await;
+    assert_eq!(
+        json["metadata"]["schemas"][0]["fields"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(json["metadata"]["last-column-id"], 2);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_drop_table_with_purge_requested() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    store
+        .create_tabular_asset(
+            "default",
+            "prod",
+            "users",
+            "iceberg",
+            "s3://bucket/warehouse/prod/users",
+            None,
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users?purgeRequested=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["type"], "NotImplementedException");
+    assert_eq!(json["error"]["code"], 501);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_drop_table_without_purge_succeeds() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    store
+        .create_tabular_asset(
+            "default",
+            "prod",
+            "users",
+            "iceberg",
+            "s3://bucket/warehouse/prod/users",
+            None,
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let app = test_app(store);
+
+    // purgeRequested=false (or absent) should succeed normally
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users?purgeRequested=false")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
 }
