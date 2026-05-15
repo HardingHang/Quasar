@@ -283,7 +283,10 @@ mod tests {
         let resp = err.to_error_response();
         assert_eq!(resp.error.error_type, "NotImplementedException");
         assert_eq!(resp.error.code, 501);
-        assert_eq!(resp.error.message, "purgeRequested=true is not supported in V3");
+        assert_eq!(
+            resp.error.message,
+            "purgeRequested=true is not supported in V3"
+        );
     }
 
     #[test]
