@@ -11,11 +11,11 @@
 
 | Crate | 单元测试 | 集成测试 | 合计 |
 |-------|---------|---------|------|
-| quasar-core | 35 | 0 | 35 |
-| quasar-server | 9 | 11 | 20 |
-| quasar-adapter | 72 | 141 | 213 |
+| quasar-core | 31 | 0 | 31 |
+| quasar-server | 9 | 19 | 28 |
+| quasar-adapter | 82 | 162 | 244 |
 | quasar-storage | 18 | 16 | 34 |
-| **合计** | **134** | **168** | **302** |
+| **合计** | **140** | **197** | **337** |
 
 > 注：统计基于 `cargo test --workspace --all-features --all-targets` 的测试函数数量，不含 doc-tests（当前为 0）。
 
@@ -236,6 +236,7 @@
 | `test_iceberg_error_metadata_not_found_to_response` | 单元 | MetadataNotFoundException → ErrorResponse | code=404, type="MetadataNotFoundException" |
 | `test_iceberg_error_service_unavailable_to_response` | 单元 | ServiceUnavailableException → ErrorResponse | code=503, type="ServiceUnavailableException" |
 | `test_iceberg_error_timeout_to_response` | 单元 | TimeoutException → ErrorResponse | code=504, type="TimeoutException" |
+| `test_iceberg_error_not_implemented_to_response` | 单元 | NotImplementedException → ErrorResponse | code=501, type="NotImplementedException" |
 | `test_error_response_serde` | 单元 | ErrorResponse 序列化 | JSON 包含 error/message/type/code 字段 |
 | `test_store_error_to_iceberg_namespace_mapping` | 单元 | StoreError → IcebergError（namespace） | 业务错误 + DatabaseUnavailable/Timeout 正确映射 |
 | `test_store_error_to_iceberg_table_mapping` | 单元 | StoreError → IcebergError（table） | 业务错误 + DatabaseUnavailable/Timeout 正确映射 |
@@ -261,6 +262,16 @@
 | `test_next_metadata_location_increment` | 单元 | metadata_location递增 | 00001→00002格式 |
 | `test_serde_roundtrip` | 单元 | TableMetadata序列化 | JSON往返正确 |
 | `test_snapshot_ref_default_type` | 单元 | SnapshotRef默认type | type="branch" |
+
+### Iceberg Table 辅助函数 (`src/iceberg/table.rs`)
+
+| 测试函数 | 类型 | 场景 | 验证点 |
+|---------|------|------|--------|
+| `test_next_metadata_location_basic_increment` | 单元 | 基本递增 | 00001-abc → 00002-abc |
+| `test_next_metadata_location_width_overflow_9_to_10` | 单元 | 9→10 宽度扩展 | 00009 → 00010 |
+| `test_next_metadata_location_width_overflow_99_to_100` | 单元 | 99→100 宽度扩展 | 00099 → 00100 |
+| `test_next_metadata_location_width_overflow_99999_to_100000` | 单元 | 99999→100000 宽度扩展 | 99999 → 100000 |
+| `test_next_metadata_location_unrecognized_format` | 单元 | 异常格式 fallback | 追加 timestamp 和 .metadata.json |
 
 ### Iceberg DTO 序列化 (`src/iceberg/dto.rs`)
 
@@ -295,6 +306,17 @@
 | `test_list_namespaces_pagination_with_limit` | 集成 | pageSize 限制返回数量 | 返回数量 <= limit，nextPageToken 正确 |
 | `test_create_namespace_empty_array_returns_400` | 集成 | namespace 数组为空 | 返回 400，type="BadRequestException" |
 | `test_drop_namespace_not_found` | 集成 | DELETE 不存在的 Namespace | 返回 404，type="NoSuchNamespaceException" |
+| `test_namespace_exists_returns_204` | 集成 | HEAD 存在的 Namespace | 返回 204 No Content |
+| `test_namespace_exists_not_found` | 集成 | HEAD 不存在的 Namespace | 返回 404 |
+| `test_list_namespaces_with_parent_rejected` | 集成 | GET ?parent=analytics | 返回 400，嵌套 namespace 不支持 |
+| `test_list_namespaces_page_size_one` | 集成 | pageSize=1 | 返回 1 个，含 nextPageToken |
+| `test_list_namespaces_page_size_negative` | 集成 | pageSize=-1 | clamp 到 1，返回 1 个 |
+| `test_list_namespaces_page_size_exceeds_max` | 集成 | pageSize=5000 | clamp 到 1000，返回全部 |
+| `test_create_namespace_missing_content_type` | 集成 | POST 无 Content-Type | 返回 415 Unsupported Media Type |
+| `test_create_namespace_wrong_content_type` | 集成 | POST Content-Type=text/plain | 返回 415 Unsupported Media Type |
+| `test_create_namespace_invalid_json` | 集成 | POST 无效 JSON | 返回 400 Bad Request |
+| `test_create_namespace_empty_body` | 集成 | POST 空 body | 返回 400 Bad Request |
+| `test_namespace_domain_isolation` | 集成 | 不同 Domain 同名 Namespace | Domain A 的 ns 对 Domain B 不可见 |
 
 ### Iceberg Table 端点 (`tests/iceberg_table.rs`)
 
@@ -313,6 +335,10 @@
 | `test_rename_table_destination_already_exists` | 集成 | rename 到已存在的名称 | 返回 409，type="TableAlreadyExistsException" |
 | `test_drop_table_not_found` | 集成 | DELETE 不存在的 Table | 返回 404，type="NoSuchTableException" |
 | `test_list_tables_empty_namespace` | 集成 | 无 Table 的 Namespace 列表 | 返回空数组，nextPageToken=null |
+| `test_list_tables_pagination` | 集成 | pageSize/pageToken 分页 | 三页验证，nextPageToken 正确传递 |
+| `test_create_table_with_schema` | 集成 | POST 带自定义 schema | last-column-id 从 fields 正确计算 |
+| `test_drop_table_with_purge_requested` | 集成 | DELETE ?purgeRequested=true | 返回 501 NotImplementedException |
+| `test_drop_table_without_purge_succeeds` | 集成 | DELETE ?purgeRequested=false | 正常删除，返回 204 |
 
 ### Iceberg Commit 端点 (`tests/iceberg_commit.rs`)
 
@@ -333,6 +359,10 @@
 | `test_commit_namespace_not_found` | 集成 | namespace不存在 | 返回 404，type="NoSuchTableException" |
 | `test_commit_empty_updates` | 集成 | requirements有但updates空 | 空updates → 200 OK（no-op） |
 | `test_remove_properties_commit` | 集成 | RemoveProperties端到端 | 属性删除持久化验证 |
+| `test_commit_assert_create_fails_on_existing_table` | 集成 | assert-create 在已存在表上 | 返回 409 CommitFailedException |
+| `test_commit_add_schema` | 集成 | add-schema action | schemas 数组增加新 schema |
+| `test_commit_set_current_schema` | 集成 | set-current-schema action | current-schema-id 更新 |
+| `test_commit_add_partition_spec` | 集成 | add-partition-spec action | partition-specs 数组增加新 spec |
 
 ### Iceberg Object Store 端点 (`tests/iceberg_object_store.rs`)
 
@@ -348,7 +378,9 @@
 
 | 测试函数 | 类型 | 场景 | 验证点 |
 |---------|------|------|--------|
-| `test_get_config` | 集成 | GET /iceberg/v1/config | 返回 defaults + overrides 对象 |
+| `test_get_config` | 集成 | GET /iceberg/v1/config | 返回 defaults + overrides + endpoints |
+| `test_get_config_with_warehouse` | 集成 | GET /config?warehouse=... | overrides 包含传入的 warehouse 值 |
+| `test_get_config_endpoints_field` | 集成 | GET /config | endpoints 数组包含关键端点 |
 
 ### 跨格式隔离 (`tests/format_isolation.rs`)
 
@@ -487,6 +519,20 @@
 ---
 
 ## 修订记录
+
+### V6.0（2026-05-14）
+
+- 更新：测试统计总览表（140 单元 + 197 集成 = 337 合计），同步 V3_TEST_GAPS 修复后数量
+- 新增：Iceberg Config 端点测试（2 个，warehouse 参数 + endpoints 字段）
+- 新增：Iceberg Namespace 端点测试（10 个，parent 拒绝 / pageSize 边界 / Content-Type 健壮性 / Domain 隔离）
+- 新增：Iceberg Table 端点测试（4 个，分页 / schema / purgeRequested）
+- 新增：Iceberg Commit 端点测试（4 个，assert-create / add-schema / set-current-schema / add-partition-spec）
+- 新增：Iceberg Table 辅助函数单元测试（5 个，next_metadata_location 边界）
+- 新增：Iceberg 错误映射单元测试（1 个，NotImplementedException 501）
+- 修正：Iceberg Config `test_get_config` 验证点更新（增加 endpoints 检查）
+- 修正：Iceberg Namespace `test_list_namespaces_pagination_with_limit` 从 13 扩展到 24
+- 修正：Iceberg Table `test_list_tables` 从 13 扩展到 17
+- 修正：Iceberg Commit `test_commit_success` 等从 15 扩展到 19
 
 ### V5.1（2026-05-14）
 
