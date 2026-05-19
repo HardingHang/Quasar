@@ -40,8 +40,7 @@ pub fn build_initial_metadata(
     let sort_order = iceberg::spec::SortOrder::builder()
         .with_order_id(0)
         .build(&schema)
-        .map_err(|e| format!("build sort order: {e}"))?
-        .into();
+        .map_err(|e| format!("build sort order: {e}"))?;
 
     let builder = iceberg::spec::TableMetadataBuilder::new(
         schema,
