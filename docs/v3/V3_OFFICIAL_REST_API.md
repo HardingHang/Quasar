@@ -7,6 +7,8 @@
 > 本文档维护 Quasar V3 需要对齐的官方 REST API 来源、端点能力和 V3 实现范围。
 > `V3_DESIGN.md` 只描述 Quasar 的实现选择；官方端点清单以本文档为准。
 
+> ⚠️ **冻结说明（自 V1.2 起）**: 本文档已被 `docs/v4/V4_OFFICIAL_REST_API.md` 取代，仅保留作为 V3 历史记录。后续端点清单与 V4 范围以 v4 版本为准。
+
 ---
 
 ## 一、官方来源
@@ -88,12 +90,13 @@ POST /lance/v1/table/prod$analytics$embeddings/describe
 | POST | `/v1/{prefix}/namespaces/{namespace}/tables` | 创建表或 staged create | 必须实现基础创建 |
 | POST | `/v1/{prefix}/namespaces/{namespace}/register` | 注册已有 metadata file 为表 | 暂不实现 |
 | GET | `/v1/{prefix}/namespaces/{namespace}/tables/{table}` | 加载表 metadata | 必须实现 |
-| POST | `/v1/{prefix}/namespaces/{namespace}/tables/{table}` | 提交表更新，CAS commit | 必须实现 |
+| POST | `/v1/{prefix}/namespaces/{namespace}/tables/{table}` | 提交表更新（requirements-based 乐观锁 / CAS commit） | 必须实现 |
 | DELETE | `/v1/{prefix}/namespaces/{namespace}/tables/{table}` | 删除表，可带 `purgeRequested` | 必须实现 catalog drop，purge 可暂不实现 |
 | HEAD | `/v1/{prefix}/namespaces/{namespace}/tables/{table}` | 检查表是否存在 | 必须实现 |
 | POST | `/v1/{prefix}/tables/rename` | 重命名表 | 必须实现 |
 | POST | `/v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics` | 上报表 metrics | 暂不实现 |
 | GET | `/v1/{prefix}/namespaces/{namespace}/tables/{table}/credentials` | 加载 vended credentials | 暂不实现 |
+| POST | `/v1/{prefix}/namespaces/{namespace}/tables/{table}/sign` | S3 SigV4 代理签名（与 vended credentials 配合） | 暂不实现 |
 
 ### 3.4 Table Scan Planning
 
@@ -102,7 +105,7 @@ POST /lance/v1/table/prod$analytics$embeddings/describe
 | POST | `/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan` | 提交服务端 scan planning | 暂不实现 |
 | GET | `/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}` | 获取 scan planning 结果 | 暂不实现 |
 | DELETE | `/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}` | 取消 scan planning | 暂不实现 |
-| POST | `/v1/{prefix}/namespaces/{namespace}/tables/{table}/tasks` | 获取 plan task 的 scan tasks | 暂不实现 |
+| POST | `/v1/{prefix}/namespaces/{namespace}/tables/{table}/tasks` | 拉取 plan-task token 对应的 FileScanTask 列表（fetchScanTasks 语义） | 暂不实现 |
 
 ### 3.5 Transaction
 
@@ -231,6 +234,14 @@ POST /lance/v1/table/prod$analytics$embeddings/describe
 ---
 
 ## 六、修订记录
+
+### V1.2 (2026-05-18)
+
+- 补遗 `POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/sign`（S3 SigV4 代理签名）端点。
+- 微调 commit_table 描述为 "提交表更新（requirements-based 乐观锁 / CAS commit）"。
+- 微调 tasks 描述为 "拉取 plan-task token 对应的 FileScanTask 列表（fetchScanTasks 语义）"。
+- 顶部追加 V4 迁移 admonition：本文档冻结，V4 范围以 `docs/v4/V4_OFFICIAL_REST_API.md` 为准。
+- 本次校对范围仅涵盖 Iceberg 章节（第三章）；Lance、Unified 章节未动。
 
 ### V1.1 (2026-05-13)
 
