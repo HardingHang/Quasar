@@ -1,5 +1,8 @@
+#[cfg(test)]
+pub mod crate_validation;
 pub mod dto;
 pub mod error;
+pub mod metadata;
 pub mod namespace;
 pub mod table;
 pub mod table_metadata;

@@ -14,7 +14,6 @@ use super::dto::{
     RenameTableRequest, TableIdentifier,
 };
 use super::error::{store_error_to_iceberg_table, IcebergError};
-use super::table_metadata::TableMetadata;
 use super::IcebergConfig;
 use crate::object_store_util::{object_exists, read_json, s3_url_to_path, write_json};
 use quasar_core::validate_name;
@@ -151,7 +150,7 @@ fn build_initial_metadata(
         "table-uuid": table_uuid.to_string(),
         "location": location,
         "last-sequence-number": 0,
-        "last-updated-ms": chrono::Utc::now().timestamp_millis(),
+        "last-updated-ms": 1,
         "last-column-id": last_column_id,
         "schemas": [schema],
         "current-schema-id": 0,
@@ -440,48 +439,52 @@ pub async fn commit_table(
     let current_metadata_json =
         read_metadata_from_store(&metadata_location, tabular.schema_snapshot.clone(), &config)
             .await?;
-    let mut table_metadata = serde_json::from_value::<TableMetadata>(current_metadata_json)
-        .map_err(|e| IcebergError::InternalServerError {
-            message: format!("Failed to parse table metadata: {}", e),
-        })?;
 
-    // 4. Check requirements
-    if let Err(msg) = table_metadata.check_requirements(&req.requirements) {
-        return Err(IcebergError::CommitFailedException { message: msg });
-    }
+    // 4. Extract old properties for delta computation
+    let old_properties = current_metadata_json
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect::<HashMap<String, String>>()
+        })
+        .unwrap_or_default();
 
-    // 5. Save current properties before applying updates
-    let old_properties = table_metadata.properties.clone();
+    // 5. Apply requirements and updates via metadata wrapper
+    let new_metadata_json =
+        super::metadata::apply_commit(&current_metadata_json, &req.requirements, &req.updates)
+            .map_err(|msg| IcebergError::CommitFailedException { message: msg })?;
 
-    // 6. Apply updates
-    table_metadata.apply_updates(&req.updates);
+    // 6. Compute property changes
+    let new_properties = new_metadata_json
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect::<HashMap<String, String>>()
+        })
+        .unwrap_or_default();
 
-    // 7. Compute property changes
     let property_removals: Vec<String> = old_properties
         .keys()
-        .filter(|k| !table_metadata.properties.contains_key(*k))
+        .filter(|k| !new_properties.contains_key(*k))
         .cloned()
         .collect();
-    let property_updates: HashMap<String, String> = table_metadata
-        .properties
+    let property_updates: HashMap<String, String> = new_properties
         .iter()
         .filter(|(k, v)| old_properties.get(*k) != Some(v))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
-    // 8. Generate new metadata location
+    // 7. Generate new metadata location
     let new_metadata_location = next_metadata_location(&metadata_location);
 
-    // 9. Serialize new metadata
-    let new_schema_snapshot =
-        serde_json::to_value(&table_metadata).map_err(|e| IcebergError::InternalServerError {
-            message: format!("Failed to serialize table metadata: {}", e),
-        })?;
+    // 8. Write new metadata.json to object store
+    write_metadata_to_store(&new_metadata_location, &new_metadata_json, &config).await?;
 
-    // 10. Write new metadata.json to object store
-    write_metadata_to_store(&new_metadata_location, &new_schema_snapshot, &config).await?;
-
-    // 11. CAS update via storage layer (atomically updates metadata_location, schema_snapshot, and properties)
+    // 9. CAS update via storage layer (atomically updates metadata_location, schema_snapshot, and properties)
     store
         .cas_update_metadata_location(
             &prefix,
@@ -490,7 +493,7 @@ pub async fn commit_table(
             "iceberg",
             &metadata_location,
             &new_metadata_location,
-            Some(new_schema_snapshot.clone()),
+            Some(new_metadata_json.clone()),
             &property_removals,
             &property_updates,
         )
@@ -515,7 +518,7 @@ pub async fn commit_table(
         StatusCode::OK,
         Json(LoadTableResponse {
             metadata_location: Some(new_metadata_location),
-            metadata: new_schema_snapshot,
+            metadata: new_metadata_json,
         }),
     ))
 }

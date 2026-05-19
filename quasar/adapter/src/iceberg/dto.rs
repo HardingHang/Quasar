@@ -120,8 +120,8 @@ pub struct TableIdentifierInput {
 #[derive(Deserialize)]
 pub struct CommitTableRequest {
     pub identifier: Option<TableIdentifier>,
-    pub requirements: Vec<super::table_metadata::TableRequirement>,
-    pub updates: Vec<super::table_metadata::TableUpdate>,
+    pub requirements: Vec<iceberg::TableRequirement>,
+    pub updates: Vec<iceberg::TableUpdate>,
 }
 
 #[cfg(test)]

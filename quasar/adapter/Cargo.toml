@@ -21,6 +21,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 object_store = { workspace = true }
 strum = { workspace = true }
+iceberg = { workspace = true }
 
 [dev-dependencies]
 quasar-storage = { workspace = true }
