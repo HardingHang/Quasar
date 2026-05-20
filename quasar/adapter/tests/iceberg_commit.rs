@@ -95,6 +95,16 @@ async fn create_namespace(store: &PgCatalogStore, name: &str) {
         .unwrap();
 }
 
+/// Current wall-clock millis for snapshot timestamps in HTTP commit bodies.
+///
+/// The iceberg crate enforces: snapshot.timestamp_ms >= metadata.last_updated_ms,
+/// and on the next build: new last_updated_ms (now) >= last snapshot log entry ts.
+/// Using `chrono::Utc::now()` keeps every test in the present and avoids the
+/// "future timestamp" pitfall that bit us when we used a far-future constant.
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
 #[tokio::test]
 #[serial]
 async fn test_commit_success() {
@@ -136,14 +146,14 @@ async fn test_commit_success() {
                             {"action": "add-snapshot", "snapshot": {
                                 "snapshot-id": 1,
                                 "sequence-number": 1,
-                                "timestamp-ms": 1234567890,
+                                "timestamp-ms": __TS__,
                                 "manifest-list": "s3://bucket/manifest1.avro",
                                 "summary": {"operation": "append"},
                                 "schema-id": 0
                             }},
                             {"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 1, "type": "branch"}
                         ]
-                    }"#
+                    }"#.replace("__TS__", &now_ms().to_string())
                     .to_string(),
                 ))
                 .unwrap(),
@@ -224,13 +234,14 @@ async fn test_commit_conflict() {
                             {"action": "add-snapshot", "snapshot": {
                                 "snapshot-id": 1,
                                 "sequence-number": 1,
-                                "timestamp-ms": 1234567890,
+                                "timestamp-ms": __TS__,
                                 "manifest-list": "s3://bucket/manifest1.avro",
                                 "summary": {"operation": "append"},
                                 "schema-id": 0
                             }}
                         ]
                     }"#
+                    .replace("__TS__", &now_ms().to_string())
                     .to_string(),
                 ))
                 .unwrap(),
@@ -393,7 +404,7 @@ async fn test_commit_updates_persisted() {
                             {"action": "add-snapshot", "snapshot": {
                                 "snapshot-id": 1,
                                 "sequence-number": 1,
-                                "timestamp-ms": 1234567890,
+                                "timestamp-ms": __TS__,
                                 "manifest-list": "s3://bucket/manifest1.avro",
                                 "summary": {"operation": "append"},
                                 "schema-id": 0
@@ -401,7 +412,7 @@ async fn test_commit_updates_persisted() {
                             {"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 1, "type": "branch"},
                             {"action": "set-properties", "updates": {"owner": "team-a"}}
                         ]
-                    }"#
+                    }"#.replace("__TS__", &now_ms().to_string())
                     .to_string(),
                 ))
                 .unwrap(),
@@ -552,14 +563,14 @@ async fn test_concurrent_cas_conflict_end_to_end() {
                             {"action": "add-snapshot", "snapshot": {
                                 "snapshot-id": 1,
                                 "sequence-number": 1,
-                                "timestamp-ms": 1000,
+                                "timestamp-ms": __TS__,
                                 "manifest-list": "s3://bucket/manifest1.avro",
                                 "summary": {"operation": "append"},
                                 "schema-id": 0
                             }},
                             {"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 1, "type": "branch"}
                         ]
-                    }"#,
+                    }"#.replace("__TS__", &now_ms().to_string()),
                 ))
                 .unwrap(),
         )
@@ -584,14 +595,14 @@ async fn test_concurrent_cas_conflict_end_to_end() {
                             {"action": "add-snapshot", "snapshot": {
                                 "snapshot-id": 2,
                                 "sequence-number": 2,
-                                "timestamp-ms": 2000,
+                                "timestamp-ms": __TS__,
                                 "manifest-list": "s3://bucket/manifest2.avro",
                                 "summary": {"operation": "append"},
                                 "schema-id": 0
                             }},
                             {"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 2, "type": "branch"}
                         ]
-                    }"#,
+                    }"#.replace("__TS__", &now_ms().to_string()),
                 ))
                 .unwrap(),
         )
@@ -920,10 +931,10 @@ async fn test_multiple_commit_version_increment() {
                     r#"{
                         "requirements": [{"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": null}],
                         "updates": [
-                            {"action": "add-snapshot", "snapshot": {"snapshot-id": 1, "sequence-number": 1, "timestamp-ms": 1000, "manifest-list": "s3://b/m1.avro", "summary": {"operation": "append"}, "schema-id": 0}},
+                            {"action": "add-snapshot", "snapshot": {"snapshot-id": 1, "sequence-number": 1, "timestamp-ms": __TS__, "manifest-list": "s3://b/m1.avro", "summary": {"operation": "append"}, "schema-id": 0}},
                             {"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 1, "type": "branch"}
                         ]
-                    }"#,
+                    }"#.replace("__TS__", &now_ms().to_string()),
                 ))
                 .unwrap(),
         )
@@ -945,10 +956,10 @@ async fn test_multiple_commit_version_increment() {
                     r#"{
                         "requirements": [{"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": 1}],
                         "updates": [
-                            {"action": "add-snapshot", "snapshot": {"snapshot-id": 2, "sequence-number": 2, "timestamp-ms": 2000, "manifest-list": "s3://b/m2.avro", "summary": {"operation": "append"}, "schema-id": 0}},
+                            {"action": "add-snapshot", "snapshot": {"snapshot-id": 2, "sequence-number": 2, "timestamp-ms": __TS__, "manifest-list": "s3://b/m2.avro", "summary": {"operation": "append"}, "schema-id": 0}},
                             {"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 2, "type": "branch"}
                         ]
-                    }"#,
+                    }"#.replace("__TS__", &now_ms().to_string()),
                 ))
                 .unwrap(),
         )
@@ -993,11 +1004,11 @@ async fn test_set_snapshot_ref_with_tag_type() {
                     r#"{
                         "requirements": [{"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": null}],
                         "updates": [
-                            {"action": "add-snapshot", "snapshot": {"snapshot-id": 1, "sequence-number": 1, "timestamp-ms": 1000, "manifest-list": "s3://b/m1.avro", "summary": {"operation": "append"}, "schema-id": 0}},
+                            {"action": "add-snapshot", "snapshot": {"snapshot-id": 1, "sequence-number": 1, "timestamp-ms": __TS__, "manifest-list": "s3://b/m1.avro", "summary": {"operation": "append"}, "schema-id": 0}},
                             {"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 1, "type": "branch"},
                             {"action": "set-snapshot-ref", "ref-name": "v1.0", "snapshot-id": 1, "type": "tag"}
                         ]
-                    }"#,
+                    }"#.replace("__TS__", &now_ms().to_string()),
                 ))
                 .unwrap(),
         )
@@ -1113,7 +1124,7 @@ async fn test_remove_properties_commit() {
         .unwrap();
 
     // First commit to add properties
-    app.clone()
+    let r1 = app.clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -1123,19 +1134,22 @@ async fn test_remove_properties_commit() {
                     r#"{
                         "requirements": [{"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": null}],
                         "updates": [
-                            {"action": "add-snapshot", "snapshot": {"snapshot-id": 1, "sequence-number": 1, "timestamp-ms": 1000, "manifest-list": "s3://b/m1.avro", "summary": {"operation": "append"}, "schema-id": 0}},
+                            {"action": "add-snapshot", "snapshot": {"snapshot-id": 1, "sequence-number": 1, "timestamp-ms": __TS__, "manifest-list": "s3://b/m1.avro", "summary": {"operation": "append"}, "schema-id": 0}},
                             {"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 1, "type": "branch"},
                             {"action": "set-properties", "updates": {"owner": "team-a", "env": "prod"}}
                         ]
-                    }"#,
+                    }"#.replace("__TS__", &now_ms().to_string()),
                 ))
                 .unwrap(),
         )
         .await
         .unwrap();
+    let s1 = r1.status();
+    let j1 = body_json(r1).await;
+    assert_eq!(s1, StatusCode::OK, "first commit failed: {:?}", j1);
 
     // Second commit to remove properties
-    app.clone()
+    let r2 = app.clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -1153,6 +1167,9 @@ async fn test_remove_properties_commit() {
         )
         .await
         .unwrap();
+    let s2 = r2.status();
+    let j2 = body_json(r2).await;
+    assert_eq!(s2, StatusCode::OK, "second commit failed: {:?}", j2);
 
     // Load and verify
     let load = app

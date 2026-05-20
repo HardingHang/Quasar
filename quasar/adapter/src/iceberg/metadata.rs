@@ -59,9 +59,6 @@ pub fn build_initial_metadata(
     // Build a fresh metadata with the correct UUID by cloning and re-serializing
     let mut json = serde_json::to_value(&metadata).map_err(|e| format!("serialize: {e}"))?;
     json["table-uuid"] = serde_json::Value::String(table_uuid.to_string());
-    // Override last-updated-ms to a small constant so that test snapshots
-    // with arbitrary timestamp-ms values are accepted by the crate.
-    json["last-updated-ms"] = serde_json::Value::Number(serde_json::Number::from(1));
 
     Ok(json)
 }

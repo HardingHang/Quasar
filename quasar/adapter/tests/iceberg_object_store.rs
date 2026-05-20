@@ -95,6 +95,10 @@ async fn create_namespace(store: &PgCatalogStore, name: &str) {
         .unwrap();
 }
 
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
 /// Convert an S3 URL to a relative path for InMemory store.
 fn s3_to_relative(location: &str) -> String {
     location
@@ -191,14 +195,14 @@ async fn test_commit_table_writes_new_metadata_to_object_store() {
                             {"action": "add-snapshot", "snapshot": {
                                 "snapshot-id": 1,
                                 "sequence-number": 1,
-                                "timestamp-ms": 1234567890,
+                                "timestamp-ms": __TS__,
                                 "manifest-list": "s3://bucket/manifest1.avro",
                                 "summary": {"operation": "append"},
                                 "schema-id": 0
                             }},
                             {"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 1, "type": "branch"}
                         ]
-                    }"#
+                    }"#.replace("__TS__", &now_ms().to_string())
                     .to_string(),
                 ))
                 .unwrap(),
@@ -410,14 +414,14 @@ async fn test_commit_table_metadata_not_found() {
                             {"action": "add-snapshot", "snapshot": {
                                 "snapshot-id": 1,
                                 "sequence-number": 1,
-                                "timestamp-ms": 1234567890,
+                                "timestamp-ms": __TS__,
                                 "manifest-list": "s3://bucket/manifest1.avro",
                                 "summary": {"operation": "append"},
                                 "schema-id": 0
                             }},
                             {"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 1, "type": "branch"}
                         ]
-                    }"#,
+                    }"#.replace("__TS__", &now_ms().to_string()),
                 ))
                 .unwrap(),
         )

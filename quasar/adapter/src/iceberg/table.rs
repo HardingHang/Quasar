@@ -125,7 +125,7 @@ fn _build_fallback_metadata(
         "table-uuid": table_uuid.to_string(),
         "location": location,
         "last-sequence-number": 0,
-        "last-updated-ms": 1,
+        "last-updated-ms": chrono::Utc::now().timestamp_millis(),
         "last-column-id": last_column_id,
         "schemas": [schema],
         "current-schema-id": 0,
