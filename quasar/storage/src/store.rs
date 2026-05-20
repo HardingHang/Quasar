@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use deadpool_postgres::Pool;
 use quasar_core::{
-    Asset, AssetStore, AssetVersion, CasCommitStore, Domain, DomainPatch, DomainStore, Namespace,
+    Asset, AssetStore, AssetVersion, CasCommitStore, Domain, DomainPatch, DomainStore,
+    IcebergMetricsStore, IcebergPurgeStore, IcebergRegisterStore, IcebergStagingStore, Namespace,
     NamespaceStore, PatchField, StoreError, TabularAsset, TabularAssetVersion, TabularStore,
     TabularVersionStore, UnifiedQueryStore, VersionStore,
 };
@@ -1284,6 +1285,446 @@ impl UnifiedQueryStore for PgCatalogStore {
         let asset = row_to_asset(&row)?;
         let tabular = row_to_tabular_asset_optional(&row)?;
         Ok((asset, tabular))
+    }
+}
+
+// ── IcebergStagingStore ────────────────────────────────────────────────────
+
+#[async_trait]
+impl IcebergStagingStore for PgCatalogStore {
+    async fn create_staged_table(
+        &self,
+        domain_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+        table_uuid: Uuid,
+        location: &str,
+        metadata_location: &str,
+        metadata_json: serde_json::Value,
+        properties: HashMap<String, String>,
+    ) -> Result<(), StoreError> {
+        let mut client = self.get_client().await?;
+        let props_json = props_to_json(&properties)?;
+        let expires_at = chrono::Utc::now() + chrono::Duration::hours(24);
+
+        let tx = client
+            .transaction()
+            .await
+            .map_err(internal_err("transaction start"))?;
+
+        // 1. Clean up expired staged records for this name.
+        tx.execute(
+            queries::iceberg_staged::DELETE_EXPIRED,
+            &[&domain_name, &namespace_name, &table_name],
+        )
+        .await
+        .map_err(internal_err("delete expired staged"))?;
+
+        // 2. Check active table exists (iceberg format).
+        let active_exists: bool = tx
+            .query_one(
+                queries::asset::EXISTS_TABULAR,
+                &[&domain_name, &namespace_name, &table_name, &"iceberg"],
+            )
+            .await
+            .map_err(internal_err("check active exists"))?
+            .get(0);
+
+        if active_exists {
+            return Err(StoreError::AlreadyExists(format!(
+                "table '{}' in namespace '{}'",
+                table_name, namespace_name
+            )));
+        }
+
+        // 3. Insert staged record.
+        tx.query_one(
+            queries::iceberg_staged::CREATE,
+            &[
+                &domain_name,
+                &namespace_name,
+                &table_name,
+                &table_uuid,
+                &location,
+                &metadata_location,
+                &metadata_json,
+                &props_json,
+                &expires_at,
+            ],
+        )
+        .await
+        .map_err(|e| {
+            if let Some(db_err) = e.as_db_error() {
+                if db_err.code() == &SqlState::UNIQUE_VIOLATION {
+                    return StoreError::AlreadyExists(format!(
+                        "staged table '{}' in namespace '{}'",
+                        table_name, namespace_name
+                    ));
+                }
+            }
+            classify_pg_error("create_staged_table", e)
+        })?;
+
+        tx.commit()
+            .await
+            .map_err(internal_err("transaction commit"))?;
+
+        Ok(())
+    }
+
+    async fn get_staged_table(
+        &self,
+        domain_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+    ) -> Result<Option<serde_json::Value>, StoreError> {
+        let client = self.get_client().await?;
+        let row = client
+            .query_opt(
+                queries::iceberg_staged::GET,
+                &[&domain_name, &namespace_name, &table_name],
+            )
+            .await
+            .map_err(internal_err("get_staged_table"))?;
+
+        Ok(row.map(|r| r.get("metadata_json")))
+    }
+
+    async fn delete_staged_table(
+        &self,
+        domain_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+    ) -> Result<(), StoreError> {
+        let client = self.get_client().await?;
+        let n = client
+            .execute(
+                queries::iceberg_staged::DELETE,
+                &[&domain_name, &namespace_name, &table_name],
+            )
+            .await
+            .map_err(internal_err("delete_staged_table"))?;
+
+        if n == 0 {
+            return Err(StoreError::NotFound(format!(
+                "staged table '{}'",
+                table_name
+            )));
+        }
+        Ok(())
+    }
+
+    async fn commit_staged_table(
+        &self,
+        domain_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+        location: &str,
+        metadata_location: &str,
+        metadata_json: serde_json::Value,
+        properties: HashMap<String, String>,
+    ) -> Result<(Asset, TabularAsset), StoreError> {
+        let mut client = self.get_client().await?;
+        let props_json = props_to_json(&properties)?;
+        let asset_type = "table";
+        let comment: Option<String> = None;
+
+        let tx = client
+            .transaction()
+            .await
+            .map_err(internal_err("transaction start"))?;
+
+        // 1. Verify active table does not exist.
+        let active_exists: bool = tx
+            .query_one(
+                queries::asset::EXISTS_TABULAR,
+                &[&domain_name, &namespace_name, &table_name, &"iceberg"],
+            )
+            .await
+            .map_err(internal_err("check active exists"))?
+            .get(0);
+
+        if active_exists {
+            return Err(StoreError::AlreadyExists(format!(
+                "table '{}' in namespace '{}'",
+                table_name, namespace_name
+            )));
+        }
+
+        // 2. Delete and lock the staged record (must be non-expired).
+        let staged_row = tx
+            .query_opt(
+                queries::iceberg_staged::DELETE_FOR_COMMIT,
+                &[&domain_name, &namespace_name, &table_name],
+            )
+            .await
+            .map_err(internal_err("delete staged for commit"))?;
+
+        if staged_row.is_none() {
+            return Err(StoreError::NotFound(format!(
+                "staged table '{}' (expired or missing)",
+                table_name
+            )));
+        }
+
+        // 3. Insert asset + tabular_asset in same transaction.
+        let asset_row = tx
+            .query_opt(
+                queries::asset::CREATE,
+                &[
+                    &domain_name,
+                    &namespace_name,
+                    &table_name,
+                    &asset_type,
+                    &comment,
+                    &props_json,
+                ],
+            )
+            .await
+            .map_err(|e| {
+                if let Some(db_err) = e.as_db_error() {
+                    if db_err.code() == &SqlState::UNIQUE_VIOLATION {
+                        return StoreError::AlreadyExists(format!(
+                            "asset '{}' in namespace '{}'",
+                            table_name, namespace_name
+                        ));
+                    }
+                }
+                classify_pg_error("commit_staged_table create asset", e)
+            })?
+            .ok_or_else(|| StoreError::NotFound(format!("namespace '{}'", namespace_name)))?;
+
+        let asset = row_to_asset(&asset_row)?;
+
+        let tabular_row = tx
+            .query_one(
+                queries::asset::CREATE_TABULAR,
+                &[
+                    &asset.id,
+                    &"iceberg",
+                    &location,
+                    &metadata_location,
+                    &metadata_json,
+                ],
+            )
+            .await
+            .map_err(internal_err("commit_staged_table create tabular"))?;
+
+        let tabular = row_to_tabular_asset(&tabular_row)?;
+
+        tx.commit()
+            .await
+            .map_err(internal_err("transaction commit"))?;
+
+        Ok((asset, tabular))
+    }
+}
+
+// ── IcebergRegisterStore ───────────────────────────────────────────────────
+
+#[async_trait]
+impl IcebergRegisterStore for PgCatalogStore {
+    async fn register_iceberg_table(
+        &self,
+        domain_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+        location: &str,
+        metadata_location: &str,
+        metadata_json: serde_json::Value,
+        properties: HashMap<String, String>,
+    ) -> Result<(Asset, TabularAsset), StoreError> {
+        let mut client = self.get_client().await?;
+        let props_json = props_to_json(&properties)?;
+        let asset_type = "table";
+        let comment: Option<String> = None;
+
+        let tx = client
+            .transaction()
+            .await
+            .map_err(internal_err("transaction start"))?;
+
+        let asset_row = tx
+            .query_opt(
+                queries::asset::CREATE,
+                &[
+                    &domain_name,
+                    &namespace_name,
+                    &table_name,
+                    &asset_type,
+                    &comment,
+                    &props_json,
+                ],
+            )
+            .await
+            .map_err(|e| {
+                if let Some(db_err) = e.as_db_error() {
+                    if db_err.code() == &SqlState::UNIQUE_VIOLATION {
+                        return StoreError::AlreadyExists(format!(
+                            "asset '{}' in namespace '{}'",
+                            table_name, namespace_name
+                        ));
+                    }
+                }
+                classify_pg_error("register_iceberg_table", e)
+            })?
+            .ok_or_else(|| StoreError::NotFound(format!("namespace '{}'", namespace_name)))?;
+
+        let asset = row_to_asset(&asset_row)?;
+
+        let tabular_row = tx
+            .query_one(
+                queries::asset::CREATE_TABULAR,
+                &[
+                    &asset.id,
+                    &"iceberg",
+                    &location,
+                    &metadata_location,
+                    &metadata_json,
+                ],
+            )
+            .await
+            .map_err(internal_err("register create tabular"))?;
+
+        let tabular = row_to_tabular_asset(&tabular_row)?;
+
+        tx.commit()
+            .await
+            .map_err(internal_err("transaction commit"))?;
+
+        Ok((asset, tabular))
+    }
+}
+
+// ── IcebergMetricsStore ────────────────────────────────────────────────────
+
+#[async_trait]
+impl IcebergMetricsStore for PgCatalogStore {
+    async fn record_scan_metrics_report(
+        &self,
+        asset_id: Option<Uuid>,
+        domain_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+        report: serde_json::Value,
+        user_agent: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let client = self.get_client().await?;
+        client
+            .query_one(
+                queries::iceberg_metrics::CREATE,
+                &[
+                    &asset_id,
+                    &domain_name,
+                    &namespace_name,
+                    &table_name,
+                    &report,
+                    &user_agent,
+                ],
+            )
+            .await
+            .map_err(internal_err("record_scan_metrics_report"))?;
+
+        Ok(())
+    }
+}
+
+// ── IcebergPurgeStore ──────────────────────────────────────────────────────
+
+#[async_trait]
+impl IcebergPurgeStore for PgCatalogStore {
+    async fn begin_iceberg_purge_and_drop_catalog(
+        &self,
+        domain_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+    ) -> Result<(Uuid, String, Option<String>), StoreError> {
+        let mut client = self.get_client().await?;
+
+        let tx = client
+            .transaction()
+            .await
+            .map_err(internal_err("transaction start"))?;
+
+        // 1. Read table location and metadata_location (re-validate existence).
+        let loc_row = tx
+            .query_opt(
+                queries::iceberg_purge::GET_TABLE_LOCATION,
+                &[&domain_name, &namespace_name, &table_name],
+            )
+            .await
+            .map_err(internal_err("begin_purge get location"))?
+            .ok_or_else(|| StoreError::NotFound(format!("table '{}'", table_name)))?;
+
+        let table_location: String = try_get!(loc_row, "location");
+        let metadata_location: Option<String> = loc_row.try_get("metadata_location").ok().flatten();
+
+        // 2. Create purge operation record with status "catalog_dropped".
+        let op_row = tx
+            .query_one(
+                queries::iceberg_purge::CREATE,
+                &[
+                    &domain_name,
+                    &namespace_name,
+                    &table_name,
+                    &table_location,
+                    &metadata_location,
+                    &"catalog_dropped",
+                ],
+            )
+            .await
+            .map_err(internal_err("begin_purge create operation"))?;
+
+        let operation_id: Uuid = try_get!(op_row, "id");
+
+        // 3. Delete catalog records (FK cascade handles tabular_assets).
+        let n = tx
+            .execute(
+                queries::asset::DELETE,
+                &[&domain_name, &namespace_name, &table_name],
+            )
+            .await
+            .map_err(internal_err("begin_purge delete asset"))?;
+
+        if n == 0 {
+            return Err(StoreError::NotFound(format!("table '{}'", table_name)));
+        }
+
+        tx.commit()
+            .await
+            .map_err(internal_err("transaction commit"))?;
+
+        Ok((operation_id, table_location, metadata_location))
+    }
+
+    async fn update_purge_operation(
+        &self,
+        operation_id: Uuid,
+        status: &str,
+        error_message: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let client = self.get_client().await?;
+        let completed_at = if status == "completed" || status == "failed" {
+            Some(chrono::Utc::now())
+        } else {
+            None
+        };
+
+        let n = client
+            .execute(
+                queries::iceberg_purge::UPDATE_STATUS,
+                &[&status, &error_message, &completed_at, &operation_id],
+            )
+            .await
+            .map_err(internal_err("update_purge_operation"))?;
+
+        if n == 0 {
+            return Err(StoreError::NotFound(format!(
+                "purge operation '{}'",
+                operation_id
+            )));
+        }
+        Ok(())
     }
 }
 
