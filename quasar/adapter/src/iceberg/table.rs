@@ -720,7 +720,16 @@ async fn commit_staged_table(
                 }
                 IcebergError::CommitFailedException { message: msg }
             }
-            StoreError::NotFound(msg) => IcebergError::NoSuchTableException { message: msg },
+            // The staged record is gone — either it expired between the
+            // earlier get_staged_table() read and now (TTL race), or another
+            // writer just consumed it. Either way the client should treat
+            // this as a commit conflict and retry, not as "table missing".
+            StoreError::NotFound(msg) => {
+                if let Some(ref m) = metrics {
+                    m.registry.record_iceberg_commit_conflict();
+                }
+                IcebergError::CommitFailedException { message: msg }
+            }
             other => store_error_to_iceberg_table(other),
         })?;
 
