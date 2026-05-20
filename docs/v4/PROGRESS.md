@@ -10,7 +10,7 @@
 | C1 | 依赖与 metadata 类型基线 | 已完成 | `280e374` |
 | C2 | 数据模型与 Store 增量 | 已完成 | `46c4389`, `a188961`, `81cd545`, `0577ac4` |
 | C3 | create/register/load/config | 已完成 | `b6ffba3`, `805db10` |
-| C4 | commit requirement/update 完整化 | 待启动 | — |
+| C4 | commit requirement/update 完整化 | 已完成 | `9f341fb`, `e108849`, `d2b4ac4`, `1e950ba`, `87b1eb3`, `b24534a` |
 | C5 | purge 与 metrics | 待启动 | — |
 | C6 | Spark E2E 与文档同步 | 待启动 | — |
 
@@ -97,23 +97,61 @@
 
 ## C4: commit requirement/update 完整化
 
-**状态**: 待启动
+**状态**: 已完成
 
-### 计划内容
+### 交付内容
 
-- [ ] existing table commit 覆盖 V4.0 全部 8 项 requirements
+- [x] existing table commit 覆盖 V4.0 全部 8 项 requirements
   - `assert-create`、`assert-table-uuid`、`assert-ref-snapshot-id`
   - `assert-current-schema-id`、`assert-default-spec-id`、`assert-default-sort-order-id`
   - `assert-last-assigned-field-id`、`assert-last-assigned-partition-id`
-- [ ] staged create commit 走 `assert-create` 创建 catalog（`commit_staged_table`）
-- [ ] unsupported official update 返回明确 501
-- [ ] 真实 CAS conflict 并发测试（`testcontainers-postgres`）
+- [x] staged create commit 走 `assert-create` 创建 catalog（`commit_staged_table`）
+- [x] unsupported official update 返回明确 501
+- [x] 真实 CAS conflict 并发测试（`testcontainers-postgres`）
 
 ### 关键设计参考
 
 - V4_DESIGN.md §6.1 Requirement 覆盖
 - V4_DESIGN.md §6.2 Update 覆盖
 - V4_DESIGN.md §9.4 并发测试基础设施
+
+### 关键改动
+
+- `quasar/adapter/src/iceberg/metadata.rs`
+  - 删除 `build_initial_metadata` 中 `last-updated-ms = 1` 写死
+  - 新增 `check_supported_updates` + `UnsupportedUpdate`（7 个 V4.0 未实现 variant 返回 501）
+  - 新增 `apply_commit_for_staged`（staged 路径 requirement check 走 `None`）
+- `quasar/adapter/src/iceberg/table.rs`
+  - `commit_table` 入口先调用 `check_supported_updates`
+  - 改造为 match-分叉：existing-table CAS / staged-create commit
+  - 抽取 `commit_existing_table` 和 `commit_staged_table` 两个内部函数
+  - staged 路径 storage-NotFound 映射为 409 CommitFailed（并发输家语义）
+- `quasar/adapter/Cargo.toml`
+  - dev-dependencies 加 `testcontainers`、`testcontainers-modules`
+- `quasar/adapter/tests/iceberg_commit.rs`
+  - 测试中 add-snapshot timestamp 用占位符 + `now_ms()` 替换，避免被 iceberg crate chronology 校验拒绝
+  - 新增 7 个 501 测试、10 个 requirement 测试、8 个 update 测试、5 个 staged commit 测试
+  - 删除 ignored 的 `test_concurrent_cas_conflict_end_to_end`
+- `quasar/adapter/tests/iceberg_commit_concurrent.rs`（新文件）
+  - 每个测试启动独立 `postgres:16` testcontainer
+  - 3 个 `tokio::join!` 真实并发测试
+
+### 测试覆盖
+
+| 测试组 | 测试文件 | 覆盖场景 |
+|--------|----------|----------|
+| commit handler | `iceberg_commit.rs` | 8 项 requirement × 成功/失败、V4.0 update 全覆盖、staged commit 成功/missing assert-create/404/竞态 active/501 |
+| unsupported update | `iceberg_commit.rs` | 7 个 variant → 501 NotImplementedException |
+| concurrent CAS | `iceberg_commit_concurrent.rs` | 并发 existing commit、并发 staged commit、并发后状态一致性（每个测试独立 PG container） |
+
+### 提交记录
+
+- `9f341fb` fix(adapter): remove last-updated-ms hack and use real timestamps
+- `e108849` feat(adapter): reject V4.0-unsupported TableUpdate variants with 501
+- `d2b4ac4` test(adapter): cover V4.0 remaining 5 commit requirements
+- `1e950ba` test(adapter): cover V4.0 commit update variants
+- `87b1eb3` feat(adapter): finalize staged-create commit path
+- `b24534a` feat(adapter): real concurrent CAS conflict tests via testcontainers
 
 ---
 
@@ -160,6 +198,4 @@
 
 | 问题 | 影响 | 计划修复阶段 |
 |------|------|-------------|
-| `build_initial_metadata` wrapper 覆盖 `last-updated-ms` 为 1（兼容性 hack） | 测试中 snapshot timestamp 兼容性 | C4 / 测试基础设施 |
 | `CatalogStore` 包含 Iceberg 专用 trait（trait object upcast 限制妥协） | Lance/Unified 理论上可调用 Iceberg 方法 | V4.1 评估泛型 state 重构 |
-| 并发测试基础设施（`testcontainers-postgres`）未建立 | 无真实并行 CAS 覆盖 | C4 |
