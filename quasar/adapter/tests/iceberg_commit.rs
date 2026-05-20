@@ -8,7 +8,7 @@ use http_body_util::BodyExt;
 use postgresql_embedded::PostgreSQL;
 use quasar_adapter::iceberg;
 use quasar_core::CatalogStore;
-use quasar_core::{CasCommitStore, NamespaceStore, TabularStore};
+use quasar_core::{CasCommitStore, IcebergStagingStore, NamespaceStore, TabularStore};
 use quasar_storage::PgCatalogStore;
 use serde_json::Value;
 use serial_test::serial;
@@ -62,7 +62,7 @@ async fn setup() -> PgCatalogStore {
 
     let client = pool.get().await.expect("failed to get client");
     client
-        .execute("TRUNCATE tabular_asset_versions, asset_versions, tabular_assets, assets, namespaces, asset_permissions CASCADE", &[])
+        .execute("TRUNCATE tabular_asset_versions, asset_versions, tabular_assets, assets, namespaces, asset_permissions, iceberg_staged_tables CASCADE", &[])
         .await
         .expect("failed to truncate tables");
 
@@ -2219,4 +2219,288 @@ async fn test_commit_add_sort_order_and_set_default() {
     assert_eq!(status, StatusCode::OK, "body: {json:?}");
     let default = json["metadata"]["default-sort-order-id"].as_i64().unwrap();
     assert_ne!(default, 0, "default-sort-order-id should have changed");
+}
+
+// ── V4.0 staged-create commit (V4_DESIGN.md §5.13, §6.4) ───────────────────
+
+/// Create a staged table; returns the metadata-location reported by the server.
+async fn create_staged(app: &axum::Router) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"name": "users", "stage-create": true, "location": "s3://bucket/warehouse/prod/users"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_staged_commit_success() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+    create_staged(&app).await;
+
+    let body = r#"{
+        "requirements": [{"type": "assert-create"}],
+        "updates": [
+            {"action": "set-properties", "updates": {"owner": "team-a"}}
+        ]
+    }"#;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "body: {json:?}");
+    let loc = json["metadata-location"].as_str().unwrap();
+    assert!(
+        loc.contains("00002-"),
+        "expected 00002-* location, got {loc}"
+    );
+    assert_eq!(json["metadata"]["properties"]["owner"], "team-a");
+
+    // After commit the table is active: load_table returns it.
+    let load = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(load.status(), StatusCode::OK);
+
+    // And it appears in the table list.
+    let list = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let list_json = body_json(list).await;
+    let identifiers = list_json["identifiers"].as_array().unwrap();
+    assert!(identifiers.iter().any(|i| i["name"] == "users"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_staged_commit_missing_assert_create() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+    create_staged(&app).await;
+
+    let body = r#"{
+        "requirements": [],
+        "updates": [{"action": "set-properties", "updates": {"k": "v"}}]
+    }"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {json:?}");
+    assert_eq!(json["error"]["type"], "CommitFailedException");
+    let msg = json["error"]["message"].as_str().unwrap();
+    assert!(
+        msg.contains("assert-create"),
+        "expected message to mention 'assert-create', got: {msg}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_staged_commit_no_staged_no_active_returns_404() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    // Neither staged nor active table — commit should be a clean 404.
+    let body = r#"{
+        "requirements": [{"type": "assert-create"}],
+        "updates": []
+    }"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/ghost")
+                .header("Content-Type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {json:?}");
+    assert_eq!(json["error"]["type"], "NoSuchTableException");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_staged_commit_with_concurrent_active_create_returns_409() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+
+    // Stage_create directly through the store (skip HTTP since we need to keep
+    // a second store handle for the racing active insert).
+    let table_uuid = uuid::Uuid::new_v4();
+    store
+        .create_staged_table(
+            "default",
+            "prod",
+            "users",
+            table_uuid,
+            "s3://bucket/warehouse/prod/users",
+            "s3://bucket/warehouse/prod/users/metadata/00001-staged.metadata.json",
+            serde_json::json!({
+                "format-version": 2,
+                "table-uuid": table_uuid.to_string(),
+                "location": "s3://bucket/warehouse/prod/users",
+                "last-sequence-number": 0,
+                "last-updated-ms": 1000,
+                "last-column-id": 0,
+                "schemas": [{"type": "struct", "schema-id": 0, "fields": []}],
+                "current-schema-id": 0,
+                "partition-specs": [{"spec-id": 0, "fields": []}],
+                "default-spec-id": 0,
+                "last-partition-id": 999,
+                "properties": {},
+                "snapshots": [],
+                "snapshot-log": [],
+                "metadata-log": [],
+                "sort-orders": [{"order-id": 0, "fields": []}],
+                "default-sort-order-id": 0,
+                "refs": {}
+            }),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    // Racing writer creates the active row before commit lands.
+    let active_uuid = uuid::Uuid::new_v4();
+    store
+        .create_tabular_asset(
+            "default",
+            "prod",
+            "users",
+            "iceberg",
+            "s3://bucket/warehouse/prod/users",
+            Some("s3://bucket/warehouse/prod/users/metadata/00001-other.metadata.json"),
+            Some(serde_json::json!({
+                "format-version": 2,
+                "table-uuid": active_uuid.to_string(),
+                "location": "s3://bucket/warehouse/prod/users",
+                "last-sequence-number": 0,
+                "last-updated-ms": 1000,
+                "last-column-id": 0,
+                "schemas": [{"type": "struct", "schema-id": 0, "fields": []}],
+                "current-schema-id": 0,
+                "partition-specs": [{"spec-id": 0, "fields": []}],
+                "default-spec-id": 0,
+                "last-partition-id": 999,
+                "properties": {},
+                "snapshots": [],
+                "snapshot-log": [],
+                "metadata-log": [],
+                "sort-orders": [{"order-id": 0, "fields": []}],
+                "default-sort-order-id": 0,
+                "refs": {}
+            })),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let app = test_app(store);
+
+    // commit_table now finds the active row (existing-table path); the
+    // request carries assert-create (TableRequirement::NotExist), which the
+    // iceberg crate rejects against an active table → 409.
+    let body = r#"{
+        "requirements": [{"type": "assert-create"}],
+        "updates": []
+    }"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {json:?}");
+    assert_eq!(json["error"]["type"], "CommitFailedException");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_staged_commit_rejects_unsupported_update_501() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+    create_staged(&app).await;
+
+    // Even on the staged path, unsupported updates must surface 501 (check
+    // runs at handler entry, before the existing/staged split).
+    let body = r#"{
+        "requirements": [{"type": "assert-create"}],
+        "updates": [{"action": "remove-schemas", "schema-ids": [0]}]
+    }"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "body: {json:?}");
+    assert_eq!(json["error"]["type"], "NotImplementedException");
 }

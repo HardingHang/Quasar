@@ -100,6 +100,44 @@ pub fn apply_commit(
     serde_json::to_value(&result.metadata).map_err(|e| format!("serialize: {e}"))
 }
 
+/// Apply requirements and updates for a staged-create commit.
+///
+/// Differs from [`apply_commit`] in that requirements are checked against
+/// `None` metadata (the table does not yet exist as an active asset). The
+/// iceberg crate accepts only `TableRequirement::NotExist` (`assert-create`)
+/// in this mode; any other requirement returns `TableNotFound`. Updates are
+/// then applied starting from the parsed staged metadata.
+pub fn apply_commit_for_staged(
+    staged_metadata: &serde_json::Value,
+    requirements: &[iceberg::TableRequirement],
+    updates: &[iceberg::TableUpdate],
+) -> Result<serde_json::Value, String> {
+    // Requirement check: for staged commit the table is not yet active,
+    // so we pass `None`. The iceberg crate's check() accepts NotExist here
+    // and rejects every other variant — exactly the V4.0 contract.
+    for req in requirements {
+        req.check(None)
+            .map_err(|e| format!("requirement failed: {e}"))?;
+    }
+
+    let metadata: iceberg::spec::TableMetadata = serde_json::from_value(staged_metadata.clone())
+        .map_err(|e| format!("parse staged metadata: {e}"))?;
+
+    let builder = metadata.into_builder(None);
+    let builder = updates.iter().try_fold(builder, |b, update| {
+        update
+            .clone()
+            .apply(b)
+            .map_err(|e| format!("apply update failed: {e}"))
+    })?;
+
+    let result = builder
+        .build()
+        .map_err(|e| format!("build after updates: {e}"))?;
+
+    serde_json::to_value(&result.metadata).map_err(|e| format!("serialize: {e}"))
+}
+
 /// Wire name of an Iceberg official `TableUpdate` action that V4.0 explicitly
 /// does not implement. Returned by [`check_supported_updates`] so the handler
 /// can map it to a 501 `NotImplementedException`.

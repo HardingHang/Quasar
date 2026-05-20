@@ -463,6 +463,14 @@ pub async fn register_table(
 
 /// POST /iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}
 /// Commit table updates (CAS).
+///
+/// Two paths:
+/// - existing active table → CAS update via `cas_update_metadata_location`.
+/// - active table absent but a non-expired staged record exists → finalize
+///   the staged-create commit via `commit_staged_table`. The request must
+///   carry `assert-create` (`TableRequirement::NotExist`).
+///
+/// V4_DESIGN.md §5.13, §6.4.
 pub async fn commit_table(
     State(store): State<Arc<dyn CatalogStore>>,
     Extension(config): Extension<IcebergConfig>,
@@ -479,12 +487,42 @@ pub async fn commit_table(
         }
     })?;
 
-    // 1. Load the current asset with tabular detail
-    let (_asset, tabular) = store
+    // 1. Look up the active table; on NotFound, fall through to staged commit.
+    match store
         .get_tabular_asset(&prefix, &ns, "iceberg", &table)
         .await
-        .map_err(store_error_to_iceberg_table)?;
+    {
+        Ok((_asset, tabular)) => {
+            commit_existing_table(
+                store.clone(),
+                config,
+                metrics,
+                prefix,
+                ns,
+                table,
+                tabular,
+                req,
+            )
+            .await
+        }
+        Err(StoreError::NotFound(_)) => {
+            commit_staged_table(store, config, metrics, prefix, ns, table, req).await
+        }
+        Err(e) => Err(store_error_to_iceberg_table(e)),
+    }
+}
 
+#[allow(clippy::too_many_arguments)]
+async fn commit_existing_table(
+    store: Arc<dyn CatalogStore>,
+    config: IcebergConfig,
+    metrics: Option<MetricsState>,
+    prefix: String,
+    ns: String,
+    table: String,
+    tabular: quasar_core::TabularAsset,
+    req: CommitTableRequest,
+) -> Result<(StatusCode, Json<LoadTableResponse>), IcebergError> {
     let metadata_location =
         tabular
             .metadata_location
@@ -582,6 +620,114 @@ pub async fn commit_table(
     }
 
     // 10. Return updated table
+    Ok((
+        StatusCode::OK,
+        Json(LoadTableResponse {
+            metadata_location: Some(new_metadata_location),
+            metadata: new_metadata_json,
+        }),
+    ))
+}
+
+/// Finalize a staged-create commit (V4_DESIGN.md §6.4).
+async fn commit_staged_table(
+    store: Arc<dyn CatalogStore>,
+    config: IcebergConfig,
+    metrics: Option<MetricsState>,
+    prefix: String,
+    ns: String,
+    table: String,
+    req: CommitTableRequest,
+) -> Result<(StatusCode, Json<LoadTableResponse>), IcebergError> {
+    // 1. Look up the staged record. None → truly missing.
+    let staged_metadata = store
+        .get_staged_table(&prefix, &ns, &table)
+        .await
+        .map_err(store_error_to_iceberg_table)?
+        .ok_or_else(|| IcebergError::NoSuchTableException {
+            message: format!("Table '{}.{}' not found", ns, table),
+        })?;
+
+    // 2. Require assert-create. Iceberg crate's check(None) only accepts
+    // NotExist, but we want a cleaner client-facing error if it's missing.
+    if !req
+        .requirements
+        .iter()
+        .any(|r| matches!(r, iceberg::TableRequirement::NotExist))
+    {
+        if let Some(ref m) = metrics {
+            m.registry.record_iceberg_commit_conflict();
+        }
+        return Err(IcebergError::CommitFailedException {
+            message: "staged commit requires the assert-create requirement".to_string(),
+        });
+    }
+
+    // 3. Check requirements against `None` (NotExist passes, others fail), then
+    // apply updates starting from the staged metadata.
+    let new_metadata_json =
+        super::metadata::apply_commit_for_staged(&staged_metadata, &req.requirements, &req.updates)
+            .map_err(|msg| IcebergError::CommitFailedException { message: msg })?;
+
+    // 4. Build the new metadata location. The staged record holds 00001-*;
+    // the active commit writes a new 00002-* file with the same UUID/location.
+    let location = new_metadata_json
+        .get("location")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| IcebergError::InternalServerError {
+            message: "staged metadata missing 'location' field".to_string(),
+        })?
+        .to_string();
+    let table_uuid = new_metadata_json
+        .get("table-uuid")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| IcebergError::InternalServerError {
+            message: "staged metadata missing 'table-uuid' field".to_string(),
+        })?;
+    let new_metadata_location = format!("{}/metadata/00002-{}.metadata.json", location, table_uuid);
+
+    // 5. Write the new metadata to object store.
+    write_metadata_to_store(&new_metadata_location, &new_metadata_json, &config).await?;
+
+    // 6. Extract properties for the catalog row.
+    let properties: HashMap<String, String> = new_metadata_json
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // 7. Single-transaction: verify active absent, lock staged, insert
+    // assets+tabular_assets, delete staged record.
+    let (_asset, _tabular) = store
+        .commit_staged_table(
+            &prefix,
+            &ns,
+            &table,
+            &location,
+            &new_metadata_location,
+            new_metadata_json.clone(),
+            properties,
+        )
+        .await
+        .map_err(|e| match e {
+            StoreError::AlreadyExists(msg) => {
+                if let Some(ref m) = metrics {
+                    m.registry.record_iceberg_commit_conflict();
+                }
+                IcebergError::CommitFailedException { message: msg }
+            }
+            StoreError::NotFound(msg) => IcebergError::NoSuchTableException { message: msg },
+            other => store_error_to_iceberg_table(other),
+        })?;
+
+    if let Some(ref m) = metrics {
+        m.registry.record_iceberg_commit_success();
+    }
+
     Ok((
         StatusCode::OK,
         Json(LoadTableResponse {
