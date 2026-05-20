@@ -62,7 +62,7 @@ async fn setup() -> PgCatalogStore {
 
     let client = pool.get().await.expect("failed to get client");
     client
-        .execute("TRUNCATE tabular_asset_versions, asset_versions, tabular_assets, assets, namespaces, asset_permissions CASCADE", &[])
+        .execute("TRUNCATE iceberg_staged_tables, iceberg_scan_metrics_reports, iceberg_purge_operations, tabular_asset_versions, asset_versions, tabular_assets, assets, namespaces, asset_permissions CASCADE", &[])
         .await
         .expect("failed to truncate tables");
 
@@ -752,7 +752,7 @@ async fn test_create_table_with_schema() {
                             "schema-id": 0,
                             "fields": [
                                 {"id": 1, "name": "id", "type": "int", "required": true},
-                                {"id": 2, "name": "name", "type": "string"}
+                                {"id": 2, "name": "name", "type": "string", "required": false}
                             ]
                         }
                     }"#,
@@ -762,8 +762,14 @@ async fn test_create_table_with_schema() {
         .await
         .unwrap();
 
-    assert_eq!(create.status(), StatusCode::OK);
+    let status = create.status();
     let json = body_json(create).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "unexpected status, body: {:?}",
+        json
+    );
     assert_eq!(
         json["metadata"]["schemas"][0]["fields"]
             .as_array()
@@ -844,4 +850,148 @@ async fn test_drop_table_without_purge_succeeds() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_staged_create_success() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"name": "users", "stage-create": true, "location": "s3://bucket/warehouse/prod/users"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(create.status(), StatusCode::OK);
+    let json = body_json(create).await;
+    assert!(json["metadata-location"].as_str().unwrap().contains("00001-"));
+    assert_eq!(json["metadata"]["format-version"], 2);
+
+    // Staged table should NOT appear in list
+    let list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+    let list_json = body_json(list).await;
+    assert!(list_json["identifiers"].as_array().unwrap().is_empty());
+
+    // Staged table should NOT be loadable
+    let load = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(load.status(), StatusCode::NOT_FOUND);
+    let load_json = body_json(load).await;
+    assert_eq!(load_json["error"]["type"], "NoSuchTableException");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_staged_create_already_exists_active_table() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    store
+        .create_tabular_asset(
+            "default",
+            "prod",
+            "users",
+            "iceberg",
+            "s3://bucket/warehouse/prod/users",
+            None,
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"name": "users", "stage-create": true, "location": "s3://bucket/warehouse/prod/users"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["type"], "TableAlreadyExistsException");
+    assert_eq!(json["error"]["code"], 409);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_staged_create_duplicate_staged() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    // First staged create
+    let first = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"name": "users", "stage-create": true, "location": "s3://bucket/warehouse/prod/users"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    // Duplicate staged create should fail with 409
+    let second = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"name": "users", "stage-create": true, "location": "s3://bucket/warehouse/prod/users"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(second.status(), StatusCode::CONFLICT);
+    let json = body_json(second).await;
+    assert_eq!(json["error"]["type"], "TableAlreadyExistsException");
+    assert_eq!(json["error"]["code"], 409);
 }

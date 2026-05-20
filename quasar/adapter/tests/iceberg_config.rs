@@ -158,4 +158,7 @@ async fn test_get_config_endpoints_field() {
     assert!(
         endpoint_strings.contains(&"POST /v1/{prefix}/namespaces/{namespace}/tables".to_string())
     );
+    assert!(
+        endpoint_strings.contains(&"POST /v1/{prefix}/namespaces/{namespace}/register".to_string())
+    );
 }

@@ -151,8 +151,14 @@ async fn test_commit_success() {
         .await
         .unwrap();
 
-    assert_eq!(commit.status(), StatusCode::OK);
+    let status = commit.status();
     let commit_json = body_json(commit).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "unexpected status, body: {:?}",
+        commit_json
+    );
     let new_location = commit_json["metadata-location"].as_str().unwrap();
     assert_ne!(new_location, original_location);
     assert!(new_location.contains("00002-"));

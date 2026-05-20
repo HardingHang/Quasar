@@ -73,6 +73,15 @@ pub struct CreateTableRequest {
     pub schema: Option<serde_json::Value>,
     #[serde(default)]
     pub properties: HashMap<String, String>,
+    #[serde(rename = "stage-create", default)]
+    pub stage_create: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub struct RegisterTableRequest {
+    pub name: String,
+    #[serde(rename = "metadata-location")]
+    pub metadata_location: String,
 }
 
 #[derive(Serialize)]

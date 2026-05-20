@@ -334,6 +334,10 @@ pub trait CatalogStore:
     + TabularVersionStore
     + CasCommitStore
     + UnifiedQueryStore
+    + IcebergStagingStore
+    + IcebergRegisterStore
+    + IcebergMetricsStore
+    + IcebergPurgeStore
     + Send
     + Sync
 {
@@ -348,6 +352,10 @@ impl<T> CatalogStore for T where
         + TabularVersionStore
         + CasCommitStore
         + UnifiedQueryStore
+        + IcebergStagingStore
+        + IcebergRegisterStore
+        + IcebergMetricsStore
+        + IcebergPurgeStore
         + Send
         + Sync
         + ?Sized
@@ -501,7 +509,7 @@ mod tests {
     /// constraint list drifts away from V3_DESIGN §5.1, this stops
     /// compiling.
     #[allow(dead_code)]
-    fn _catalog_store_marker_composes_all_eight<T>()
+    fn _catalog_store_marker_composes_all<T>()
     where
         T: DomainStore
             + NamespaceStore
@@ -510,7 +518,11 @@ mod tests {
             + VersionStore
             + TabularVersionStore
             + CasCommitStore
-            + UnifiedQueryStore,
+            + UnifiedQueryStore
+            + IcebergStagingStore
+            + IcebergRegisterStore
+            + IcebergMetricsStore
+            + IcebergPurgeStore,
     {
         fn _assert_catalog_store<S: CatalogStore + ?Sized>() {}
         _assert_catalog_store::<T>();
@@ -521,12 +533,7 @@ mod tests {
     #[allow(dead_code)]
     fn _iceberg_catalog_store_marker_composes_all<T>()
     where
-        T: CatalogStore
-            + CasCommitStore
-            + IcebergStagingStore
-            + IcebergRegisterStore
-            + IcebergMetricsStore
-            + IcebergPurgeStore,
+        T: CatalogStore + CasCommitStore,
     {
         fn _assert_iceberg_store<S: IcebergCatalogStore + ?Sized>() {}
         _assert_iceberg_store::<T>();

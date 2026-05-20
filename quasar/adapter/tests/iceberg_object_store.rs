@@ -429,3 +429,233 @@ async fn test_commit_table_metadata_not_found() {
     assert_eq!(json["error"]["type"], "CommitFailedException");
     assert_eq!(json["error"]["code"], 409);
 }
+
+#[tokio::test]
+#[serial]
+async fn test_register_table_success() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+
+    let mem_store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+    let app = test_app_with_store(store, mem_store.clone());
+
+    // Pre-populate a metadata file in object store
+    let metadata_location = "s3://warehouse/prod/users/metadata/00001-uuid.metadata.json";
+    let metadata = serde_json::json!({
+        "format-version": 2,
+        "table-uuid": "550e8400-e29b-41d4-a716-446655440000",
+        "location": "s3://warehouse/prod/users",
+        "last-sequence-number": 0,
+        "last-updated-ms": 1000,
+        "last-column-id": 0,
+        "schemas": [{"type": "struct", "schema-id": 0, "fields": []}],
+        "current-schema-id": 0,
+        "partition-specs": [{"spec-id": 0, "fields": []}],
+        "default-spec-id": 0,
+        "last-partition-id": 999,
+        "properties": {},
+        "snapshots": [],
+        "snapshot-log": [],
+        "metadata-log": [],
+        "sort-orders": [{"order-id": 0, "fields": []}],
+        "default-sort-order-id": 0,
+        "refs": {}
+    });
+    let path = object_store::path::Path::from(s3_to_relative(metadata_location));
+    mem_store
+        .put(
+            &path,
+            object_store::PutPayload::from(metadata.to_string()),
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/register")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"name": "users", "metadata-location": "{}"}}"#,
+                    metadata_location
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["metadata-location"], metadata_location);
+    assert_eq!(json["metadata"]["format-version"], 2);
+    assert_eq!(json["metadata"]["location"], "s3://warehouse/prod/users");
+
+    // Registered table should be visible in list
+    let list = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+    let list_json = body_json(list).await;
+    let identifiers = list_json["identifiers"].as_array().unwrap();
+    assert_eq!(identifiers.len(), 1);
+    assert_eq!(identifiers[0]["name"], "users");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_register_table_metadata_not_found() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+
+    let mem_store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+    let app = test_app_with_store(store, mem_store.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/register")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"name": "users", "metadata-location": "s3://warehouse/prod/users/metadata/00001-uuid.metadata.json"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["type"], "MetadataNotFoundException");
+    assert_eq!(json["error"]["code"], 404);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_register_table_invalid_metadata() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+
+    let mem_store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+    let app = test_app_with_store(store, mem_store.clone());
+
+    // Write invalid JSON to object store
+    let metadata_location = "s3://warehouse/prod/users/metadata/00001-uuid.metadata.json";
+    let path = object_store::path::Path::from(s3_to_relative(metadata_location));
+    mem_store
+        .put(
+            &path,
+            object_store::PutPayload::from(r#"{"invalid": true}"#.to_string()),
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/register")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"name": "users", "metadata-location": "{}"}}"#,
+                    metadata_location
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["type"], "BadRequestException");
+    assert_eq!(json["error"]["code"], 400);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_register_table_already_exists() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+
+    let mem_store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+    let app = test_app_with_store(store, mem_store.clone());
+
+    // Pre-populate metadata file
+    let metadata_location = "s3://warehouse/prod/users/metadata/00001-uuid.metadata.json";
+    let metadata = serde_json::json!({
+        "format-version": 2,
+        "table-uuid": "550e8400-e29b-41d4-a716-446655440000",
+        "location": "s3://warehouse/prod/users",
+        "last-sequence-number": 0,
+        "last-updated-ms": 1000,
+        "last-column-id": 0,
+        "schemas": [{"type": "struct", "schema-id": 0, "fields": []}],
+        "current-schema-id": 0,
+        "partition-specs": [{"spec-id": 0, "fields": []}],
+        "default-spec-id": 0,
+        "last-partition-id": 999,
+        "properties": {},
+        "snapshots": [],
+        "snapshot-log": [],
+        "metadata-log": [],
+        "sort-orders": [{"order-id": 0, "fields": []}],
+        "default-sort-order-id": 0,
+        "refs": {}
+    });
+    let path = object_store::path::Path::from(s3_to_relative(metadata_location));
+    mem_store
+        .put(
+            &path,
+            object_store::PutPayload::from(metadata.to_string()),
+        )
+        .await
+        .unwrap();
+
+    // First register succeeds
+    let first = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/register")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"name": "users", "metadata-location": "{}"}}"#,
+                    metadata_location
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    // Duplicate register should fail with 409
+    let second = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/register")
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"name": "users", "metadata-location": "{}"}}"#,
+                    metadata_location
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(second.status(), StatusCode::CONFLICT);
+    let json = body_json(second).await;
+    assert_eq!(json["error"]["type"], "TableAlreadyExistsException");
+    assert_eq!(json["error"]["code"], 409);
+}

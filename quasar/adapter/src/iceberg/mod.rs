@@ -46,6 +46,10 @@ pub fn routes() -> Router<Arc<dyn CatalogStore>> {
             get(table::list_tables).post(table::create_table),
         )
         .route(
+            "/iceberg/v1/{prefix}/namespaces/{ns}/register",
+            post(table::register_table),
+        )
+        .route(
             "/iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}",
             get(table::load_table)
                 .post(table::commit_table)
@@ -91,6 +95,7 @@ pub mod config {
             "POST /v1/{prefix}/namespaces/{namespace}/properties".to_string(),
             "GET /v1/{prefix}/namespaces/{namespace}/tables".to_string(),
             "POST /v1/{prefix}/namespaces/{namespace}/tables".to_string(),
+            "POST /v1/{prefix}/namespaces/{namespace}/register".to_string(),
             "GET /v1/{prefix}/namespaces/{namespace}/tables/{table}".to_string(),
             "HEAD /v1/{prefix}/namespaces/{namespace}/tables/{table}".to_string(),
             "DELETE /v1/{prefix}/namespaces/{namespace}/tables/{table}".to_string(),

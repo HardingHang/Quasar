@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use super::dto::{
     CommitTableRequest, CreateTableRequest, ListTablesQuery, ListTablesResponse, LoadTableResponse,
-    RenameTableRequest, TableIdentifier,
+    RegisterTableRequest, RenameTableRequest, TableIdentifier,
 };
 use super::error::{store_error_to_iceberg_table, IcebergError};
 use super::IcebergConfig;
@@ -90,35 +90,10 @@ async fn check_metadata_exists(location: &str, config: &IcebergConfig) -> bool {
 
 // ── Helpers ────────────────────────────────────────────────
 
-/// Generate the next metadata location by incrementing the sequence number.
-/// Expected format: `{...}/metadata/{NNNNN}-{uuid}.metadata.json`
-/// Handles overflow by extending width when sequence exceeds current width.
-fn next_metadata_location(current: &str) -> String {
-    if let Some(metadata_idx) = current.rfind("/metadata/") {
-        let prefix = &current[..metadata_idx + 10];
-        let rest = &current[metadata_idx + 10..];
-        if let Some(dash_idx) = rest.find('-') {
-            let seq_str = &rest[..dash_idx];
-            if let Ok(seq) = seq_str.parse::<u64>() {
-                let suffix = &rest[dash_idx..];
-                let new_seq = seq + 1;
-                // Handle overflow: if new_seq needs more digits, extend width
-                let new_width = seq_str.len().max(new_seq.to_string().len());
-                let new_seq_str = format!("{:0width$}", new_seq, width = new_width);
-                return format!("{}{}{}", prefix, new_seq_str, suffix);
-            }
-        }
-    }
-    // Fallback: append timestamp-based sequence if format is unrecognized
-    let timestamp = chrono::Utc::now().timestamp_millis();
-    format!(
-        "{}-{}.metadata.json",
-        current.trim_end_matches(".metadata.json"),
-        timestamp
-    )
-}
-
-fn build_initial_metadata(
+/// Fallback metadata builder for load_table when schema_snapshot is missing.
+/// Uses hand-rolled JSON instead of the iceberg crate wrapper to avoid
+/// error handling in the fallback path.
+fn _build_fallback_metadata(
     table_uuid: Uuid,
     _table_name: &str,
     location: &str,
@@ -227,31 +202,53 @@ pub async fn create_table(
     });
 
     let table_uuid = Uuid::new_v4();
-    let metadata = build_initial_metadata(table_uuid, &req.name, &location, req.schema.as_ref());
-
-    let metadata_location = format!("{}/metadata/00001-{}.metadata.json", location, table_uuid);
-
     let mut properties = req.properties;
     properties.insert("table-uuid".to_string(), table_uuid.to_string());
 
-    let metadata_json = metadata.clone();
+    let metadata = super::metadata::build_initial_metadata(
+        table_uuid,
+        &location,
+        req.schema.as_ref(),
+        properties.clone(),
+    )
+    .map_err(|msg| IcebergError::InternalServerError { message: msg })?;
+
+    let metadata_location = format!("{}/metadata/00001-{}.metadata.json", location, table_uuid);
 
     // Write initial metadata.json to object store
-    write_metadata_to_store(&metadata_location, &metadata_json, &config).await?;
+    write_metadata_to_store(&metadata_location, &metadata, &config).await?;
 
-    let _ = store
-        .create_tabular_asset(
-            &prefix,
-            &ns,
-            &req.name,
-            "iceberg",
-            &location,
-            Some(&metadata_location),
-            Some(metadata_json),
-            properties,
-        )
-        .await
-        .map_err(store_error_to_iceberg_table)?;
+    if req.stage_create == Some(true) {
+        // Staged create: only insert staged record, no active catalog entry
+        store
+            .create_staged_table(
+                &prefix,
+                &ns,
+                &req.name,
+                table_uuid,
+                &location,
+                &metadata_location,
+                metadata.clone(),
+                properties,
+            )
+            .await
+            .map_err(store_error_to_iceberg_table)?;
+    } else {
+        // Non-staged create: insert active catalog entry
+        let _ = store
+            .create_tabular_asset(
+                &prefix,
+                &ns,
+                &req.name,
+                "iceberg",
+                &location,
+                Some(&metadata_location),
+                Some(metadata.clone()),
+                properties,
+            )
+            .await
+            .map_err(store_error_to_iceberg_table)?;
+    }
 
     Ok((
         StatusCode::OK,
@@ -286,7 +283,7 @@ pub async fn load_table(
         read_metadata_from_store(ml, tabular.schema_snapshot.clone(), &config).await?
     } else {
         tabular.schema_snapshot.unwrap_or_else(|| {
-            build_initial_metadata(asset.id, &asset.name, &tabular.location, None)
+            _build_fallback_metadata(asset.id, &asset.name, &tabular.location, None)
         })
     };
 
@@ -402,6 +399,71 @@ pub async fn rename_table(
     Ok(StatusCode::OK)
 }
 
+/// POST /iceberg/v1/{prefix}/namespaces/{ns}/register
+/// Register an externally-managed Iceberg table into the catalog.
+pub async fn register_table(
+    State(store): State<Arc<dyn CatalogStore>>,
+    Extension(config): Extension<IcebergConfig>,
+    Path((prefix, ns)): Path<(String, String)>,
+    Json(req): Json<RegisterTableRequest>,
+) -> Result<impl IntoResponse, IcebergError> {
+    validate_name(&ns).map_err(store_error_to_iceberg_table)?;
+    validate_name(&req.name).map_err(store_error_to_iceberg_table)?;
+
+    // 1. Read metadata from object store
+    let metadata_json = if let (Some(ref store_os), Some(ref bucket)) =
+        (&config.object_store, &config.s3_bucket)
+    {
+        let path = s3_url_to_path(&req.metadata_location, bucket).ok_or_else(|| {
+            IcebergError::InternalServerError {
+                message: format!("invalid metadata location: {}", req.metadata_location),
+            }
+        })?;
+        read_json(&**store_os, &path)
+            .await
+            .map_err(|e| match e {
+                object_store::Error::NotFound { .. } => IcebergError::MetadataNotFoundException {
+                    message: format!("metadata not found at {}", req.metadata_location),
+                },
+                _ => IcebergError::InternalServerError {
+                    message: format!("failed to read metadata: {}", e),
+                },
+            })?
+    } else {
+        return Err(IcebergError::InternalServerError {
+            message: "object store not configured".to_string(),
+        });
+    };
+
+    // 2. Validate metadata format using iceberg crate
+    let metadata = super::metadata::parse_metadata(&metadata_json)
+        .map_err(|msg| IcebergError::BadRequestException { message: msg })?;
+
+    let location = metadata.location().to_string();
+
+    // 3. Register catalog record (no object store write)
+    store
+        .register_iceberg_table(
+            &prefix,
+            &ns,
+            &req.name,
+            &location,
+            &req.metadata_location,
+            metadata_json.clone(),
+            HashMap::new(),
+        )
+        .await
+        .map_err(store_error_to_iceberg_table)?;
+
+    Ok((
+        StatusCode::OK,
+        Json(LoadTableResponse {
+            metadata_location: Some(req.metadata_location),
+            metadata: metadata_json,
+        }),
+    ))
+}
+
 /// POST /iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}
 /// Commit table updates (CAS).
 pub async fn commit_table(
@@ -479,7 +541,8 @@ pub async fn commit_table(
         .collect();
 
     // 7. Generate new metadata location
-    let new_metadata_location = next_metadata_location(&metadata_location);
+    let new_metadata_location = super::metadata::next_metadata_location(&metadata_location)
+        .map_err(|msg| IcebergError::InternalServerError { message: msg })?;
 
     // 8. Write new metadata.json to object store
     write_metadata_to_store(&new_metadata_location, &new_metadata_json, &config).await?;
@@ -528,41 +591,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_next_metadata_location_basic_increment() {
-        let current = "s3://bucket/metadata/00001-abc.metadata.json";
-        let next = next_metadata_location(current);
-        assert_eq!(next, "s3://bucket/metadata/00002-abc.metadata.json");
+    fn test_build_fallback_metadata_empty_schema() {
+        let uuid = Uuid::new_v4();
+        let meta = _build_fallback_metadata(uuid, "test", "s3://bucket/test", None);
+        assert_eq!(meta["format-version"], 2);
+        assert_eq!(meta["table-uuid"], uuid.to_string());
+        assert_eq!(meta["location"], "s3://bucket/test");
     }
 
     #[test]
-    fn test_next_metadata_location_width_overflow_9_to_10() {
-        let current = "s3://bucket/metadata/00009-abc.metadata.json";
-        let next = next_metadata_location(current);
-        assert_eq!(next, "s3://bucket/metadata/00010-abc.metadata.json");
-    }
-
-    #[test]
-    fn test_next_metadata_location_width_overflow_99_to_100() {
-        let current = "s3://bucket/metadata/00099-abc.metadata.json";
-        let next = next_metadata_location(current);
-        assert_eq!(next, "s3://bucket/metadata/00100-abc.metadata.json");
-    }
-
-    #[test]
-    fn test_next_metadata_location_width_overflow_99999_to_100000() {
-        let current = "s3://bucket/metadata/99999-abc.metadata.json";
-        let next = next_metadata_location(current);
-        assert_eq!(next, "s3://bucket/metadata/100000-abc.metadata.json");
-    }
-
-    #[test]
-    fn test_next_metadata_location_unrecognized_format() {
-        let current = "s3://bucket/unusual/location.json";
-        let next = next_metadata_location(current);
-        // Fallback: since the string does not end with ".metadata.json",
-        // trim_end_matches is a no-op and the format becomes
-        // "{original}-{timestamp}.metadata.json"
-        assert!(next.starts_with("s3://bucket/unusual/location.json-"));
-        assert!(next.ends_with(".metadata.json"));
+    fn test_build_fallback_metadata_with_schema() {
+        let uuid = Uuid::new_v4();
+        let schema = serde_json::json!({
+            "type": "struct",
+            "schema-id": 0,
+            "fields": [{"id": 1, "name": "id", "type": "long", "required": true}]
+        });
+        let meta = _build_fallback_metadata(uuid, "test", "s3://bucket/test", Some(&schema));
+        assert_eq!(meta["last-column-id"], 1);
     }
 }
