@@ -325,10 +325,11 @@ V4.0 在 `quasar-core` 增加 4 个 Iceberg 专用窄接口。它们与 `Tabular
 **trait 层级设计目标**：
 
 ```
-// 通用层（V3 已有）
+// 通用层（V3 已有，V4.0 C2 保留 CasCommitStore）
 pub trait CatalogStore:
     DomainStore + NamespaceStore + AssetStore + TabularStore
-    + VersionStore + TabularVersionStore + UnifiedQueryStore + Send + Sync {}
+    + VersionStore + TabularVersionStore + CasCommitStore
+    + UnifiedQueryStore + Send + Sync {}
 
 // Iceberg 专用层（V4.0 新增）
 pub trait IcebergCatalogStore:
@@ -337,35 +338,18 @@ pub trait IcebergCatalogStore:
     + IcebergMetricsStore + IcebergPurgeStore {}
 ```
 
-当前 V3 代码中 `CatalogStore` 仍组合了 `CasCommitStore`。V4.0 实现时需要按上述目标拆分：Lance / Unified 继续使用不含 Iceberg CAS 的 `Arc<dyn CatalogStore>`，Iceberg handler 使用 `Arc<dyn IcebergCatalogStore>`。
+**注意**：V4.0 C2 保留了 `CasCommitStore` 在 `CatalogStore` 中。虽然设计目标是将 `CasCommitStore` 移至 Iceberg 专用层，但 Rust 当前 stable 版不支持 `dyn IcebergCatalogStore` → `dyn CatalogStore` 的 trait object upcast，导致 Axum `Router::merge` 无法合并不同 state 类型的子路由。因此 C2 采用保守方案：
 
-**Axum state 类型分离**：
-
-| Adapter | State 类型 |
-|---------|-----------|
-| Iceberg | `Arc<dyn IcebergCatalogStore>` |
-| Lance | `Arc<dyn CatalogStore>` |
-| Unified | `Arc<dyn CatalogStore>` |
-
-server 层组装示例：
-
-```rust
-let store = Arc::new(PgCatalogStore::new(pool));
-let ice_store: Arc<dyn IcebergCatalogStore> = store.clone();
-let common_store: Arc<dyn CatalogStore> = store.clone();
-
-let app = Router::new()
-    .merge(iceberg::routes().with_state(ice_store))
-    .merge(lance::routes().with_state(common_store))
-    .merge(unified::routes().with_state(common_store));
-```
+- `CatalogStore` 继续包含 `CasCommitStore`（所有 handler 继续使用 `Arc<dyn CatalogStore>`）。
+- 4 个新 Iceberg 专用 trait（`IcebergStagingStore` 等）独立存在，由 `PgCatalogStore` 实现。
+- `IcebergCatalogStore` marker trait 作为文档和未来 state 拆分的约定。
+- Lance / Unified 通过 `Arc<dyn CatalogStore>` 继续使用通用能力；Iceberg handler 同样使用 `Arc<dyn CatalogStore>`，但后续 C3 handler 实现时可直接调用 `PgCatalogStore` 上新增的 trait 方法（因为具体类型实现了所有 trait）。
 
 **设计理由**：
-1. `CatalogStore` 保持通用语义，不被 Iceberg 特有 trait 污染。
-2. Lance / Unified handler 不依赖它们不需要的能力。
+1. `CatalogStore` 保持通用语义，新增 Iceberg 专用 trait 不污染其接口。
+2. Lance / Unified handler 不依赖它们不需要的能力（即使 `CatalogStore` 仍含 `CasCommitStore`，它们也不调用）。
 3. `PgCatalogStore` 同时实现 `CatalogStore` 和 `IcebergCatalogStore`，内部自由组合实现逻辑。
-4. `CasCommitStore` 进入 Iceberg 专用层，因为它直接服务 Iceberg metadata pointer 的 CAS commit，不应继续作为 Lance / Unified state 的必需能力。
-5. staged commit 和 purge catalog-drop 是跨表事务，必须由 Iceberg 专用 store 方法承载，避免 handler 级多调用造成中间状态不可解释。
+4. staged commit 和 purge catalog-drop 是跨表事务，必须由 Iceberg 专用 store 方法承载，避免 handler 级多调用造成中间状态不可解释。
 
 ---
 
@@ -1037,8 +1021,9 @@ metadata file，并打印或断言：
 ### 10.2 C2: 数据模型与 store 增量
 
 - 增加 staged table、scan metrics、purge operation 初始化 SQL。
-- 先完成 `CatalogStore` / `IcebergCatalogStore` 分层调整：`CatalogStore` 不再要求 Iceberg CAS 能力，Iceberg handler 使用 `Arc<dyn IcebergCatalogStore>`。
-- 增加对应 core trait 与 storage 实现，包含 staged commit 和 purge catalog-drop 的事务级方法。
+- 增加 `IcebergStagingStore`、`IcebergRegisterStore`、`IcebergMetricsStore`、`IcebergPurgeStore` 四个 core trait 和 `IcebergCatalogStore` marker trait。
+- 增加对应 storage 实现，包含 staged commit 和 purge catalog-drop 的事务级方法。
+- `CatalogStore` 保留 `CasCommitStore`（不拆分）；Axum state 类型暂不拆分，所有 handler 继续使用 `Arc<dyn CatalogStore>`（Rust trait-object upcast 限制）。
 - staged commit 与 purge catalog-drop 不得先用 handler 多次 store 调用临时拼接。
 - 保持 SQL 集中在 `queries.rs`。
 
