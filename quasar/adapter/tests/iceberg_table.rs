@@ -691,7 +691,7 @@ async fn test_list_tables_pagination() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(&format!(
+                .uri(format!(
                     "/iceberg/v1/default/namespaces/prod/tables?pageSize=2&pageToken={}",
                     token
                 ))
@@ -713,7 +713,7 @@ async fn test_list_tables_pagination() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(&format!(
+                .uri(format!(
                     "/iceberg/v1/default/namespaces/prod/tables?pageSize=2&pageToken={}",
                     token2
                 ))

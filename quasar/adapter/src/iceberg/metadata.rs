@@ -123,7 +123,7 @@ pub fn next_metadata_location(current: &str) -> Result<String, String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -167,7 +167,7 @@ mod tests {
         assert_eq!(json["format-version"], 2);
         assert_eq!(json["location"], location);
         assert_eq!(json["table-uuid"], uuid.to_string());
-        assert!(json["schemas"].as_array().unwrap().len() >= 1);
+        assert!(!json["schemas"].as_array().unwrap().is_empty());
     }
 
     #[test]

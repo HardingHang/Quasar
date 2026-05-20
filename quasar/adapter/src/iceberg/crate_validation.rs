@@ -7,6 +7,7 @@ use serde_json;
 /// Validation 1: V2 format support
 /// Build TableMetadataBuilder with FormatVersion::V2 and verify output.
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod validation_tests {
     use super::*;
 
