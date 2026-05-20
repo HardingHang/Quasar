@@ -461,6 +461,100 @@ pub mod version {
     "#;
 }
 
+/// Queries against `iceberg_staged_tables` (V4.0 C2).
+pub mod iceberg_staged {
+    /// Insert a staged table record. Parameters: $1 domain_name, $2 namespace_name,
+    /// $3 table_name, $4 table_uuid, $5 location, $6 metadata_location,
+    /// $7 metadata_json, $8 properties, $9 expires_at.
+    pub const CREATE: &str = r#"
+        INSERT INTO iceberg_staged_tables
+            (domain_name, namespace_name, table_name, table_uuid, location,
+             metadata_location, metadata_json, properties, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        RETURNING id
+    "#;
+
+    /// Look up a non-expired staged table. Parameters: $1 domain_name,
+    /// $2 namespace_name, $3 table_name.
+    pub const GET: &str = r#"
+        SELECT metadata_json
+        FROM iceberg_staged_tables
+        WHERE domain_name = $1 AND namespace_name = $2 AND table_name = $3
+          AND expires_at > NOW()
+    "#;
+
+    /// Delete a staged table record. Parameters: $1 domain_name,
+    /// $2 namespace_name, $3 table_name.
+    pub const DELETE: &str = r#"
+        DELETE FROM iceberg_staged_tables
+        WHERE domain_name = $1 AND namespace_name = $2 AND table_name = $3
+    "#;
+
+    /// Delete expired staged records for a given (domain, namespace, name).
+    /// Parameters: $1 domain_name, $2 namespace_name, $3 table_name.
+    pub const DELETE_EXPIRED: &str = r#"
+        DELETE FROM iceberg_staged_tables
+        WHERE domain_name = $1 AND namespace_name = $2 AND table_name = $3
+          AND expires_at <= NOW()
+    "#;
+
+    /// Commit staged table: delete staged record and return metadata needed
+    /// for catalog insertion. Parameters: $1 domain_name, $2 namespace_name,
+    /// $3 table_name.
+    pub const DELETE_FOR_COMMIT: &str = r#"
+        DELETE FROM iceberg_staged_tables
+        WHERE domain_name = $1 AND namespace_name = $2 AND table_name = $3
+          AND expires_at > NOW()
+        RETURNING table_uuid, location, metadata_location, metadata_json, properties
+    "#;
+}
+
+/// Queries against `iceberg_scan_metrics_reports` (V4.0 C2).
+pub mod iceberg_metrics {
+    /// Insert a scan metrics report. Parameters: $1 asset_id, $2 domain_name,
+    /// $3 namespace_name, $4 table_name, $5 report, $6 user_agent.
+    pub const CREATE: &str = r#"
+        INSERT INTO iceberg_scan_metrics_reports
+            (asset_id, domain_name, namespace_name, table_name, report, user_agent)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING id
+    "#;
+}
+
+/// Queries against `iceberg_purge_operations` (V4.0 C2).
+pub mod iceberg_purge {
+    /// Insert a purge operation record. Parameters: $1 domain_name,
+    /// $2 namespace_name, $3 table_name, $4 table_location, $5 metadata_location,
+    /// $6 status.
+    pub const CREATE: &str = r#"
+        INSERT INTO iceberg_purge_operations
+            (domain_name, namespace_name, table_name, table_location,
+             metadata_location, status)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING id
+    "#;
+
+    /// Update purge operation status. Parameters: $1 status, $2 error_message,
+    /// $3 completed_at, $4 id.
+    pub const UPDATE_STATUS: &str = r#"
+        UPDATE iceberg_purge_operations
+        SET status = $1, error_message = $2, completed_at = $3
+        WHERE id = $4
+    "#;
+
+    /// Read table location and metadata_location for purge, joining through
+    /// catalog tables. Parameters: $1 domain_name, $2 namespace_name, $3 table_name.
+    pub const GET_TABLE_LOCATION: &str = r#"
+        SELECT ta.location, ta.metadata_location
+        FROM tabular_assets ta
+        JOIN assets a ON ta.asset_id = a.id
+        JOIN namespaces ns ON a.namespace_id = ns.id
+        JOIN domains d ON ns.domain_id = d.id
+        WHERE d.name = $1 AND ns.name = $2 AND a.name = $3
+          AND a.deleted_at IS NULL AND a.asset_type = 'table' AND ta.format = 'iceberg'
+    "#;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -586,6 +680,36 @@ mod tests {
         assert!(
             asset::GET_UNIFIED.contains("LEFT JOIN tabular_assets"),
             "GET_UNIFIED must LEFT JOIN tabular_assets so non-table assets surface as None"
+        );
+    }
+
+    #[test]
+    fn iceberg_staged_constants_are_well_formed() {
+        assert_constant("iceberg_staged::CREATE", iceberg_staged::CREATE);
+        assert_constant("iceberg_staged::GET", iceberg_staged::GET);
+        assert_constant("iceberg_staged::DELETE", iceberg_staged::DELETE);
+        assert_constant(
+            "iceberg_staged::DELETE_EXPIRED",
+            iceberg_staged::DELETE_EXPIRED,
+        );
+        assert_constant(
+            "iceberg_staged::DELETE_FOR_COMMIT",
+            iceberg_staged::DELETE_FOR_COMMIT,
+        );
+    }
+
+    #[test]
+    fn iceberg_metrics_constants_are_well_formed() {
+        assert_constant("iceberg_metrics::CREATE", iceberg_metrics::CREATE);
+    }
+
+    #[test]
+    fn iceberg_purge_constants_are_well_formed() {
+        assert_constant("iceberg_purge::CREATE", iceberg_purge::CREATE);
+        assert_constant("iceberg_purge::UPDATE_STATUS", iceberg_purge::UPDATE_STATUS);
+        assert_constant(
+            "iceberg_purge::GET_TABLE_LOCATION",
+            iceberg_purge::GET_TABLE_LOCATION,
         );
     }
 }

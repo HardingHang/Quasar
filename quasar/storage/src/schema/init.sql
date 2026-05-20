@@ -251,3 +251,69 @@ CREATE TABLE IF NOT EXISTS asset_permissions (
 
 CREATE INDEX IF NOT EXISTS idx_asset_permissions_asset ON asset_permissions(asset_id);
 CREATE INDEX IF NOT EXISTS idx_asset_permissions_subject ON asset_permissions(subject);
+
+-- ----------------------------------------------------------------------------
+-- iceberg_staged_tables (V4.0 C2)
+--
+-- Staged table records for Iceberg staged-create commit flow.
+-- Not linked via FK to domains/namespaces — short-lived weak references.
+-- ----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS iceberg_staged_tables (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    domain_name TEXT NOT NULL,
+    namespace_name TEXT NOT NULL,
+    table_name TEXT NOT NULL,
+    table_uuid UUID NOT NULL,
+    location TEXT NOT NULL,
+    metadata_location TEXT NOT NULL,
+    metadata_json JSONB NOT NULL,
+    properties JSONB NOT NULL DEFAULT '{}'::JSONB,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (domain_name, namespace_name, table_name)
+);
+
+-- ----------------------------------------------------------------------------
+-- iceberg_scan_metrics_reports (V4.0 C2)
+--
+-- Raw scan metrics report JSON from Iceberg clients.
+-- asset_id allows NULL (SET NULL on asset deletion) for post-deletion tracing.
+-- ----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS iceberg_scan_metrics_reports (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    asset_id UUID REFERENCES assets(id) ON DELETE SET NULL,
+    domain_name TEXT NOT NULL,
+    namespace_name TEXT NOT NULL,
+    table_name TEXT NOT NULL,
+    report JSONB NOT NULL,
+    user_agent TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_iceberg_scan_metrics_reports_table_time
+    ON iceberg_scan_metrics_reports(domain_name, namespace_name, table_name, created_at DESC);
+
+-- ----------------------------------------------------------------------------
+-- iceberg_purge_operations (V4.0 C2)
+--
+-- Tracks DROP TABLE PURGE operations for observability and failure recovery.
+-- Status enum: started | catalog_dropped | completed | failed
+-- ----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS iceberg_purge_operations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    domain_name TEXT NOT NULL,
+    namespace_name TEXT NOT NULL,
+    table_name TEXT NOT NULL,
+    table_location TEXT NOT NULL,
+    metadata_location TEXT,
+    status TEXT NOT NULL,
+    error_message TEXT,
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_iceberg_purge_operations_table_time
+    ON iceberg_purge_operations(domain_name, namespace_name, table_name, requested_at DESC);
