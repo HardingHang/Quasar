@@ -1488,3 +1488,135 @@ async fn test_commit_add_partition_spec() {
     // iceberg crate auto-assigns spec-id; may not match the requested value
     assert!(specs[1]["spec-id"].as_i64().is_some());
 }
+
+// ── V4.0 Unsupported Update -> 501 NotImplementedException ─────────────────
+
+async fn assert_unsupported_update_returns_501(body: &str, wire_name: &str) {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let json = body_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_IMPLEMENTED,
+        "expected 501 for {wire_name}, body: {json:?}"
+    );
+    assert_eq!(json["error"]["type"], "NotImplementedException");
+    assert_eq!(json["error"]["code"], 501);
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(wire_name),
+        "expected message to mention '{wire_name}', got: {json:?}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_set_statistics_returns_501() {
+    let body = r#"{
+        "requirements": [],
+        "updates": [{
+            "action": "set-statistics",
+            "snapshot-id": 1,
+            "statistics": {
+                "snapshot-id": 1,
+                "statistics-path": "s3://bucket/stats.puffin",
+                "file-size-in-bytes": 100,
+                "file-footer-size-in-bytes": 10,
+                "blob-metadata": []
+            }
+        }]
+    }"#;
+    assert_unsupported_update_returns_501(body, "set-statistics").await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_remove_statistics_returns_501() {
+    let body = r#"{
+        "requirements": [],
+        "updates": [{"action": "remove-statistics", "snapshot-id": 1}]
+    }"#;
+    assert_unsupported_update_returns_501(body, "remove-statistics").await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_set_partition_statistics_returns_501() {
+    let body = r#"{
+        "requirements": [],
+        "updates": [{
+            "action": "set-partition-statistics",
+            "partition-statistics": {
+                "snapshot-id": 1,
+                "statistics-path": "s3://bucket/pstats",
+                "file-size-in-bytes": 50
+            }
+        }]
+    }"#;
+    assert_unsupported_update_returns_501(body, "set-partition-statistics").await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_remove_partition_statistics_returns_501() {
+    let body = r#"{
+        "requirements": [],
+        "updates": [{"action": "remove-partition-statistics", "snapshot-id": 1}]
+    }"#;
+    assert_unsupported_update_returns_501(body, "remove-partition-statistics").await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_remove_schemas_returns_501() {
+    let body = r#"{
+        "requirements": [],
+        "updates": [{"action": "remove-schemas", "schema-ids": [1]}]
+    }"#;
+    assert_unsupported_update_returns_501(body, "remove-schemas").await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_add_encryption_key_returns_501() {
+    let body = r#"{
+        "requirements": [],
+        "updates": [{
+            "action": "add-encryption-key",
+            "encryption-key": {
+                "key-id": "k1",
+                "encrypted-key-metadata": "AA==",
+                "encrypted-by-id": null,
+                "properties": {}
+            }
+        }]
+    }"#;
+    assert_unsupported_update_returns_501(body, "add-encryption-key").await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_remove_encryption_key_returns_501() {
+    let body = r#"{
+        "requirements": [],
+        "updates": [{"action": "remove-encryption-key", "key-id": "k1"}]
+    }"#;
+    assert_unsupported_update_returns_501(body, "remove-encryption-key").await;
+}

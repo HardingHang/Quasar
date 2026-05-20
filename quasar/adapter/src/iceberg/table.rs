@@ -471,6 +471,14 @@ pub async fn commit_table(
     Json(req): Json<CommitTableRequest>,
 ) -> Result<impl IntoResponse, IcebergError> {
     let metrics = metrics.map(|e| e.0);
+
+    // 0. Reject any V4.0-unsupported official TableUpdate variant before IO.
+    super::metadata::check_supported_updates(&req.updates).map_err(|u| {
+        IcebergError::NotImplementedException {
+            message: format!("update '{}' is not supported in V4.0", u.0),
+        }
+    })?;
+
     // 1. Load the current asset with tabular detail
     let (_asset, tabular) = store
         .get_tabular_asset(&prefix, &ns, "iceberg", &table)

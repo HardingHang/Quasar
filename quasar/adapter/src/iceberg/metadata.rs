@@ -100,6 +100,38 @@ pub fn apply_commit(
     serde_json::to_value(&result.metadata).map_err(|e| format!("serialize: {e}"))
 }
 
+/// Wire name of an Iceberg official `TableUpdate` action that V4.0 explicitly
+/// does not implement. Returned by [`check_supported_updates`] so the handler
+/// can map it to a 501 `NotImplementedException`.
+#[derive(Debug)]
+pub struct UnsupportedUpdate(pub &'static str);
+
+/// Reject the 7 official `TableUpdate` variants V4.0 does not support.
+///
+/// The iceberg crate's `TableUpdate::apply()` will silently accept these (it
+/// dispatches to the corresponding builder method), so we must gate them
+/// explicitly at the adapter layer before any IO. See V4_DESIGN.md §6.2.
+pub fn check_supported_updates(updates: &[iceberg::TableUpdate]) -> Result<(), UnsupportedUpdate> {
+    for u in updates {
+        let name = match u {
+            iceberg::TableUpdate::SetStatistics { .. } => Some("set-statistics"),
+            iceberg::TableUpdate::RemoveStatistics { .. } => Some("remove-statistics"),
+            iceberg::TableUpdate::SetPartitionStatistics { .. } => Some("set-partition-statistics"),
+            iceberg::TableUpdate::RemovePartitionStatistics { .. } => {
+                Some("remove-partition-statistics")
+            }
+            iceberg::TableUpdate::RemoveSchemas { .. } => Some("remove-schemas"),
+            iceberg::TableUpdate::AddEncryptionKey { .. } => Some("add-encryption-key"),
+            iceberg::TableUpdate::RemoveEncryptionKey { .. } => Some("remove-encryption-key"),
+            _ => None,
+        };
+        if let Some(n) = name {
+            return Err(UnsupportedUpdate(n));
+        }
+    }
+    Ok(())
+}
+
 /// Generate the next metadata file location by incrementing the sequence number.
 ///
 /// Expected format: `{...}/metadata/{NNNNN}-{uuid}.metadata.json`
@@ -323,5 +355,50 @@ mod tests {
             iceberg::TableRequirement::NotExist => {}
             other => panic!("expected NotExist, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_check_supported_updates_passes_supported() {
+        let mut props = HashMap::new();
+        props.insert("k".into(), "v".into());
+        let updates = vec![
+            iceberg::TableUpdate::SetProperties { updates: props },
+            iceberg::TableUpdate::SetLocation {
+                location: "s3://bucket/x".into(),
+            },
+        ];
+        assert!(check_supported_updates(&updates).is_ok());
+    }
+
+    #[test]
+    fn test_check_supported_updates_rejects_remove_schemas() {
+        let updates = vec![iceberg::TableUpdate::RemoveSchemas {
+            schema_ids: vec![1],
+        }];
+        let err = check_supported_updates(&updates).unwrap_err();
+        assert_eq!(err.0, "remove-schemas");
+    }
+
+    #[test]
+    fn test_check_supported_updates_rejects_remove_statistics() {
+        let updates = vec![iceberg::TableUpdate::RemoveStatistics { snapshot_id: 1 }];
+        let err = check_supported_updates(&updates).unwrap_err();
+        assert_eq!(err.0, "remove-statistics");
+    }
+
+    #[test]
+    fn test_check_supported_updates_rejects_first_unsupported_in_batch() {
+        // Mix supported and unsupported; expect first unsupported flagged.
+        let updates = vec![
+            iceberg::TableUpdate::SetLocation {
+                location: "s3://x".into(),
+            },
+            iceberg::TableUpdate::RemoveStatistics { snapshot_id: 1 },
+            iceberg::TableUpdate::RemoveSchemas {
+                schema_ids: vec![1],
+            },
+        ];
+        let err = check_supported_updates(&updates).unwrap_err();
+        assert_eq!(err.0, "remove-statistics");
     }
 }
