@@ -411,17 +411,14 @@ pub async fn register_table(
     validate_name(&req.name).map_err(store_error_to_iceberg_table)?;
 
     // 1. Read metadata from object store
-    let metadata_json = if let (Some(ref store_os), Some(ref bucket)) =
-        (&config.object_store, &config.s3_bucket)
-    {
-        let path = s3_url_to_path(&req.metadata_location, bucket).ok_or_else(|| {
-            IcebergError::InternalServerError {
-                message: format!("invalid metadata location: {}", req.metadata_location),
-            }
-        })?;
-        read_json(&**store_os, &path)
-            .await
-            .map_err(|e| match e {
+    let metadata_json =
+        if let (Some(ref store_os), Some(ref bucket)) = (&config.object_store, &config.s3_bucket) {
+            let path = s3_url_to_path(&req.metadata_location, bucket).ok_or_else(|| {
+                IcebergError::InternalServerError {
+                    message: format!("invalid metadata location: {}", req.metadata_location),
+                }
+            })?;
+            read_json(&**store_os, &path).await.map_err(|e| match e {
                 object_store::Error::NotFound { .. } => IcebergError::MetadataNotFoundException {
                     message: format!("metadata not found at {}", req.metadata_location),
                 },
@@ -429,11 +426,11 @@ pub async fn register_table(
                     message: format!("failed to read metadata: {}", e),
                 },
             })?
-    } else {
-        return Err(IcebergError::InternalServerError {
-            message: "object store not configured".to_string(),
-        });
-    };
+        } else {
+            return Err(IcebergError::InternalServerError {
+                message: "object store not configured".to_string(),
+            });
+        };
 
     // 2. Validate metadata format using iceberg crate
     let metadata = super::metadata::parse_metadata(&metadata_json)

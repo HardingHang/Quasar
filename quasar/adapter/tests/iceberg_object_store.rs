@@ -463,10 +463,7 @@ async fn test_register_table_success() {
     });
     let path = object_store::path::Path::from(s3_to_relative(metadata_location));
     mem_store
-        .put(
-            &path,
-            object_store::PutPayload::from(metadata.to_string()),
-        )
+        .put(&path, object_store::PutPayload::from(metadata.to_string()))
         .await
         .unwrap();
 
@@ -613,10 +610,7 @@ async fn test_register_table_already_exists() {
     });
     let path = object_store::path::Path::from(s3_to_relative(metadata_location));
     mem_store
-        .put(
-            &path,
-            object_store::PutPayload::from(metadata.to_string()),
-        )
+        .put(&path, object_store::PutPayload::from(metadata.to_string()))
         .await
         .unwrap();
 

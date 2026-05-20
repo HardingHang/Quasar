@@ -876,7 +876,10 @@ async fn test_staged_create_success() {
 
     assert_eq!(create.status(), StatusCode::OK);
     let json = body_json(create).await;
-    assert!(json["metadata-location"].as_str().unwrap().contains("00001-"));
+    assert!(json["metadata-location"]
+        .as_str()
+        .unwrap()
+        .contains("00001-"));
     assert_eq!(json["metadata"]["format-version"], 2);
 
     // Staged table should NOT appear in list
