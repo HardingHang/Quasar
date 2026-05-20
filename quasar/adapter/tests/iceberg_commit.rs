@@ -1620,3 +1620,169 @@ async fn test_commit_remove_encryption_key_returns_501() {
     }"#;
     assert_unsupported_update_returns_501(body, "remove-encryption-key").await;
 }
+
+// ── V4.0 Requirement coverage (5 of 8 not previously covered) ──────────────
+// uuid + ref-snapshot are tested above. The remaining 5: current-schema-id,
+// default-spec-id, default-sort-order-id, last-assigned-field-id,
+// last-assigned-partition-id — success + mismatch paths each.
+
+async fn create_basic_table(app: &axum::Router) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"name": "users"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+async fn assert_requirement_succeeds(req_json: &str) {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+    create_basic_table(&app).await;
+
+    let body = format!(r#"{{ "requirements": [{req_json}], "updates": [] }}"#);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "expected 200, body: {json:?}");
+}
+
+async fn assert_requirement_fails(req_json: &str, msg_substr_lower: &str) {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+    create_basic_table(&app).await;
+
+    let body = format!(r#"{{ "requirements": [{req_json}], "updates": [] }}"#);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::CONFLICT, "expected 409, body: {json:?}");
+    assert_eq!(json["error"]["type"], "CommitFailedException");
+    let msg = json["error"]["message"].as_str().unwrap().to_lowercase();
+    assert!(
+        msg.contains(msg_substr_lower),
+        "expected message to contain '{msg_substr_lower}', got: {msg}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_assert_current_schema_id_match_success() {
+    assert_requirement_succeeds(r#"{"type": "assert-current-schema-id", "current-schema-id": 0}"#)
+        .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_assert_current_schema_id_mismatch_fails() {
+    assert_requirement_fails(
+        r#"{"type": "assert-current-schema-id", "current-schema-id": 99}"#,
+        "schema",
+    )
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_assert_default_spec_id_match_success() {
+    assert_requirement_succeeds(r#"{"type": "assert-default-spec-id", "default-spec-id": 0}"#)
+        .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_assert_default_spec_id_mismatch_fails() {
+    assert_requirement_fails(
+        r#"{"type": "assert-default-spec-id", "default-spec-id": 99}"#,
+        "spec",
+    )
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_assert_default_sort_order_id_match_success() {
+    assert_requirement_succeeds(
+        r#"{"type": "assert-default-sort-order-id", "default-sort-order-id": 0}"#,
+    )
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_assert_default_sort_order_id_mismatch_fails() {
+    assert_requirement_fails(
+        r#"{"type": "assert-default-sort-order-id", "default-sort-order-id": 99}"#,
+        "sort order",
+    )
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_assert_last_assigned_field_id_match_success() {
+    // Default schema has no fields, so last-column-id starts at 0.
+    assert_requirement_succeeds(
+        r#"{"type": "assert-last-assigned-field-id", "last-assigned-field-id": 0}"#,
+    )
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_assert_last_assigned_field_id_mismatch_fails() {
+    assert_requirement_fails(
+        r#"{"type": "assert-last-assigned-field-id", "last-assigned-field-id": 99}"#,
+        "field id",
+    )
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_assert_last_assigned_partition_id_match_success() {
+    // V2 builder sets last-partition-id to 999 by default for empty spec.
+    assert_requirement_succeeds(
+        r#"{"type": "assert-last-assigned-partition-id", "last-assigned-partition-id": 999}"#,
+    )
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_assert_last_assigned_partition_id_mismatch_fails() {
+    assert_requirement_fails(
+        r#"{"type": "assert-last-assigned-partition-id", "last-assigned-partition-id": 12345}"#,
+        "partition id",
+    )
+    .await;
+}
