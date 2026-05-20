@@ -1786,3 +1786,437 @@ async fn test_assert_last_assigned_partition_id_mismatch_fails() {
     )
     .await;
 }
+
+// ── V4.0 Update coverage (variants not yet covered) ────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn test_commit_assign_uuid() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+    create_basic_table(&app).await;
+
+    // assign-uuid is only valid when the table-uuid is unset or matches; iceberg
+    // crate's behavior: AssignUuid::apply sets the uuid only if it differs from
+    // the current. Since create_table sets a UUID, supplying the same UUID is a
+    // no-op; supplying a different one yields an error. We exercise the
+    // accepting branch: assign back the same uuid (read from the created table).
+    let load = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let load_json = body_json(load).await;
+    let current_uuid = load_json["metadata"]["table-uuid"].as_str().unwrap();
+
+    let body = format!(
+        r#"{{ "requirements": [], "updates": [
+            {{ "action": "assign-uuid", "uuid": "{current_uuid}" }}
+        ] }}"#
+    );
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "assign-uuid no-op, body: {json:?}");
+    assert_eq!(json["metadata"]["table-uuid"], current_uuid);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_upgrade_format_version_v2_noop() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+    create_basic_table(&app).await;
+
+    // Upgrade to v2 when already v2 — accepted as a no-op.
+    let body = r#"{ "requirements": [], "updates": [
+        {"action": "upgrade-format-version", "format-version": 2}
+    ] }"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "expected 200, body: {json:?}");
+    assert_eq!(json["metadata"]["format-version"], 2);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_set_location() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+    create_basic_table(&app).await;
+
+    let body = r#"{ "requirements": [], "updates": [
+        {"action": "set-location", "location": "s3://bucket/new/path"}
+    ] }"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "body: {json:?}");
+    assert_eq!(json["metadata"]["location"], "s3://bucket/new/path");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_remove_snapshots() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+    create_basic_table(&app).await;
+
+    // First commit: add a snapshot.
+    let add_body = r#"{
+        "requirements": [{"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": null}],
+        "updates": [
+            {"action": "add-snapshot", "snapshot": {
+                "snapshot-id": 1, "sequence-number": 1, "timestamp-ms": __TS__,
+                "manifest-list": "s3://b/m1.avro", "summary": {"operation": "append"},
+                "schema-id": 0
+            }},
+            {"action": "set-snapshot-ref", "ref-name": "extra", "snapshot-id": 1, "type": "branch"}
+        ]
+    }"#
+    .replace("__TS__", &now_ms().to_string());
+    let add_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(add_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = add_resp.status();
+    let aj = body_json(add_resp).await;
+    assert_eq!(status, StatusCode::OK, "add-snapshot failed: {aj:?}");
+
+    // Second commit: remove-snapshot-ref then remove-snapshots. The iceberg
+    // crate requires no ref to retain a snapshot before it can be removed.
+    let rm_body = r#"{
+        "requirements": [],
+        "updates": [
+            {"action": "remove-snapshot-ref", "ref-name": "extra"},
+            {"action": "remove-snapshots", "snapshot-ids": [1]}
+        ]
+    }"#;
+    let rm_resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(rm_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = rm_resp.status();
+    let rj = body_json(rm_resp).await;
+    assert_eq!(status, StatusCode::OK, "remove failed: {rj:?}");
+    // After removing the only snapshot, the array may be missing or empty.
+    let snapshots = rj["metadata"]["snapshots"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        snapshots.iter().all(|s| s["snapshot-id"] != 1),
+        "snapshot 1 should be removed, got: {snapshots:?}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_remove_snapshot_ref() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+    create_basic_table(&app).await;
+
+    // Add a snapshot bound to a custom branch.
+    let add_body = r#"{
+        "requirements": [{"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": null}],
+        "updates": [
+            {"action": "add-snapshot", "snapshot": {
+                "snapshot-id": 1, "sequence-number": 1, "timestamp-ms": __TS__,
+                "manifest-list": "s3://b/m1.avro", "summary": {"operation": "append"},
+                "schema-id": 0
+            }},
+            {"action": "set-snapshot-ref", "ref-name": "staging", "snapshot-id": 1, "type": "branch"}
+        ]
+    }"#
+    .replace("__TS__", &now_ms().to_string());
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(add_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let rm_body = r#"{
+        "requirements": [],
+        "updates": [{"action": "remove-snapshot-ref", "ref-name": "staging"}]
+    }"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(rm_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "body: {json:?}");
+    let refs = json["metadata"]["refs"].as_object().unwrap();
+    assert!(!refs.contains_key("staging"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_set_default_spec() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    // Create table with a single string field so add-spec(identity(name)) is valid.
+    let create_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "name": "users",
+                        "schema": {
+                            "type": "struct", "schema-id": 0,
+                            "fields": [{"id": 1, "name": "name", "type": "string", "required": false}]
+                        }
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::OK);
+
+    // add a new partition spec, then set-default-spec to its id.
+    let body = r#"{
+        "requirements": [],
+        "updates": [
+            {"action": "add-spec", "spec": {"spec-id": 1, "fields": [
+                {"name": "name_id", "transform": "identity", "source-id": 1, "field-id": 1000}
+            ]}},
+            {"action": "set-default-spec", "spec-id": -1}
+        ]
+    }"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "body: {json:?}");
+    let new_default = json["metadata"]["default-spec-id"].as_i64().unwrap();
+    assert_ne!(new_default, 0, "default-spec-id should have changed");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_remove_partition_specs() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    // Create table with a column we can partition on.
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "name": "users",
+                        "schema": {
+                            "type": "struct", "schema-id": 0,
+                            "fields": [{"id": 1, "name": "name", "type": "string", "required": false}]
+                        }
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // First commit: add spec 1, do NOT change default → default stays 0.
+    let add_body = r#"{
+        "requirements": [],
+        "updates": [
+            {"action": "add-spec", "spec": {"spec-id": 1, "fields": [
+                {"name": "name_id", "transform": "identity", "source-id": 1, "field-id": 1000}
+            ]}}
+        ]
+    }"#;
+    let r1 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(add_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let s1 = r1.status();
+    let j1 = body_json(r1).await;
+    assert_eq!(s1, StatusCode::OK, "add-spec failed: {j1:?}");
+    let added_id = j1["metadata"]["partition-specs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["spec-id"].as_i64())
+        .find(|&id| id != 0)
+        .expect("expected an added non-default spec id");
+
+    // Second commit: remove the non-default spec.
+    let rm_body = format!(
+        r#"{{ "requirements": [], "updates": [
+            {{"action": "remove-partition-specs", "spec-ids": [{added_id}]}}
+        ] }}"#
+    );
+    let r2 = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(rm_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let s2 = r2.status();
+    let j2 = body_json(r2).await;
+    assert_eq!(s2, StatusCode::OK, "remove failed: {j2:?}");
+    let remaining = j2["metadata"]["partition-specs"].as_array().unwrap();
+    assert!(remaining
+        .iter()
+        .all(|s| s["spec-id"].as_i64() != Some(added_id)));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_add_sort_order_and_set_default() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    // Create table with a sort-eligible column.
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "name": "users",
+                        "schema": {
+                            "type": "struct", "schema-id": 0,
+                            "fields": [{"id": 1, "name": "name", "type": "string", "required": false}]
+                        }
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = r#"{
+        "requirements": [],
+        "updates": [
+            {"action": "add-sort-order", "sort-order": {"order-id": 1, "fields": [
+                {"transform": "identity", "source-id": 1, "direction": "asc", "null-order": "nulls-first"}
+            ]}},
+            {"action": "set-default-sort-order", "sort-order-id": -1}
+        ]
+    }"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "body: {json:?}");
+    let default = json["metadata"]["default-sort-order-id"].as_i64().unwrap();
+    assert_ne!(default, 0, "default-sort-order-id should have changed");
+}
