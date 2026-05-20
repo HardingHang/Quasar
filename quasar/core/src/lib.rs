@@ -17,7 +17,8 @@ pub use models::{
     TabularAsset, TabularAssetVersion,
 };
 pub use store::{
-    AssetStore, CasCommitStore, CatalogStore, DomainPatch, DomainStore, NamespaceStore,
-    TabularStore, TabularVersionStore, UnifiedQueryStore, VersionStore,
+    AssetStore, CasCommitStore, CatalogStore, DomainPatch, DomainStore, IcebergCatalogStore,
+    IcebergMetricsStore, IcebergPurgeStore, IcebergRegisterStore, IcebergStagingStore,
+    NamespaceStore, TabularStore, TabularVersionStore, UnifiedQueryStore, VersionStore,
 };
 pub use validation::validate_name;

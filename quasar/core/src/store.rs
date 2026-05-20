@@ -354,6 +354,144 @@ impl<T> CatalogStore for T where
 {
 }
 
+/// Staged table lifecycle for Iceberg staged-create commit flow.
+#[async_trait]
+#[allow(clippy::too_many_arguments)]
+pub trait IcebergStagingStore: TabularStore {
+    /// Create a staged table record. Before insertion, deletes any expired
+    /// staged record with the same (domain, namespace, name). Returns
+    /// `AlreadyExists` if an active table or non-expired staged record exists.
+    async fn create_staged_table(
+        &self,
+        domain_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+        table_uuid: Uuid,
+        location: &str,
+        metadata_location: &str,
+        metadata_json: serde_json::Value,
+        properties: HashMap<String, String>,
+    ) -> Result<(), StoreError>;
+
+    /// Read a non-expired staged table record.
+    async fn get_staged_table(
+        &self,
+        domain_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+    ) -> Result<Option<serde_json::Value>, StoreError>;
+
+    /// Delete a staged table record (e.g., after successful commit or explicit cancel).
+    async fn delete_staged_table(
+        &self,
+        domain_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+    ) -> Result<(), StoreError>;
+
+    /// Commit a staged table: in a single transaction, verify active table
+    /// does not exist, lock the staged record, insert assets + tabular_assets,
+    /// and delete the staged record. Returns the created (Asset, TabularAsset).
+    #[allow(clippy::too_many_arguments)]
+    async fn commit_staged_table(
+        &self,
+        domain_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+        location: &str,
+        metadata_location: &str,
+        metadata_json: serde_json::Value,
+        properties: HashMap<String, String>,
+    ) -> Result<(Asset, TabularAsset), StoreError>;
+}
+
+/// Register an externally-managed Iceberg table into the catalog.
+#[async_trait]
+pub trait IcebergRegisterStore: TabularStore {
+    /// In a single transaction, insert assets + tabular_assets pointing to
+    /// an external metadata location. Does not write object store.
+    #[allow(clippy::too_many_arguments)]
+    async fn register_iceberg_table(
+        &self,
+        domain_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+        location: &str,
+        metadata_location: &str,
+        metadata_json: serde_json::Value,
+        properties: HashMap<String, String>,
+    ) -> Result<(Asset, TabularAsset), StoreError>;
+}
+
+/// Persist Iceberg scan metrics reports.
+#[async_trait]
+pub trait IcebergMetricsStore: Send + Sync {
+    /// Record a raw scan metrics report JSON. The caller has already verified
+    /// that the table exists and is an Iceberg table.
+    async fn record_scan_metrics_report(
+        &self,
+        asset_id: Option<Uuid>,
+        domain_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+        report: serde_json::Value,
+        user_agent: Option<&str>,
+    ) -> Result<(), StoreError>;
+}
+
+/// Iceberg purge (DROP TABLE PURGE) operation tracking.
+#[async_trait]
+pub trait IcebergPurgeStore: TabularStore {
+    /// In a single transaction: read the table location, create a purge
+    /// operation record with status `catalog_dropped`, delete the catalog
+    /// records (assets + tabular via FK cascade), and return the operation id
+    /// along with the table location and metadata location needed for object
+    /// store cleanup.
+    async fn begin_iceberg_purge_and_drop_catalog(
+        &self,
+        domain_name: &str,
+        namespace_name: &str,
+        table_name: &str,
+    ) -> Result<(Uuid, String, Option<String>), StoreError>;
+
+    /// Update the status of a purge operation.
+    async fn update_purge_operation(
+        &self,
+        operation_id: Uuid,
+        status: &str,
+        error_message: Option<&str>,
+    ) -> Result<(), StoreError>;
+}
+
+/// Iceberg-specific super-trait composing all Iceberg capabilities.
+/// Present as a marker for documentation and future state splitting;
+/// C2 keeps all handlers on `Arc<dyn CatalogStore>` due to Rust trait-object
+/// upcast limitations in Axum's `Router::merge`.
+pub trait IcebergCatalogStore:
+    CatalogStore
+    + CasCommitStore
+    + IcebergStagingStore
+    + IcebergRegisterStore
+    + IcebergMetricsStore
+    + IcebergPurgeStore
+    + Send
+    + Sync
+{
+}
+
+impl<T> IcebergCatalogStore for T where
+    T: CatalogStore
+        + CasCommitStore
+        + IcebergStagingStore
+        + IcebergRegisterStore
+        + IcebergMetricsStore
+        + IcebergPurgeStore
+        + Send
+        + Sync
+        + ?Sized
+{
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,6 +514,22 @@ mod tests {
     {
         fn _assert_catalog_store<S: CatalogStore + ?Sized>() {}
         _assert_catalog_store::<T>();
+    }
+
+    /// Compile-time assertion that the IcebergCatalogStore marker composes
+    /// all Iceberg-specific traits and the underlying CatalogStore.
+    #[allow(dead_code)]
+    fn _iceberg_catalog_store_marker_composes_all<T>()
+    where
+        T: CatalogStore
+            + CasCommitStore
+            + IcebergStagingStore
+            + IcebergRegisterStore
+            + IcebergMetricsStore
+            + IcebergPurgeStore,
+    {
+        fn _assert_iceberg_store<S: IcebergCatalogStore + ?Sized>() {}
+        _assert_iceberg_store::<T>();
     }
 
     #[test]
