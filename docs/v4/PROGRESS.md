@@ -157,23 +157,51 @@
 
 ## C5: purge 与 metrics
 
-**状态**: 待启动
+**状态**: 已完成
 
-### 计划内容
+### 交付内容
 
-- [ ] metrics endpoint `POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics`
-  - 接收并持久化 scan report JSON
-- [ ] purge `DELETE /v1/{prefix}/namespaces/{namespace}/tables/{table}?purgeRequested=true`
-  - 安全边界校验（table location 在 warehouse prefix 下）
-  - 同步删除对象存储 prefix
-  - `begin_iceberg_purge_and_drop_catalog` + `update_purge_operation` 状态流转
-- [ ] 补齐错误映射和脱敏日志
+- [x] metrics endpoint `POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics`
+  - 校验 table 存在且 format 为 iceberg
+  - 接收 scan report JSON（`serde_json::Value`）并持久化到 `iceberg_scan_metrics_reports`
+  - 返回 `204 No Content`
+- [x] purge `DELETE /v1/{prefix}/namespaces/{namespace}/tables/{table}?purgeRequested=true`
+  - 安全边界校验：bucket 匹配、非 bucket root、warehouse prefix 下、metadata_location 同源
+  - 同步删除对象存储 table location prefix 下所有对象
+  - `begin_iceberg_purge_and_drop_catalog`（事务：创建 operation + 删除 catalog）+ `update_purge_operation` 状态流转（completed/failed）
+  - 对象清理失败返回 500，错误响应脱敏
+- [x] 补齐错误映射和脱敏日志
+  - object store 失败映射为 `InternalServerError`，不暴露底层驱动错误
+  - 安全边界校验失败映射为 `BadRequestException`
+- [x] 新增对象存储 helper：`list_prefix`、`delete_objects`、`delete_prefix`（`object_store_util.rs`）
+
+### 测试覆盖
+
+| 测试组 | 测试文件 | 覆盖场景 |
+|--------|----------|----------|
+| purge true | `iceberg_object_store.rs` | 对象删除、catalog 删除、operation 记录 completed |
+| purge false | `iceberg_object_store.rs` | 只删 catalog、对象保留 |
+| purge 安全边界 | `iceberg_object_store.rs` | location 不在 bucket 内 → 400 |
+| metrics 成功 | `iceberg_table.rs` | report 接收、204、数据库记录 |
+| metrics 404 | `iceberg_table.rs` | table 不存在 → 404 |
+
+### 关键改动文件
+
+- `quasar/adapter/src/object_store_util.rs` — `list_prefix`、`delete_objects`、`delete_prefix`
+- `quasar/adapter/src/iceberg/table.rs` — `drop_table` purge 分支、`report_metrics` handler
+- `quasar/adapter/src/iceberg/mod.rs` — metrics 路由、`supported_endpoints` 同步
+- `quasar/adapter/tests/iceberg_object_store.rs` — purge 集成测试
+- `quasar/adapter/tests/iceberg_table.rs` — metrics 集成测试
 
 ### 关键设计参考
 
 - V4_DESIGN.md §5.14 DROP TABLE（purge）
 - V4_DESIGN.md §5.16 metrics
+- V4_DESIGN.md §7.1 Object store helper 增量
 - V4_DESIGN.md §7.2 Purge 安全边界
+- V4_DESIGN.md §7.3 Purge 执行顺序
+- V4_DESIGN.md §8.2 错误映射
+- V4_DESIGN.md §9.1 测试策略
 
 ---
 
