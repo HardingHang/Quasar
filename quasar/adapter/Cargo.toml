@@ -21,6 +21,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 object_store = { workspace = true }
 strum = { workspace = true }
+futures-util = { version = "0.3", default-features = false }
 iceberg = { workspace = true }
 
 [dev-dependencies]

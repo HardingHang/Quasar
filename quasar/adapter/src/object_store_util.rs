@@ -2,6 +2,7 @@
 //!
 //! Provides format-agnostic helpers for reading/writing JSON to object storage.
 
+use futures_util::stream::StreamExt;
 use object_store::{path::Path, ObjectStore, PutPayload};
 
 /// Convert an S3 URL (`s3://bucket/path`) to an object store relative `Path`.
@@ -48,4 +49,46 @@ pub async fn read_json(
 /// Check whether an object exists using a HEAD request.
 pub async fn object_exists(store: &dyn ObjectStore, path: &Path) -> bool {
     store.head(path).await.is_ok()
+}
+
+/// List all objects under a prefix.
+///
+/// Returns a vector of `Path` entries. The prefix itself is excluded from the
+/// result if the store happens to return it.
+pub async fn list_prefix(
+    store: &dyn ObjectStore,
+    prefix: &Path,
+) -> Result<Vec<Path>, object_store::Error> {
+    let mut entries = Vec::new();
+    let mut stream = store.list(Some(prefix));
+    while let Some(meta) = stream.next().await {
+        let meta = meta?;
+        // Exclude the prefix directory itself if returned
+        if &meta.location != prefix {
+            entries.push(meta.location);
+        }
+    }
+    Ok(entries)
+}
+
+/// Delete a batch of objects, returning the first error encountered.
+pub async fn delete_objects(
+    store: &dyn ObjectStore,
+    paths: &[Path],
+) -> Result<(), object_store::Error> {
+    for path in paths {
+        store.delete(path).await?;
+    }
+    Ok(())
+}
+
+/// List all objects under a prefix and delete them.
+///
+/// This is a convenience wrapper around `list_prefix` + `delete_objects`.
+pub async fn delete_prefix(
+    store: &dyn ObjectStore,
+    prefix: &Path,
+) -> Result<(), object_store::Error> {
+    let paths = list_prefix(store, prefix).await?;
+    delete_objects(store, &paths).await
 }
