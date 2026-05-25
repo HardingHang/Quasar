@@ -62,6 +62,11 @@ services:
       AWS_REGION: us-east-1
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: "server,minio,localhost,127.0.0.1"
     depends_on:
       server:
         condition: service_started
