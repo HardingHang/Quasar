@@ -782,10 +782,10 @@ async fn test_create_table_with_schema() {
 
 #[tokio::test]
 #[serial]
-async fn test_drop_table_with_purge_requested() {
+async fn test_report_metrics_success() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
-    store
+    let (_asset, _tabular) = store
         .create_tabular_asset(
             "default",
             "prod",
@@ -803,18 +803,42 @@ async fn test_drop_table_with_purge_requested() {
     let response = app
         .oneshot(
             Request::builder()
-                .method("DELETE")
-                .uri("/iceberg/v1/default/namespaces/prod/tables/users?purgeRequested=true")
-                .body(Body::empty())
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users/metrics")
+                .header("Content-Type", "application/json")
+                .header("user-agent", "test-agent/1.0")
+                .body(Body::from(r#"{"scan-metrics": {"rows-scanned": 42}}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_report_metrics_table_not_found() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/nonexistent/metrics")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"scan-metrics": {}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let json = body_json(response).await;
-    assert_eq!(json["error"]["type"], "NotImplementedException");
-    assert_eq!(json["error"]["code"], 501);
+    assert_eq!(json["error"]["type"], "NoSuchTableException");
+    assert_eq!(json["error"]["code"], 404);
 }
 
 #[tokio::test]

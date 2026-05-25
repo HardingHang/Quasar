@@ -10,6 +10,7 @@ use postgresql_embedded::PostgreSQL;
 use quasar_adapter::iceberg;
 use quasar_core::CatalogStore;
 use quasar_core::NamespaceStore;
+use quasar_core::TabularStore;
 use quasar_storage::PgCatalogStore;
 use serde_json::Value;
 use serial_test::serial;
@@ -62,11 +63,26 @@ async fn setup() -> PgCatalogStore {
 
     let client = pool.get().await.expect("failed to get client");
     client
-        .execute("TRUNCATE tabular_asset_versions, asset_versions, tabular_assets, assets, namespaces, asset_permissions CASCADE", &[])
+        .execute("TRUNCATE iceberg_scan_metrics_reports, iceberg_purge_operations, tabular_asset_versions, asset_versions, tabular_assets, assets, namespaces, asset_permissions CASCADE", &[])
         .await
         .expect("failed to truncate tables");
 
     store
+}
+
+async fn setup_with_pool() -> (PgCatalogStore, Pool) {
+    let instance = PgInstance::get().await;
+    let pool = test_pool(&instance.url);
+    let store = PgCatalogStore::new(pool.clone());
+    store.initialize().await.expect("initialize failed");
+
+    let client = pool.get().await.expect("failed to get client");
+    client
+        .execute("TRUNCATE iceberg_scan_metrics_reports, iceberg_purge_operations, tabular_asset_versions, asset_versions, tabular_assets, assets, namespaces, asset_permissions CASCADE", &[])
+        .await
+        .expect("failed to truncate tables");
+
+    (store, pool)
 }
 
 fn test_app_with_store(
@@ -656,4 +672,199 @@ async fn test_register_table_already_exists() {
     let json = body_json(second).await;
     assert_eq!(json["error"]["type"], "TableAlreadyExistsException");
     assert_eq!(json["error"]["code"], 409);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_purge_true_deletes_objects() {
+    let (store, pool) = setup_with_pool().await;
+    create_namespace(&store, "prod").await;
+
+    let mem_store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+    let app = test_app_with_store(store, mem_store.clone());
+
+    // Create table (writes metadata.json to object store)
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"name": "users"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::OK);
+    let create_json = body_json(create).await;
+    let _table_location = create_json["metadata"]["location"].as_str().unwrap();
+
+    // Write additional data files to object store
+    let data_path = object_store::path::Path::from("prod/users/data/file1.parquet");
+    mem_store
+        .put(&data_path, object_store::PutPayload::from("dummy data"))
+        .await
+        .unwrap();
+
+    // Purge the table
+    let purge = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users?purgeRequested=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(purge.status(), StatusCode::NO_CONTENT);
+
+    // Table should no longer exist in catalog
+    let head = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::NOT_FOUND);
+
+    // Object store prefix should be empty
+    let prefix = object_store::path::Path::from("prod/users");
+    let mut stream = mem_store.list(Some(&prefix));
+    let mut count = 0;
+    while let Some(meta) = futures_util::stream::StreamExt::next(&mut stream).await {
+        let meta = meta.unwrap();
+        if meta.location != prefix {
+            count += 1;
+        }
+    }
+    assert_eq!(
+        count, 0,
+        "expected no objects under table prefix after purge"
+    );
+
+    // Verify purge operation record is completed
+    let client = pool.get().await.unwrap();
+    let row = client
+        .query_one(
+            "SELECT status FROM iceberg_purge_operations WHERE table_name = 'users' ORDER BY requested_at DESC LIMIT 1",
+            &[],
+        )
+        .await
+        .unwrap();
+    let status: String = row.get(0);
+    assert_eq!(status, "completed");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_purge_false_only_drops_catalog() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+
+    let mem_store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+    let app = test_app_with_store(store, mem_store.clone());
+
+    // Create table
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"name": "users"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::OK);
+    let create_json = body_json(create).await;
+    let metadata_location = create_json["metadata-location"].as_str().unwrap();
+
+    // Drop without purge
+    let drop = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users?purgeRequested=false")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(drop.status(), StatusCode::NO_CONTENT);
+
+    // Table should no longer exist in catalog
+    let head = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::NOT_FOUND);
+
+    // Metadata file should still exist in object store
+    let path = object_store::path::Path::from(s3_to_relative(metadata_location));
+    let result = mem_store.get(&path).await;
+    assert!(
+        result.is_ok(),
+        "metadata file should still exist after non-purge drop"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_purge_invalid_location_returns_400() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+
+    // Create a table with location outside warehouse prefix
+    store
+        .create_tabular_asset(
+            "default",
+            "prod",
+            "users",
+            "iceberg",
+            "s3://other-bucket/outside/path",
+            None,
+            None,
+            std::collections::HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let mem_store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+    let app = test_app_with_store(store, mem_store);
+
+    // Purge should fail with 400 because location is not in configured bucket
+    let purge = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users?purgeRequested=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(purge.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(purge).await;
+    assert_eq!(json["error"]["type"], "BadRequestException");
+    assert_eq!(json["error"]["code"], 400);
 }
