@@ -1,6 +1,6 @@
 use axum::{
     extract::{Extension, Json, Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use quasar_core::{CatalogStore, MetricsState, StoreError};
@@ -15,7 +15,9 @@ use super::dto::{
 };
 use super::error::{store_error_to_iceberg_table, IcebergError};
 use super::IcebergConfig;
-use crate::object_store_util::{object_exists, read_json, s3_url_to_path, write_json};
+use crate::object_store_util::{
+    delete_prefix, object_exists, read_json, s3_url_to_path, write_json,
+};
 use quasar_core::validate_name;
 
 // ── Object Store Helpers ───────────────────────────────────
@@ -140,6 +142,64 @@ fn _build_fallback_metadata(
         "default-sort-order-id": 0,
         "refs": {}
     })
+}
+
+/// Validate that a table location is safe to purge.
+/// Returns the bucket-relative path on success.
+fn validate_purge_location(
+    table_location: &str,
+    metadata_location: Option<&str>,
+    config: &IcebergConfig,
+) -> Result<object_store::path::Path, IcebergError> {
+    let bucket = config
+        .s3_bucket
+        .as_ref()
+        .ok_or_else(|| IcebergError::InternalServerError {
+            message: "object store bucket not configured".to_string(),
+        })?;
+
+    // 1. table_location must convert to a bucket-relative path
+    let table_path = s3_url_to_path(table_location, bucket).ok_or_else(|| {
+        IcebergError::BadRequestException {
+            message: format!(
+                "table location '{}' is not in configured bucket '{}'",
+                table_location, bucket
+            ),
+        }
+    })?;
+
+    let path_str = table_path.as_ref();
+
+    // 2. path must not be bucket root or empty
+    if path_str.is_empty() {
+        return Err(IcebergError::BadRequestException {
+            message: "cannot purge bucket root".to_string(),
+        });
+    }
+
+    // 3. path must be under the configured warehouse prefix
+    if let Some(ref wp) = config.warehouse_path {
+        let warehouse_prefix = s3_url_to_path(wp, bucket);
+        if let Some(prefix) = warehouse_prefix {
+            let prefix_str = prefix.as_ref().trim_end_matches('/');
+            if !prefix_str.is_empty() && !path_str.starts_with(prefix_str) {
+                return Err(IcebergError::BadRequestException {
+                    message: "table location is outside warehouse prefix".to_string(),
+                });
+            }
+        }
+    }
+
+    // 4. metadata_location must be in the same bucket
+    if let Some(ml) = metadata_location {
+        if s3_url_to_path(ml, bucket).is_none() {
+            return Err(IcebergError::BadRequestException {
+                message: "metadata location is not in configured bucket".to_string(),
+            });
+        }
+    }
+
+    Ok(table_path)
 }
 
 // ── Handlers ───────────────────────────────────────────────
@@ -299,28 +359,122 @@ pub async fn load_table(
 /// DELETE /iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}
 pub async fn drop_table(
     State(store): State<Arc<dyn CatalogStore>>,
+    Extension(config): Extension<IcebergConfig>,
     Path((prefix, ns, table)): Path<(String, String, String)>,
     Query(query): Query<super::dto::DropTableQuery>,
 ) -> Result<impl IntoResponse, IcebergError> {
-    // V3: purgeRequested data cleanup is not implemented; reject if requested
     if query.purge_requested == Some(true) {
-        return Err(IcebergError::NotImplementedException {
-            message: "purgeRequested=true is not supported in V3".to_string(),
-        });
-    }
+        // 1. Verify table exists and get its location.
+        let (_asset, tabular) = store
+            .get_tabular_asset(&prefix, &ns, "iceberg", &table)
+            .await
+            .map_err(store_error_to_iceberg_table)?;
 
-    // V3 endpoint-level isolation: only Iceberg-format assets are
-    // visible to the Iceberg drop endpoint. An asset with the same
-    // name in another format must surface as NoSuchTableException.
-    store
+        // 2. Safety boundary check before any destructive operation.
+        let table_path = validate_purge_location(
+            &tabular.location,
+            tabular.metadata_location.as_deref(),
+            &config,
+        )?;
+
+        // 3. Transaction: create purge operation + drop catalog records.
+        let (operation_id, table_location, _metadata_location) = store
+            .begin_iceberg_purge_and_drop_catalog(&prefix, &ns, &table)
+            .await
+            .map_err(|e| match e {
+                StoreError::NotFound(msg) => IcebergError::NoSuchTableException { message: msg },
+                StoreError::Internal { msg, source } => {
+                    tracing::error!(error = ?source, %msg, "begin purge failed");
+                    IcebergError::InternalServerError {
+                        message: "An internal error occurred".to_string(),
+                    }
+                }
+                other => store_error_to_iceberg_table(other),
+            })?;
+
+        // 4. Delete objects from object store.
+        if let Some(ref obj_store) = config.object_store {
+            match delete_prefix(&**obj_store, &table_path).await {
+                Ok(()) => {
+                    store
+                        .update_purge_operation(operation_id, "completed", None)
+                        .await
+                        .map_err(|e| {
+                            tracing::error!(error = ?e, "failed to mark purge completed");
+                            IcebergError::InternalServerError {
+                                message: "An internal error occurred".to_string(),
+                            }
+                        })?;
+                }
+                Err(e) => {
+                    let sanitized = "object store cleanup failed".to_string();
+                    tracing::error!(
+                        error = %e,
+                        table_location = %table_location,
+                        "object store purge failed"
+                    );
+                    store
+                        .update_purge_operation(operation_id, "failed", Some(&sanitized))
+                        .await
+                        .map_err(|inner| {
+                            tracing::error!(
+                                error = ?inner,
+                                "failed to mark purge failed"
+                            );
+                            IcebergError::InternalServerError {
+                                message: "An internal error occurred".to_string(),
+                            }
+                        })?;
+                    return Err(IcebergError::InternalServerError {
+                        message: "object store cleanup failed".to_string(),
+                    });
+                }
+            }
+        }
+
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        // purgeRequested=false or absent: only drop catalog records.
+        store
+            .get_tabular_asset(&prefix, &ns, "iceberg", &table)
+            .await
+            .map_err(store_error_to_iceberg_table)?;
+
+        store
+            .drop_asset(&prefix, &ns, &table)
+            .await
+            .map_err(store_error_to_iceberg_table)?;
+
+        Ok(StatusCode::NO_CONTENT)
+    }
+}
+
+/// POST /iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}/metrics
+pub async fn report_metrics(
+    State(store): State<Arc<dyn CatalogStore>>,
+    Path((prefix, ns, table)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    Json(report): Json<serde_json::Value>,
+) -> Result<impl IntoResponse, IcebergError> {
+    let (asset, _tabular) = store
         .get_tabular_asset(&prefix, &ns, "iceberg", &table)
         .await
         .map_err(store_error_to_iceberg_table)?;
 
+    let user_agent = headers.get("user-agent").and_then(|v| v.to_str().ok());
+
     store
-        .drop_asset(&prefix, &ns, &table)
+        .record_scan_metrics_report(Some(asset.id), &prefix, &ns, &table, report, user_agent)
         .await
-        .map_err(store_error_to_iceberg_table)?;
+        .map_err(|e| match e {
+            StoreError::Internal { msg, source } => {
+                tracing::error!(error = ?source, %msg, "failed to record scan metrics");
+                IcebergError::InternalServerError {
+                    message: "An internal error occurred".to_string(),
+                }
+            }
+            other => store_error_to_iceberg_table(other),
+        })?;
 
     Ok(StatusCode::NO_CONTENT)
 }

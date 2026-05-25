@@ -57,6 +57,10 @@ pub fn routes() -> Router<Arc<dyn CatalogStore>> {
                 .head(table::table_exists),
         )
         .route(
+            "/iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}/metrics",
+            post(table::report_metrics),
+        )
+        .route(
             "/iceberg/v1/{prefix}/tables/rename",
             post(table::rename_table),
         )
@@ -100,6 +104,7 @@ pub mod config {
             "HEAD /v1/{prefix}/namespaces/{namespace}/tables/{table}".to_string(),
             "DELETE /v1/{prefix}/namespaces/{namespace}/tables/{table}".to_string(),
             "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}".to_string(),
+            "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics".to_string(),
             "POST /v1/{prefix}/tables/rename".to_string(),
         ]
     }
