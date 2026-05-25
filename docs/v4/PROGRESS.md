@@ -11,8 +11,8 @@
 | C2 | 数据模型与 Store 增量 | 已完成 | `46c4389`, `a188961`, `81cd545`, `0577ac4` |
 | C3 | create/register/load/config | 已完成 | `b6ffba3`, `805db10` |
 | C4 | commit requirement/update 完整化 | 已完成 | `9f341fb`, `e108849`, `d2b4ac4`, `1e950ba`, `87b1eb3`, `b24534a` |
-| C5 | purge 与 metrics | 待启动 | — |
-| C6 | Spark E2E 与文档同步 | 待启动 | — |
+| C5 | purge 与 metrics | 已完成 | `99ab371`, `0b1e7e0`, `35a066b`, `24ecf38` |
+| C6 | Spark E2E 与文档同步 | 已完成 | — |
 
 ---
 
@@ -207,18 +207,45 @@
 
 ## C6: Spark E2E 与文档同步
 
-**状态**: 待启动
+**状态**: 已完成
 
-### 计划内容
+### 交付内容
 
-- [ ] Spark E2E 必测清单
+- [x] Spark E2E 必测清单全部通过（38 个检查点，0 失败）
   - `CREATE TABLE`、`CREATE TABLE IF NOT EXISTS`、DataFrame `.writeTo(...).create()`
-  - `INSERT INTO`、`SELECT`
+  - `INSERT INTO`、`SELECT`、DataFrame `.writeTo(...).append()`
   - `DROP TABLE`、`DROP TABLE PURGE`
-  - schema evolution、partition transform、snapshot read、branch/tag、expire_snapshots
-- [ ] 验证 V4.0 写出的 metadata 文件能被 Spark Iceberg 1.10.x 读回
-- [ ] 更新 `docs/TEST_MATRIX.md`
-- [ ] 更新本文档 `PROGRESS.md`
+  - schema evolution（ADD / DROP / RENAME / ALTER COLUMN）
+  - partition transform（identity、days()、bucket()）
+  - snapshot read（time travel）
+  - branch/tag（CREATE / DROP BRANCH / TAG）
+  - `expire_snapshots`
+- [x] 验证 V4.0 写出的 metadata 文件能被 Spark Iceberg 1.10.x 读回
+  - `DESCRIBE EXTENDED` 确认 `format-version=2`、`table-uuid` 存在
+  - `.snapshots`、`.partitions` 系统表可读
+- [x] 修复测试脚本问题
+  - 添加 `spark.sql.catalog.iceberg.prefix=default` 以匹配 Quasar `{prefix}` 路由
+  - 添加 `-Daws.region=us-east-1` 解决 iceberg-aws-bundle SDK v2 region 问题
+  - 修复 step_16 namespace 删除路径缺少 `{prefix}` 的问题
+  - 修复 Step 14 `.metadata` 系统表不存在问题，改用 `DESCRIBE EXTENDED`
+- [x] 更新 `docs/TEST_MATRIX.md`
+- [x] 更新本文档 `PROGRESS.md`
+
+### 关键改动文件
+
+- `quasar/tests/spark_iceberg_integration.py` — C6 E2E 测试脚本增强与修复
+- `quasar/docker-compose.spark.yml` — 代理环境变量配置
+- `docs/v4/PROGRESS.md` — C5/C6 状态同步
+- `docs/TEST_MATRIX.md` — Spark E2E 测试矩阵
+
+### E2E 测试运行方式
+
+```bash
+cd quasar
+docker build -t quasar-server:latest .
+docker compose -f docker-compose.spark.yml up -d
+python tests/spark_iceberg_integration.py
+```
 
 ---
 

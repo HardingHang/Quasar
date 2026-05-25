@@ -382,6 +382,28 @@
 | `test_get_config_with_warehouse` | 集成 | GET /config?warehouse=... | overrides 包含传入的 warehouse 值 |
 | `test_get_config_endpoints_field` | 集成 | GET /config | endpoints 数组包含关键端点 |
 
+### Spark E2E (`tests/spark_iceberg_integration.py`)
+
+| 测试步骤 | 场景 | 验证点 |
+|---------|------|--------|
+| Step 0 | 环境准备 | Quasar server /healthz 就绪，MinIO bucket 创建 |
+| Step 1 | REST 创建 namespace | POST /v1/{prefix}/namespaces 返回 200 |
+| Step 2 | Spark session 构建 | Iceberg 1.10.x runtime 加载成功 |
+| Step 3 | SQL CREATE TABLE | Spark SQL CREATE TABLE 成功，metadata 写入对象存储 |
+| Step 4 | SQL CREATE TABLE IF NOT EXISTS | 幂等创建，同名表不报错 |
+| Step 5 | DataFrame writeTo create | DataFrame.writeTo(...).create() 成功，数据可查询 |
+| Step 6 | SQL INSERT INTO | INSERT INTO 成功，数据持久化 |
+| Step 7 | SQL SELECT | SELECT * 返回正确行数和列名 |
+| Step 8 | DataFrame writeTo append | DataFrame.writeTo(...).append() 成功，数据追加 |
+| Step 9 | Schema evolution | ADD / DROP / RENAME / ALTER COLUMN 全链路 |
+| Step 10 | Partition transform | days() / identity / bucket() 分区变换 |
+| Step 11 | Snapshot read (time travel) | VERSION AS OF snapshot_id 返回历史数据 |
+| Step 12 | Branch/tag | CREATE / DROP BRANCH / TAG，refs 系统表验证 |
+| Step 13 | expire_snapshots | CALL iceberg.system.expire_snapshots 减少 snapshots |
+| Step 14 | Metadata compatibility | DESCRIBE EXTENDED 验证 format-version=2、table-uuid 存在 |
+| Step 15 | DROP TABLE / PURGE | DROP TABLE 删 catalog，DROP TABLE PURGE 同步清理对象存储 |
+| Step 16 | Cleanup | REST DELETE namespace 成功 |
+
 ### 跨格式隔离 (`tests/format_isolation.rs`)
 
 | 测试函数 | 类型 | 场景 | 验证点 |
@@ -519,6 +541,15 @@
 ---
 
 ## 修订记录
+
+### V7.0（2026-05-25）
+
+- 更新：测试统计总览表（140 单元 + 197 集成 = 337 合计）
+- 新增：Spark E2E 测试矩阵（17 个测试步骤，38 个检查点），覆盖 C6 必测清单
+  - CREATE TABLE / CREATE TABLE IF NOT EXISTS / DataFrame writeTo create
+  - INSERT INTO / SELECT / DataFrame writeTo append
+  - Schema evolution、Partition transform、Snapshot read、Branch/tag、expire_snapshots
+  - DROP TABLE / DROP TABLE PURGE、Metadata compatibility
 
 ### V6.0（2026-05-14）
 
