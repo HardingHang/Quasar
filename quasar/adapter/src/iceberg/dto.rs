@@ -25,12 +25,19 @@ pub struct NamespaceResponse {
 }
 
 #[derive(Deserialize, Default)]
+pub struct WarehouseQuery {
+    pub warehouse: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
 pub struct ListNamespacesQuery {
     #[serde(rename = "pageToken")]
     pub page_token: Option<String>,
     #[serde(rename = "pageSize")]
     pub page_size: Option<i32>,
     pub parent: Option<String>,
+    #[serde(default)]
+    pub warehouse: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -60,6 +67,8 @@ pub struct UpdateNamespacePropertiesResponse {
 pub struct DropTableQuery {
     #[serde(rename = "purgeRequested")]
     pub purge_requested: Option<bool>,
+    #[serde(default)]
+    pub warehouse: Option<String>,
 }
 
 // ── Table DTOs ─────────────────────────────────────────────
@@ -97,6 +106,8 @@ pub struct ListTablesQuery {
     pub page_token: Option<String>,
     #[serde(rename = "pageSize")]
     pub page_size: Option<i32>,
+    #[serde(default)]
+    pub warehouse: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -129,6 +140,21 @@ pub struct TableIdentifierInput {
 #[derive(Deserialize)]
 pub struct CommitTableRequest {
     pub identifier: Option<TableIdentifier>,
+    pub requirements: Vec<iceberg::TableRequirement>,
+    pub updates: Vec<iceberg::TableUpdate>,
+}
+
+// ── Transaction DTOs ───────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct CommitTransactionRequest {
+    #[serde(rename = "table-changes")]
+    pub table_changes: Vec<TableCommit>,
+}
+
+#[derive(Deserialize)]
+pub struct TableCommit {
+    pub identifier: TableIdentifier,
     pub requirements: Vec<iceberg::TableRequirement>,
     pub updates: Vec<iceberg::TableUpdate>,
 }

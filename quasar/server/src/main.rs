@@ -83,6 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             warehouse_path: cfg.warehouse_path,
             object_store,
             s3_bucket,
+            default_warehouse: cfg.warehouse,
         };
     }
 

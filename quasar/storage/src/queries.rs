@@ -315,6 +315,27 @@ pub mod asset {
         WHERE id = $2 AND deleted_at IS NULL
     "#;
 
+    /// Transaction CAS update of a tabular asset's `metadata_location`.
+    /// Like [`CAS_UPDATE_METADATA_LOCATION`] but for multi-table transactions.
+    /// Also updates `schema_snapshot` so fallback reads are consistent.
+    /// Parameters: $1 new_location, $2 schema_snapshot (JSONB), $3 domain_name,
+    /// $4 namespace_name, $5 asset_name, $6 expected_location.
+    pub const TX_CAS_UPDATE_METADATA_LOCATION: &str = r#"
+        UPDATE tabular_assets ta
+        SET metadata_location = $1,
+            schema_snapshot = COALESCE($2, ta.schema_snapshot),
+            updated_at = NOW()
+        FROM assets a
+        JOIN namespaces ns ON a.namespace_id = ns.id
+        JOIN domains d ON ns.domain_id = d.id
+        WHERE ta.asset_id = a.id
+          AND d.name = $3 AND ns.name = $4 AND a.name = $5
+          AND ta.format = 'iceberg'
+          AND a.deleted_at IS NULL AND a.asset_type = 'table'
+          AND ta.metadata_location IS NOT DISTINCT FROM $6
+        RETURNING ta.asset_id
+    "#;
+
     /// Unified list of active assets in a namespace. `LEFT JOIN tabular_assets`
     /// lets future non-tabular asset types appear as `(Asset, None)`. Today
     /// every row pairs with a tabular extension. Parameters: $1 domain_name,

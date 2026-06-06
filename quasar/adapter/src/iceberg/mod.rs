@@ -14,12 +14,15 @@ use axum::{
 use quasar_core::CatalogStore;
 use std::sync::Arc;
 
+use crate::iceberg::error::IcebergError;
+
 /// Configuration for Iceberg REST Catalog endpoints.
 #[derive(Clone, Default)]
 pub struct IcebergConfig {
     pub warehouse_path: Option<String>,
     pub object_store: Option<std::sync::Arc<dyn object_store::ObjectStore>>,
     pub s3_bucket: Option<String>,
+    pub default_warehouse: String,
 }
 
 /// Create Iceberg REST Catalog routes mounted at `/iceberg/v1/...`.
@@ -64,6 +67,25 @@ pub fn routes() -> Router<Arc<dyn CatalogStore>> {
             "/iceberg/v1/{prefix}/tables/rename",
             post(table::rename_table),
         )
+        .route(
+            "/iceberg/v1/{prefix}/transactions/commit",
+            post(table::commit_transaction),
+        )
+}
+
+/// Validate warehouse query parameter against the configured default warehouse.
+/// Returns Ok if no warehouse is specified or it matches the default.
+pub fn validate_warehouse(
+    query_warehouse: Option<&str>,
+    config: &IcebergConfig,
+) -> Result<(), IcebergError> {
+    match query_warehouse {
+        None => Ok(()),
+        Some(name) if name == config.default_warehouse => Ok(()),
+        Some(name) => Err(IcebergError::NoSuchWarehouseException {
+            message: format!("Warehouse does not exist: {}", name),
+        }),
+    }
 }
 
 pub mod config {
@@ -78,7 +100,7 @@ pub mod config {
 
     use super::dto::ConfigQuery;
     use super::error::IcebergError;
-    use super::IcebergConfig;
+    use super::{validate_warehouse, IcebergConfig};
 
     #[derive(Serialize)]
     pub struct ConfigResponse {
@@ -106,6 +128,7 @@ pub mod config {
             "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}".to_string(),
             "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics".to_string(),
             "POST /v1/{prefix}/tables/rename".to_string(),
+            "POST /v1/{prefix}/transactions/commit".to_string(),
         ]
     }
 
@@ -113,6 +136,8 @@ pub mod config {
         Extension(config): Extension<IcebergConfig>,
         Query(query): Query<ConfigQuery>,
     ) -> Result<impl IntoResponse, IcebergError> {
+        validate_warehouse(query.warehouse.as_deref(), &config)?;
+
         let mut defaults = HashMap::new();
         let mut overrides = HashMap::new();
 

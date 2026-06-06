@@ -338,6 +338,7 @@ pub trait CatalogStore:
     + IcebergRegisterStore
     + IcebergMetricsStore
     + IcebergPurgeStore
+    + IcebergTransactionStore
     + Send
     + Sync
 {
@@ -356,6 +357,7 @@ impl<T> CatalogStore for T where
         + IcebergRegisterStore
         + IcebergMetricsStore
         + IcebergPurgeStore
+        + IcebergTransactionStore
         + Send
         + Sync
         + ?Sized
@@ -471,6 +473,30 @@ pub trait IcebergPurgeStore: TabularStore {
     ) -> Result<(), StoreError>;
 }
 
+/// Multi-table transaction commit (V4.1).
+/// Executes CAS updates for multiple tables within a single PostgreSQL
+/// transaction, guaranteeing atomicity.
+#[async_trait]
+pub trait IcebergTransactionStore: TabularStore {
+    /// In a single DB transaction, execute CAS metadata_location updates
+    /// for all tables in `table_updates`.
+    ///
+    /// Each tuple is `(domain, namespace, table, expected_location, new_location,
+    /// schema_snapshot)`. Tables must be sorted by `(domain, namespace, table)`
+    /// before calling. If any CAS fails, the entire transaction rolls back.
+    async fn commit_transaction_tables(
+        &self,
+        table_updates: Vec<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<serde_json::Value>,
+        )>,
+    ) -> Result<(), StoreError>;
+}
+
 /// Iceberg-specific super-trait composing all Iceberg capabilities.
 /// Present as a marker for documentation and future state splitting;
 /// C2 keeps all handlers on `Arc<dyn CatalogStore>` due to Rust trait-object
@@ -482,6 +508,7 @@ pub trait IcebergCatalogStore:
     + IcebergRegisterStore
     + IcebergMetricsStore
     + IcebergPurgeStore
+    + IcebergTransactionStore
     + Send
     + Sync
 {
@@ -494,6 +521,7 @@ impl<T> IcebergCatalogStore for T where
         + IcebergRegisterStore
         + IcebergMetricsStore
         + IcebergPurgeStore
+        + IcebergTransactionStore
         + Send
         + Sync
         + ?Sized
@@ -522,7 +550,8 @@ mod tests {
             + IcebergStagingStore
             + IcebergRegisterStore
             + IcebergMetricsStore
-            + IcebergPurgeStore,
+            + IcebergPurgeStore
+            + IcebergTransactionStore,
     {
         fn _assert_catalog_store<S: CatalogStore + ?Sized>() {}
         _assert_catalog_store::<T>();

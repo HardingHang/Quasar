@@ -149,16 +149,10 @@ pub struct UnsupportedUpdate(pub &'static str);
 /// The iceberg crate's `TableUpdate::apply()` will silently accept these (it
 /// dispatches to the corresponding builder method), so we must gate them
 /// explicitly at the adapter layer before any IO. See V4_DESIGN.md §6.2.
+/// Reject encryption key actions that are postponed to a future security release.
 pub fn check_supported_updates(updates: &[iceberg::TableUpdate]) -> Result<(), UnsupportedUpdate> {
     for u in updates {
         let name = match u {
-            iceberg::TableUpdate::SetStatistics { .. } => Some("set-statistics"),
-            iceberg::TableUpdate::RemoveStatistics { .. } => Some("remove-statistics"),
-            iceberg::TableUpdate::SetPartitionStatistics { .. } => Some("set-partition-statistics"),
-            iceberg::TableUpdate::RemovePartitionStatistics { .. } => {
-                Some("remove-partition-statistics")
-            }
-            iceberg::TableUpdate::RemoveSchemas { .. } => Some("remove-schemas"),
             iceberg::TableUpdate::AddEncryptionKey { .. } => Some("add-encryption-key"),
             iceberg::TableUpdate::RemoveEncryptionKey { .. } => Some("remove-encryption-key"),
             _ => None,
@@ -409,19 +403,37 @@ mod tests {
     }
 
     #[test]
-    fn test_check_supported_updates_rejects_remove_schemas() {
+    fn test_check_supported_updates_passes_remove_schemas() {
         let updates = vec![iceberg::TableUpdate::RemoveSchemas {
             schema_ids: vec![1],
         }];
-        let err = check_supported_updates(&updates).unwrap_err();
-        assert_eq!(err.0, "remove-schemas");
+        assert!(check_supported_updates(&updates).is_ok());
     }
 
     #[test]
-    fn test_check_supported_updates_rejects_remove_statistics() {
-        let updates = vec![iceberg::TableUpdate::RemoveStatistics { snapshot_id: 1 }];
-        let err = check_supported_updates(&updates).unwrap_err();
-        assert_eq!(err.0, "remove-statistics");
+    fn test_check_supported_updates_passes_statistics() {
+        let updates = vec![
+            iceberg::TableUpdate::SetStatistics {
+                statistics: iceberg::spec::StatisticsFile {
+                    snapshot_id: 1,
+                    statistics_path: "s3://bucket/stats.json".to_string(),
+                    file_size_in_bytes: 100,
+                    file_footer_size_in_bytes: 10,
+                    key_metadata: None,
+                    blob_metadata: vec![],
+                },
+            },
+            iceberg::TableUpdate::RemoveStatistics { snapshot_id: 1 },
+            iceberg::TableUpdate::SetPartitionStatistics {
+                partition_statistics: iceberg::spec::PartitionStatisticsFile {
+                    snapshot_id: 1,
+                    statistics_path: "s3://bucket/part-stats.json".to_string(),
+                    file_size_in_bytes: 50,
+                },
+            },
+            iceberg::TableUpdate::RemovePartitionStatistics { snapshot_id: 1 },
+        ];
+        assert!(check_supported_updates(&updates).is_ok());
     }
 
     #[test]
@@ -431,12 +443,11 @@ mod tests {
             iceberg::TableUpdate::SetLocation {
                 location: "s3://x".into(),
             },
-            iceberg::TableUpdate::RemoveStatistics { snapshot_id: 1 },
-            iceberg::TableUpdate::RemoveSchemas {
-                schema_ids: vec![1],
+            iceberg::TableUpdate::RemoveEncryptionKey {
+                key_id: "key1".to_string(),
             },
         ];
         let err = check_supported_updates(&updates).unwrap_err();
-        assert_eq!(err.0, "remove-statistics");
+        assert_eq!(err.0, "remove-encryption-key");
     }
 }

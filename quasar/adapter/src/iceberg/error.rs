@@ -39,6 +39,7 @@ pub enum IcebergError {
     TimeoutException { message: String },
     MetadataNotFoundException { message: String },
     NotImplementedException { message: String },
+    NoSuchWarehouseException { message: String },
 }
 
 impl IcebergError {
@@ -84,6 +85,9 @@ impl IcebergError {
             ),
             IcebergError::NotImplementedException { message } => {
                 (message.clone(), "NotImplementedException".to_string(), 501)
+            }
+            IcebergError::NoSuchWarehouseException { message } => {
+                (message.clone(), "NoSuchWarehouseException".to_string(), 404)
             }
         };
 

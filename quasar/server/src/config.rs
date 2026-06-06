@@ -10,6 +10,7 @@ pub struct Config {
     pub s3_region: String,
     pub s3_allow_http: bool,
     pub db_max_connections: usize,
+    pub warehouse: String,
 }
 
 impl Config {
@@ -39,6 +40,7 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(10),
+            warehouse: std::env::var("QUASAR_WAREHOUSE").unwrap_or_else(|_| "default".to_string()),
         }
     }
 }
@@ -62,6 +64,7 @@ mod tests {
             "QUASAR_S3_REGION",
             "QUASAR_S3_ALLOW_HTTP",
             "QUASAR_DB_MAX_CONNECTIONS",
+            "QUASAR_WAREHOUSE",
         ] {
             std::env::remove_var(key);
         }
@@ -83,6 +86,7 @@ mod tests {
         assert_eq!(cfg.s3_region, "us-east-1");
         assert!(!cfg.s3_allow_http);
         assert_eq!(cfg.db_max_connections, 10);
+        assert_eq!(cfg.warehouse, "default");
         assert!(cfg.warehouse_path.is_none());
         assert!(cfg.s3_endpoint.is_none());
         assert!(cfg.s3_access_key.is_none());

@@ -2,9 +2,9 @@ use async_trait::async_trait;
 use deadpool_postgres::Pool;
 use quasar_core::{
     Asset, AssetStore, AssetVersion, CasCommitStore, Domain, DomainPatch, DomainStore,
-    IcebergMetricsStore, IcebergPurgeStore, IcebergRegisterStore, IcebergStagingStore, Namespace,
-    NamespaceStore, PatchField, StoreError, TabularAsset, TabularAssetVersion, TabularStore,
-    TabularVersionStore, UnifiedQueryStore, VersionStore,
+    IcebergMetricsStore, IcebergPurgeStore, IcebergRegisterStore, IcebergStagingStore,
+    IcebergTransactionStore, Namespace, NamespaceStore, PatchField, StoreError, TabularAsset,
+    TabularAssetVersion, TabularStore, TabularVersionStore, UnifiedQueryStore, VersionStore,
 };
 use std::collections::HashMap;
 use tokio_postgres::error::SqlState;
@@ -1224,6 +1224,53 @@ impl CasCommitStore for PgCatalogStore {
             .await
             .map_err(internal_err("transaction commit"))?;
 
+        Ok(())
+    }
+}
+
+// ── IcebergTransactionStore ────────────────────────────────────────────────
+
+#[async_trait]
+impl IcebergTransactionStore for PgCatalogStore {
+    async fn commit_transaction_tables(
+        &self,
+        table_updates: Vec<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<serde_json::Value>,
+        )>,
+    ) -> Result<(), StoreError> {
+        let mut client = self.get_client().await?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(internal_err("transaction start"))?;
+
+        for (domain, namespace, table, expected, new, snapshot) in &table_updates {
+            let cas_row = tx
+                .query_opt(
+                    queries::asset::TX_CAS_UPDATE_METADATA_LOCATION,
+                    &[new, snapshot, domain, namespace, table, expected],
+                )
+                .await
+                .map_err(internal_err("transaction cas update"))?;
+
+            if cas_row.is_none() {
+                return Err(StoreError::Conflict {
+                    msg: format!(
+                        "CAS conflict for table {}.{}: expected {}",
+                        namespace, table, expected
+                    ),
+                });
+            }
+        }
+
+        tx.commit()
+            .await
+            .map_err(internal_err("transaction commit"))?;
         Ok(())
     }
 }

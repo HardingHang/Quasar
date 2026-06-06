@@ -9,9 +9,11 @@ use std::sync::Arc;
 
 use super::dto::{
     CreateNamespaceRequest, ListNamespacesQuery, ListNamespacesResponse, NamespaceResponse,
-    UpdateNamespacePropertiesRequest, UpdateNamespacePropertiesResponse,
+    UpdateNamespacePropertiesRequest, UpdateNamespacePropertiesResponse, WarehouseQuery,
 };
 use super::error::{store_error_to_iceberg_namespace, IcebergError};
+use super::{validate_warehouse, IcebergConfig};
+use axum::extract::Extension;
 use quasar_core::validate_name;
 
 /// GET /iceberg/v1/{prefix}/namespaces
@@ -19,7 +21,10 @@ pub async fn list_namespaces(
     State(store): State<Arc<dyn CatalogStore>>,
     Path(prefix): Path<String>,
     Query(query): Query<ListNamespacesQuery>,
+    Extension(config): Extension<IcebergConfig>,
 ) -> Result<impl IntoResponse, IcebergError> {
+    validate_warehouse(query.warehouse.as_deref(), &config)?;
+
     // V3 does not support nested namespaces; reject parent query parameter
     if query.parent.is_some() {
         return Err(IcebergError::BadRequestException {
@@ -58,8 +63,11 @@ pub async fn list_namespaces(
 pub async fn create_namespace(
     State(store): State<Arc<dyn CatalogStore>>,
     Path(prefix): Path<String>,
+    Query(query): Query<WarehouseQuery>,
+    Extension(config): Extension<IcebergConfig>,
     Json(req): Json<CreateNamespaceRequest>,
 ) -> Result<impl IntoResponse, IcebergError> {
+    validate_warehouse(query.warehouse.as_deref(), &config)?;
     let name = req
         .namespace
         .first()
@@ -87,7 +95,10 @@ pub async fn create_namespace(
 pub async fn get_namespace(
     State(store): State<Arc<dyn CatalogStore>>,
     Path((prefix, ns)): Path<(String, String)>,
+    Query(query): Query<WarehouseQuery>,
+    Extension(config): Extension<IcebergConfig>,
 ) -> Result<impl IntoResponse, IcebergError> {
+    validate_warehouse(query.warehouse.as_deref(), &config)?;
     let namespace = store
         .get_namespace(&prefix, &ns)
         .await
@@ -106,7 +117,10 @@ pub async fn get_namespace(
 pub async fn drop_namespace(
     State(store): State<Arc<dyn CatalogStore>>,
     Path((prefix, ns)): Path<(String, String)>,
+    Query(query): Query<WarehouseQuery>,
+    Extension(config): Extension<IcebergConfig>,
 ) -> Result<impl IntoResponse, IcebergError> {
+    validate_warehouse(query.warehouse.as_deref(), &config)?;
     let assets = store
         .list_tabular_assets(&prefix, &ns, Some("iceberg"), 0, 1000)
         .await
@@ -131,7 +145,10 @@ pub async fn drop_namespace(
 pub async fn namespace_exists(
     State(store): State<Arc<dyn CatalogStore>>,
     Path((prefix, ns)): Path<(String, String)>,
+    Query(query): Query<WarehouseQuery>,
+    Extension(config): Extension<IcebergConfig>,
 ) -> Result<impl IntoResponse, IcebergError> {
+    validate_warehouse(query.warehouse.as_deref(), &config)?;
     let exists = match store.get_namespace(&prefix, &ns).await {
         Ok(_) => true,
         Err(quasar_core::StoreError::NotFound(_)) => false,
@@ -151,8 +168,11 @@ pub async fn namespace_exists(
 pub async fn update_namespace_properties(
     State(store): State<Arc<dyn CatalogStore>>,
     Path((prefix, ns)): Path<(String, String)>,
+    Query(query): Query<WarehouseQuery>,
+    Extension(config): Extension<IcebergConfig>,
     Json(req): Json<UpdateNamespacePropertiesRequest>,
 ) -> Result<impl IntoResponse, IcebergError> {
+    validate_warehouse(query.warehouse.as_deref(), &config)?;
     // Read pre-update namespace to distinguish removed vs missing keys.
     let before = store
         .get_namespace(&prefix, &ns)
