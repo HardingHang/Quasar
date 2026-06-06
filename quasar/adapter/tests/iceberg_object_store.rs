@@ -95,6 +95,7 @@ fn test_app_with_store(
         warehouse_path: Some("s3://warehouse/".to_string()),
         object_store: Some(object_store),
         s3_bucket: Some("warehouse".to_string()),
+        default_warehouse: "default".to_string(),
     };
     iceberg::routes().layer(Extension(config)).with_state(store)
 }

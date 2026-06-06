@@ -75,9 +75,11 @@ async fn setup() -> Arc<PgCatalogStore> {
 fn iceberg_app(store: Arc<PgCatalogStore>) -> axum::Router {
     use axum::Extension;
     let store: Arc<dyn CatalogStore> = store;
-    iceberg::routes()
-        .layer(Extension(iceberg::IcebergConfig::default()))
-        .with_state(store)
+    let config = iceberg::IcebergConfig {
+        default_warehouse: "default".to_string(),
+        ..Default::default()
+    };
+    iceberg::routes().layer(Extension(config)).with_state(store)
 }
 
 fn lance_app(store: Arc<PgCatalogStore>) -> axum::Router {

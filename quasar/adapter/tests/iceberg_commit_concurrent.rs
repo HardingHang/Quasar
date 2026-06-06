@@ -68,9 +68,11 @@ async fn boot_isolated_pg() -> (ContainerAsync<Postgres>, PgCatalogStore) {
 fn make_app(store: PgCatalogStore) -> axum::Router {
     use axum::Extension;
     let store: Arc<dyn CatalogStore> = Arc::new(store);
-    iceberg::routes()
-        .layer(Extension(iceberg::IcebergConfig::default()))
-        .with_state(store)
+    let config = iceberg::IcebergConfig {
+        default_warehouse: "default".to_string(),
+        ..Default::default()
+    };
+    iceberg::routes().layer(Extension(config)).with_state(store)
 }
 
 async fn body_json(response: axum::response::Response) -> Value {
@@ -304,5 +306,135 @@ async fn test_concurrent_commit_leaves_consistent_state() {
     assert!(
         writer == "alpha" || writer == "beta",
         "expected one writer to have won; got {writer:?}"
+    );
+}
+
+/// Two concurrent multi-table transactions updating the same table MUST
+/// result in exactly one 204 and one 409.
+#[tokio::test]
+async fn test_concurrent_transaction_one_wins_one_409() {
+    let (_pg, store) = boot_isolated_pg().await;
+    store
+        .create_namespace("default", "prod", None, HashMap::new())
+        .await
+        .unwrap();
+    let app = make_app(store);
+
+    // Create two tables.
+    let create_users = post_json(
+        app.clone(),
+        "/iceberg/v1/default/namespaces/prod/tables",
+        r#"{"name": "users"}"#.to_string(),
+    )
+    .await;
+    assert_eq!(create_users.status(), StatusCode::OK);
+
+    let create_orders = post_json(
+        app.clone(),
+        "/iceberg/v1/default/namespaces/prod/tables",
+        r#"{"name": "orders"}"#.to_string(),
+    )
+    .await;
+    assert_eq!(create_orders.status(), StatusCode::OK);
+
+    // Two concurrent transactions, each updates both tables.
+    let body_a = r#"{
+        "table-changes": [
+            {
+                "identifier": {"namespace": ["prod"], "name": "users"},
+                "requirements": [],
+                "updates": [{"action": "set-properties", "updates": {"txn": "a"}}]
+            },
+            {
+                "identifier": {"namespace": ["prod"], "name": "orders"},
+                "requirements": [],
+                "updates": [{"action": "set-properties", "updates": {"txn": "a"}}]
+            }
+        ]
+    }"#;
+
+    let body_b = r#"{
+        "table-changes": [
+            {
+                "identifier": {"namespace": ["prod"], "name": "users"},
+                "requirements": [],
+                "updates": [{"action": "set-properties", "updates": {"txn": "b"}}]
+            },
+            {
+                "identifier": {"namespace": ["prod"], "name": "orders"},
+                "requirements": [],
+                "updates": [{"action": "set-properties", "updates": {"txn": "b"}}]
+            }
+        ]
+    }"#;
+
+    let (resp_a, resp_b) = tokio::join!(
+        post_json(
+            app.clone(),
+            "/iceberg/v1/default/transactions/commit",
+            body_a.to_string(),
+        ),
+        post_json(
+            app.clone(),
+            "/iceberg/v1/default/transactions/commit",
+            body_b.to_string(),
+        ),
+    );
+    let status_a = resp_a.status();
+    let status_b = resp_b.status();
+
+    let mut statuses = [status_a, status_b];
+    statuses.sort_by_key(|s| s.as_u16());
+    assert_eq!(
+        statuses,
+        [StatusCode::NO_CONTENT, StatusCode::CONFLICT],
+        "expected exactly one 204 and one 409; got A={status_a}, B={status_b}"
+    );
+
+    let loser_resp = if status_a == StatusCode::CONFLICT {
+        resp_a
+    } else {
+        resp_b
+    };
+    let loser_json = body_json(loser_resp).await;
+    assert_eq!(loser_json["error"]["type"], "CommitFailedException");
+
+    // Verify both tables are in a consistent state (same txn value on both).
+    let load_users = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let load_orders = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/orders")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let json_users = body_json(load_users).await;
+    let json_orders = body_json(load_orders).await;
+    let txn_users = json_users["metadata"]["properties"]["txn"].as_str();
+    let txn_orders = json_orders["metadata"]["properties"]["txn"].as_str();
+
+    // The winner should have updated both tables atomically.
+    assert_eq!(
+        txn_users, txn_orders,
+        "both tables should have the same txn value after atomic commit; users={txn_users:?}, orders={txn_orders:?}"
+    );
+    assert!(
+        txn_users == Some("a") || txn_users == Some("b"),
+        "expected one transaction to have won; got {txn_users:?}"
     );
 }

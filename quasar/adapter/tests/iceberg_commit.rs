@@ -72,9 +72,11 @@ async fn setup() -> PgCatalogStore {
 fn test_app(store: PgCatalogStore) -> axum::Router {
     use axum::Extension;
     let store: Arc<dyn CatalogStore> = Arc::new(store);
-    iceberg::routes()
-        .layer(Extension(iceberg::IcebergConfig::default()))
-        .with_state(store)
+    let config = iceberg::IcebergConfig {
+        default_warehouse: "default".to_string(),
+        ..Default::default()
+    };
+    iceberg::routes().layer(Extension(config)).with_state(store)
 }
 
 async fn body_json(response: axum::response::Response) -> Value {
@@ -1423,9 +1425,36 @@ async fn assert_unsupported_update_returns_501(body: &str, wire_name: &str) {
     );
 }
 
+/// V4.1: Statistics and remove-schemas actions are now supported.
+/// They should NOT return 501; instead they proceed to normal commit logic.
+async fn assert_update_not_rejected_501(body: &str) {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
+                .header("Content-Type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    assert_ne!(
+        status,
+        StatusCode::NOT_IMPLEMENTED,
+        "update should not be rejected with 501 in V4.1"
+    );
+}
+
 #[tokio::test]
 #[serial]
-async fn test_commit_set_statistics_returns_501() {
+async fn test_commit_set_statistics_not_501() {
     let body = r#"{
         "requirements": [],
         "updates": [{
@@ -1440,22 +1469,22 @@ async fn test_commit_set_statistics_returns_501() {
             }
         }]
     }"#;
-    assert_unsupported_update_returns_501(body, "set-statistics").await;
+    assert_update_not_rejected_501(body).await;
 }
 
 #[tokio::test]
 #[serial]
-async fn test_commit_remove_statistics_returns_501() {
+async fn test_commit_remove_statistics_not_501() {
     let body = r#"{
         "requirements": [],
         "updates": [{"action": "remove-statistics", "snapshot-id": 1}]
     }"#;
-    assert_unsupported_update_returns_501(body, "remove-statistics").await;
+    assert_update_not_rejected_501(body).await;
 }
 
 #[tokio::test]
 #[serial]
-async fn test_commit_set_partition_statistics_returns_501() {
+async fn test_commit_set_partition_statistics_not_501() {
     let body = r#"{
         "requirements": [],
         "updates": [{
@@ -1467,27 +1496,27 @@ async fn test_commit_set_partition_statistics_returns_501() {
             }
         }]
     }"#;
-    assert_unsupported_update_returns_501(body, "set-partition-statistics").await;
+    assert_update_not_rejected_501(body).await;
 }
 
 #[tokio::test]
 #[serial]
-async fn test_commit_remove_partition_statistics_returns_501() {
+async fn test_commit_remove_partition_statistics_not_501() {
     let body = r#"{
         "requirements": [],
         "updates": [{"action": "remove-partition-statistics", "snapshot-id": 1}]
     }"#;
-    assert_unsupported_update_returns_501(body, "remove-partition-statistics").await;
+    assert_update_not_rejected_501(body).await;
 }
 
 #[tokio::test]
 #[serial]
-async fn test_commit_remove_schemas_returns_501() {
+async fn test_commit_remove_schemas_not_501() {
     let body = r#"{
         "requirements": [],
         "updates": [{"action": "remove-schemas", "schema-ids": [1]}]
     }"#;
-    assert_unsupported_update_returns_501(body, "remove-schemas").await;
+    assert_update_not_rejected_501(body).await;
 }
 
 #[tokio::test]
@@ -1516,6 +1545,82 @@ async fn test_commit_remove_encryption_key_returns_501() {
         "updates": [{"action": "remove-encryption-key", "key-id": "k1"}]
     }"#;
     assert_unsupported_update_returns_501(body, "remove-encryption-key").await;
+}
+
+// ── V4.1 Warehouse validation ──────────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn test_warehouse_invalid_returns_404() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/config?warehouse=nonexistent")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"]["type"], "NoSuchWarehouseException");
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("nonexistent"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_warehouse_valid_passes() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/config?warehouse=default")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_warehouse_invalid_on_table_endpoint() {
+    let store = setup().await;
+    create_namespace(&store, "prod").await;
+    let app = test_app(store);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/iceberg/v1/default/namespaces/prod/tables/users?warehouse=bad")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"]["type"], "NoSuchWarehouseException");
 }
 
 // ── V4.0 Requirement coverage (5 of 8 not previously covered) ──────────────
@@ -2373,17 +2478,17 @@ async fn test_staged_commit_with_concurrent_active_create_returns_409() {
 
 #[tokio::test]
 #[serial]
-async fn test_staged_commit_rejects_unsupported_update_501() {
+async fn test_staged_commit_rejects_encryption_key_501() {
     let store = setup().await;
     create_namespace(&store, "prod").await;
     let app = test_app(store);
     create_staged(&app).await;
 
-    // Even on the staged path, unsupported updates must surface 501 (check
+    // Even on the staged path, encryption key updates must surface 501 (check
     // runs at handler entry, before the existing/staged split).
     let body = r#"{
         "requirements": [{"type": "assert-create"}],
-        "updates": [{"action": "remove-schemas", "schema-ids": [0]}]
+        "updates": [{"action": "remove-encryption-key", "key-id": "key1"}]
     }"#;
     let resp = app
         .oneshot(
