@@ -13,9 +13,9 @@
 |-------|---------|---------|------|
 | quasar-core | 31 | 0 | 31 |
 | quasar-server | 9 | 19 | 28 |
-| quasar-adapter | 82 | 162 | 244 |
+| quasar-adapter | 98 | 197 | 295 |
 | quasar-storage | 18 | 16 | 34 |
-| **合计** | **140** | **197** | **337** |
+| **合计** | **156** | **232** | **388** |
 
 > 注：统计基于 `cargo test --workspace --all-features --all-targets` 的测试函数数量，不含 doc-tests（当前为 0）。
 
@@ -595,6 +595,15 @@
 - 修正：Lance error `test_store_error_to_lance_version_parses_version_number` / `test_store_error_to_lance_version_non_version_message` → `test_store_error_to_lance_version_already_exists_maps_to_table_exists`
 - 修正：跨格式隔离测试矩阵更新（V3 端点级隔离后行为变更：list/drop/rename isolation 改为 create conflicts / lance drop/rename cannot target iceberg）
 - 修正：运行命令更新为 `cargo test --workspace --all-features --all-targets`
+
+### V4.1（2026-06-06）
+
+- 更新：测试统计总览表（156 单元 + 232 集成 = 388 合计）
+- 新增：Iceberg Transaction 端点测试矩阵（6 个集成测试）
+- 新增：Iceberg Commit 并发测试矩阵（1 个集成测试：并发事务 CAS 冲突）
+- 新增：Warehouse 校验测试矩阵（3 个集成测试）
+- 更新：Iceberg Commit 测试矩阵（statistics 4 项 + remove-schemas 不再 501；encryption key 仍 501）
+- 更新：metadata.rs 单元测试（RemoveSchemas/Statistics 通过测试，EncryptionKey 拒绝测试）
 
 ### V4.0（2026-05-07）
 

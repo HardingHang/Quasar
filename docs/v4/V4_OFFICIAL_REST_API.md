@@ -1,8 +1,8 @@
 # Quasar V4 官方 REST API 能力清单
 
-> **版本**: V1.2
-> **日期**: 2026-05-19
-> **状态**: V4 设计基准
+> **版本**: V1.4
+> **日期**: 2026-06-06
+> **状态**: V4.1 已实现
 >
 > 本文档维护 Quasar V4 需要对齐的官方 REST API 来源、端点能力和分小版本实现范围。
 > `V4_DESIGN.md` 只描述 Quasar 的实现选择；官方端点清单以本文档为准。
@@ -111,7 +111,7 @@ Lance 官方路径不提供独立的 Domain path segment，所有 Namespace/Tabl
 | HEAD | `/v1/{prefix}/namespaces/{namespace}/tables/{table}` | 检查表是否存在 | 维持并补测试 | 持续维护 |
 | POST | `/v1/{prefix}/tables/rename` | 重命名表 | 维持并补测试 | 持续维护 |
 | POST | `/v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics` | 上报表 metrics | 必须实现接收与日志/持久化最小闭环 | V4.3 接入观测指标体系 |
-| GET | `/v1/{prefix}/namespaces/{namespace}/tables/{table}/credentials` | 加载 vended credentials | 不进入 V4.0 必须范围 | V4.1 候选；启用前必须完成鉴权与凭证安全边界 |
+| GET | `/v1/{prefix}/namespaces/{namespace}/tables/{table}/credentials` | 加载 vended credentials | 不进入 V4.0 必须范围 | 推迟到后续安全专项版本；V4.1 不实现 |
 
 ### 4.4 Table Commit Actions / Requirements
 
@@ -152,9 +152,9 @@ Lance 官方路径不提供独立的 Domain path segment，所有 Namespace/Tabl
 - `add-encryption-key`
 - `remove-encryption-key`
 
-V4.0 的最低要求是覆盖 Spark 3.5 + Iceberg 1.10.x E2E 会触发的 requirement/update，并对已知但暂未支持的官方 update 返回清晰错误。V4.1 再补齐 `TableUpdate` 全集。
+V4.0 的最低要求是覆盖 Spark 3.5 + Iceberg 1.10.x E2E 会触发的 requirement/update，并对已知但暂未支持的官方 update 返回清晰错误。V4.1 补齐 `TableUpdate` 全集中的非安全类 actions（statistics 4 项、remove-schemas）；encryption key actions（`add-encryption-key`、`remove-encryption-key`）推迟到后续安全专项版本。
 
-注：1.10.x `BaseUpdate` discriminator 共 25 项；本表列出 23 个 table 适用项；`add-view-version` 与 `set-current-view-version` 是 ViewUpdate，将在 V4.2 view 章节单独登记。statistics（含 partition statistics）、encryption key 等 4 项 update 不在 V4.0 必须实现范围，归入 V4.1 候选。
+注：1.10.x `BaseUpdate` discriminator 共 25 项；本表列出 23 个 table 适用项；`add-view-version` 与 `set-current-view-version` 是 ViewUpdate，将在 V4.2 view 章节单独登记。statistics（含 partition statistics）、remove-schemas 等 5 项 update 不在 V4.0 必须实现范围，归入 V4.1；encryption key 2 项推迟到后续安全专项版本。
 
 ### 4.5 Table Scan Planning
 
@@ -176,7 +176,7 @@ V4.2 设计时必须确认 Spark/Java client 实际请求路径，必要时同�
 
 | 方法 | 官方路径 | 能力 | V4.0 | 后续候选 |
 |------|----------|------|------|----------|
-| POST | `/v1/{prefix}/transactions/commit` | 原子提交多个表更新 | 不实现 | V4.1 候选 |
+| POST | `/v1/{prefix}/transactions/commit` | 原子提交多个表更新 | V4.1 已实现 | 持续维护 |
 
 ### 4.7 View
 
@@ -196,7 +196,7 @@ V4.2 设计时必须确认 Spark/Java client 实际请求路径，必要时同�
 
 | 方法 | 官方路径 | 能力 | V4.0 | 后续候选 |
 |------|----------|------|------|----------|
-| POST | `/v1/aws/s3/sign` | 远程签名 S3 请求 | 不实现 | V4.1 可选；必须与鉴权、vended credentials、storage_config 安全边界一并设计 |
+| POST | `/v1/aws/s3/sign` | 远程签名 S3 请求 | 不实现 | 推迟到后续安全专项版本；V4.1 不实现 |
 
 ---
 
@@ -265,6 +265,18 @@ Lance Table Schema / DML / Query / Index / Tag / Transaction 等 V3 未实现端
 ---
 
 ## 八、修订记录
+
+### V1.4 (2026-06-06)
+
+- §4.6 transactions 端点：V4.0 列从"不实现"更新为"V4.1 已实现"，后续候选列更新为"持续维护"。
+- 同步更新文档头部版本号为 V1.4、日期为 2026-06-06。
+
+### V1.3 (2026-06-05)
+
+- §4.3 credentials 端点后续候选列调整：从"V4.1 候选"改为"推迟到后续安全专项版本；V4.1 不实现"。
+- §4.4 注释调整：明确 statistics 5 项归入 V4.1，encryption key 2 项推迟到安全专项版本。
+- §4.8 S3 Signer 后续候选列调整：从"V4.1 可选"改为"推迟到后续安全专项版本；V4.1 不实现"。
+- 同步更新文档头部版本号为 V1.3、日期为 2026-06-05。
 
 ### V1.2 (2026-05-19)
 

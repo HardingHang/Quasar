@@ -249,6 +249,65 @@ python tests/spark_iceberg_integration.py
 
 ---
 
+## V4.1 进度
+
+| 阶段 | 主题 | 状态 | 对应提交 |
+|------|------|------|----------|
+| C1 | Warehouse 校验层 | 已完成 | — |
+| C2 | TableUpdate 补全 | 已完成 | — |
+| C3 | Multi-table Transactions | 已完成 | — |
+| C4 | 测试与文档 | 已完成 | — |
+
+### C1: Warehouse 校验层
+
+**状态**: 已完成
+
+**交付内容**:
+- [x] `IcebergConfig` 新增 `default_warehouse` 字段
+- [x] 新增 `NoSuchWarehouseException` 错误类型（404）
+- [x] 所有 Iceberg REST handler 添加 `validate_warehouse` 校验
+- [x] `QUASAR_WAREHOUSE` 环境变量支持（默认 `"default"`）
+- [x] 集成测试覆盖 config/namespace/table/transaction 端点的 warehouse 校验
+
+### C2: TableUpdate 补全
+
+**状态**: 已完成
+
+**交付内容**:
+- [x] `check_supported_updates()` 不再拒绝 statistics 4 项和 `remove-schemas`
+- [x] `iceberg` crate 0.9.1 builder 自动处理所有 5 项新 actions
+- [x] 保留 `add-encryption-key`/`remove-encryption-key` 的 501 拒绝
+- [x] 更新 metadata.rs 单元测试
+- [x] 更新 iceberg_commit.rs 集成测试
+
+### C3: Multi-table Transactions
+
+**状态**: 已完成
+
+**交付内容**:
+- [x] 新增 `POST /v1/{prefix}/transactions/commit` 端点
+- [x] 新增 `CommitTransactionRequest`/`TableCommit` DTO
+- [x] 新增 `IcebergTransactionStore` trait
+- [x] Storage 实现 `commit_transaction_tables`：单 PostgreSQL 事务多表 CAS
+- [x] Adapter `commit_transaction` handler：Phase 1 对象存储预写 + Phase 2 DB 原子提交
+- [x] CAS SQL 更新 `schema_snapshot` 保证无对象存储时的 fallback 一致性
+- [x] `/v1/config` `supported_endpoints()` 添加 transactions 端点
+- [x] 按字典序排序保证锁顺序一致（死锁预防）
+
+### C4: 测试与文档
+
+**状态**: 已完成
+
+**交付内容**:
+- [x] 新增 `iceberg_transaction.rs` 集成测试：成功路径/表不存在/空事务/encryption key 501/warehouse 404
+- [x] 新增并发事务 CAS 冲突测试（testcontainers）
+- [x] 新增 warehouse 校验集成测试
+- [x] 更新 `docs/TEST_MATRIX.md`
+- [x] 更新 `docs/v4/PROGRESS.md`
+- [x] 更新 `docs/v4/V4_OFFICIAL_REST_API.md`
+
+---
+
 ## 已知问题 / 技术债
 
 | 问题 | 影响 | 计划修复阶段 |
