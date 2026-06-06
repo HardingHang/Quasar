@@ -2,8 +2,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use axum::body::Body;
-use axum::Extension;
 use axum::http::{Request, StatusCode};
+use axum::Extension;
 use deadpool_postgres::{Pool, Runtime};
 use http_body_util::BodyExt;
 use object_store::memory::InMemory;
