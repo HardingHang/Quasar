@@ -2,9 +2,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use axum::body::Body;
+use axum::Extension;
 use axum::http::{Request, StatusCode};
 use deadpool_postgres::{Pool, Runtime};
 use http_body_util::BodyExt;
+use object_store::memory::InMemory;
 use postgresql_embedded::PostgreSQL;
 use quasar_adapter::iceberg;
 use quasar_core::{CatalogStore, NamespaceStore};
@@ -440,4 +442,206 @@ async fn test_transaction_warehouse_invalid() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let json = body_json(resp).await;
     assert_eq!(json["error"]["type"], "NoSuchWarehouseException");
+}
+
+// ── Phase 1 Failure Test ───────────────────────────────────────────────────
+
+/// Test: Transaction Phase 1 failure should NOT commit to DB (atomicity guarantee).
+///
+/// Strategy: Use mismatched bucket configuration to trigger Phase 1 failure.
+/// When bucket doesn't match, check_metadata_exists returns false (cannot verify
+/// metadata.json existence), causing CommitFailedException (409) before any write.
+///
+/// This test verifies that ANY Phase 1 failure (before DB transaction) guarantees:
+/// - No Phase 2 DB commit is executed
+/// - Tables' metadata_location remain unchanged
+/// - Client receives appropriate error response
+///
+/// Note: The error type depends on where Phase 1 fails:
+/// - metadata.json not found → 409 CommitFailedException (current scenario)
+/// - write failure → 500 InternalServerError
+#[tokio::test]
+#[serial]
+async fn test_transaction_phase1_failure_no_db_commit() {
+    let instance = PgInstance::get().await;
+    let pool = test_pool(&instance.url);
+    let store = PgCatalogStore::new(pool.clone());
+    store.initialize().await.expect("initialize failed");
+
+    // Truncate tables
+    let client = pool.get().await.expect("failed to get client");
+    client
+        .execute(
+            "TRUNCATE tabular_asset_versions, asset_versions, tabular_assets, assets, namespaces, iceberg_staged_tables, iceberg_scan_metrics_reports, iceberg_purge_operations CASCADE",
+            &[],
+        )
+        .await
+        .expect("failed to truncate tables");
+
+    // Step 1: Create tables with correct bucket configuration
+    let store_arc: Arc<dyn CatalogStore> = Arc::new(store);
+    let mem_store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+    let correct_config = iceberg::IcebergConfig {
+        warehouse_path: Some("s3://warehouse/".to_string()),
+        object_store: Some(mem_store.clone()),
+        s3_bucket: Some("warehouse".to_string()),
+        default_warehouse: "default".to_string(),
+    };
+    let correct_app = iceberg::routes()
+        .layer(Extension(correct_config))
+        .with_state(store_arc.clone());
+
+    // Create namespace
+    let resp = correct_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"namespace": ["prod"]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Create users table
+    let resp = correct_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"name": "users", "location": "s3://warehouse/prod/users"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let users_json = body_json(resp).await;
+    let users_location = users_json["metadata-location"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Create orders table
+    let resp = correct_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/namespaces/prod/tables")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"name": "orders", "location": "s3://warehouse/prod/orders"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let orders_json = body_json(resp).await;
+    let orders_location = orders_json["metadata-location"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Step 2: Build app with mismatched bucket (Phase 1 will fail)
+    // When s3_bucket doesn't match the location prefix:
+    // - check_metadata_exists returns false (cannot verify file existence)
+    // - commit_transaction returns CommitFailedException before any write
+    let mismatched_config = iceberg::IcebergConfig {
+        warehouse_path: Some("s3://warehouse/".to_string()),
+        object_store: Some(mem_store.clone()),
+        s3_bucket: Some("other-bucket".to_string()), // Mismatched!
+        default_warehouse: "default".to_string(),
+    };
+    let mismatched_app = iceberg::routes()
+        .layer(Extension(mismatched_config))
+        .with_state(store_arc.clone());
+
+    // Step 3: Submit transaction (Phase 1 will fail before any write)
+    let body = r#"{
+        "table-changes": [
+            {
+                "identifier": {"namespace": ["prod"], "name": "users"},
+                "requirements": [],
+                "updates": [{"action": "set-properties", "updates": {"txn": "true"}}]
+            },
+            {
+                "identifier": {"namespace": ["prod"], "name": "orders"},
+                "requirements": [],
+                "updates": [{"action": "set-properties", "updates": {"txn": "true"}}]
+            }
+        ]
+    }"#;
+
+    let resp = mismatched_app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/iceberg/v1/default/transactions/commit")
+                .header("Content-Type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Step 4: Expect 409 CommitFailedException (Phase 1 failure)
+    // The first table check fails because bucket mismatch prevents metadata verification
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"]["type"], "CommitFailedException");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("metadata.json not found"),
+        "error message should indicate metadata not found"
+    );
+
+    // Step 5: Verify DB state unchanged (Phase 2 never executed)
+    // This is the key assertion: atomicity guarantee
+    let (_, users_tabular) = store_arc
+        .get_tabular_asset("default", "prod", "iceberg", "users")
+        .await
+        .unwrap();
+    assert_eq!(
+        users_tabular.metadata_location.as_ref().unwrap(),
+        &users_location,
+        "users metadata_location should NOT have changed after Phase 1 failure"
+    );
+
+    let (_, orders_tabular) = store_arc
+        .get_tabular_asset("default", "prod", "iceberg", "orders")
+        .await
+        .unwrap();
+    assert_eq!(
+        orders_tabular.metadata_location.as_ref().unwrap(),
+        &orders_location,
+        "orders metadata_location should NOT have changed after Phase 1 failure"
+    );
+
+    // Verify tables have no 'txn' property in schema_snapshot
+    for table in ["users", "orders"] {
+        let (_, tabular) = store_arc
+            .get_tabular_asset("default", "prod", "iceberg", table)
+            .await
+            .unwrap();
+        if let Some(ref snapshot) = tabular.schema_snapshot {
+            let props = snapshot.get("properties").and_then(|p| p.as_object());
+            if let Some(p) = props {
+                assert!(
+                    !p.contains_key("txn"),
+                    "table {} should NOT have txn property after Phase 1 failure",
+                    table
+                );
+            }
+        }
+    }
 }

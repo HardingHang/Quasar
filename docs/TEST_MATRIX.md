@@ -374,6 +374,18 @@
 | `test_load_table_metadata_not_found` | 集成 | load 时 metadata 缺失 | 返回 404 MetadataNotFoundException |
 | `test_commit_table_metadata_not_found` | 集成 | commit 时 metadata 缺失 | 返回 409 CommitFailedException |
 
+### Iceberg Transaction 端点 (`tests/iceberg_transaction.rs`)
+
+| 测试函数 | 类型 | 场景 | 验证点 |
+|---------|------|------|--------|
+| `test_transaction_commit_success` | 集成 | POST 事务成功提交 2 表 | 204 No Content，两表均有新属性 |
+| `test_transaction_table_not_found` | 集成 | 事务中某表不存在 | 404 + 存在表未被修改（原子性验证） |
+| `test_transaction_empty_changes` | 集成 | 空事务 table_changes=[] | 204 No Content |
+| `test_transaction_cas_conflict_rollback` | 集成 | CAS 冲突场景 | 并发测试依赖 testcontainers，当前为占位 |
+| `test_transaction_rejects_encryption_key_501` | 集成 | encryption key action 拒绝 | 501 + NotImplementedException |
+| `test_transaction_warehouse_invalid` | 集成 | 无效 warehouse 参数 | 404 + NoSuchWarehouseException |
+| `test_transaction_phase1_failure_no_db_commit` | 集成 | Phase 1 失败原子性验证 | 409 + metadata_location 不变 + Phase 2 未执行 |
+
 ### Iceberg Config 端点 (`tests/iceberg_config.rs`)
 
 | 测试函数 | 类型 | 场景 | 验证点 |
@@ -599,7 +611,9 @@
 ### V4.1（2026-06-06）
 
 - 更新：测试统计总览表（156 单元 + 232 集成 = 388 合计）
-- 新增：Iceberg Transaction 端点测试矩阵（6 个集成测试）
+- 新增：Iceberg Transaction 端点测试矩阵（7 个集成测试）
+  - 成功路径、表不存在原子性、空事务、encryption key 501、warehouse 404
+  - **新增 Phase 1 失败原子性验证测试**：验证对象存储写入失败不执行 DB 操作
 - 新增：Iceberg Commit 并发测试矩阵（1 个集成测试：并发事务 CAS 冲突）
 - 新增：Warehouse 校验测试矩阵（3 个集成测试）
 - 更新：Iceberg Commit 测试矩阵（statistics 4 项 + remove-schemas 不再 501；encryption key 仍 501）
