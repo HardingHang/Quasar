@@ -1,7 +1,7 @@
 # Quasar V4 需求分析文档
 
-> **版本**: V1.2
-> **日期**: 2026-05-19
+> **版本**: V1.3
+> **日期**: 2026-06-05
 > **状态**: 设计参考（已按评审意见拆分小版本）
 >
 > 本文档承担 V4 阶段的需求澄清与分析职责。
@@ -124,15 +124,17 @@ V4.0 必须以 `V4_OFFICIAL_REST_API.md` 中 Iceberg 1.10.x 为官方基线，�
 候选范围：
 
 - `POST /v1/{prefix}/transactions/commit` 多表原子提交。
-- `GET .../tables/{table}/credentials` vended credentials。
-- 可选接入 S3 Signer API `/v1/aws/s3/sign`，但不得伪装为 REST Catalog endpoint。
-- 补齐 1.10.x `TableUpdate` 全集：statistics、remove schemas、encryption key 等非 V4.0 必需 actions。
-- 多 warehouse 的 `NoSuchWarehouse` 行为与配置模型。
+- `GET .../tables/{table}/credentials` vended credentials — **推迟到后续安全专项版本**。
+- 可选接入 S3 Signer API `/v1/aws/s3/sign` — **推迟到后续安全专项版本**。
+- 补齐 1.10.x `TableUpdate` 全集：statistics、remove schemas、encryption key 等非 V4.0 必需 actions。其中 encryption key actions（`add-encryption-key`、`remove-encryption-key`）**推迟到后续安全专项版本**。
+- 多 warehouse 的 `NoSuchWarehouse` 行为与配置模型。配置模型扩展推迟到 V4.3+ 评估。
 
-准入条件：
+准入条件（V4.1 重新定义）：
 
-- 完成鉴权/凭证安全边界设计。
-- 明确 Domain.storage_config 中 credential/secret 的存储、脱敏、轮换与最小权限策略。
+- V4.0 完成并通过验收。
+- `V4_1_DESIGN.md` 完成，包含事务原子性方案、TableUpdate actions 实现设计、multi-warehouse 参数校验设计。
+
+原准入条件（"完成鉴权/凭证安全边界设计"和"明确 Domain.storage_config 中 credential/secret 的存储、脱敏、轮换与最小权限策略"）推迟到后续独立版本（或 V4.x 安全专项）评估。
 
 ### 5.2 V4.2: Views And Scan Planning
 
@@ -226,6 +228,12 @@ V4.0 完成条件：
 ---
 
 ## 十、修订记录
+
+### V1.3 (2026-06-05)
+
+- §5.1 V4.1 候选范围调整：credentials、S3 Signer、encryption key actions 明确标注"推迟到后续安全专项版本"。
+- §5.1 准入条件重新定义：V4.1 准入条件调整为 V4.0 完成和设计文档评审；原"鉴权/凭证安全边界设计"准入条件推迟到后续独立版本评估。
+- 同步更新文档头部版本号为 V1.3、日期为 2026-06-05。
 
 ### V1.2 (2026-05-19)
 
