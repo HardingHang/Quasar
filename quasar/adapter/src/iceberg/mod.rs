@@ -4,8 +4,11 @@ pub mod dto;
 pub mod error;
 pub mod metadata;
 pub mod namespace;
+pub mod scan_planning;
 pub mod table;
 pub mod table_metadata;
+pub mod view;
+pub mod view_metadata;
 
 use axum::{
     routing::{get, post},
@@ -71,6 +74,45 @@ pub fn routes() -> Router<Arc<dyn CatalogStore>> {
             "/iceberg/v1/{prefix}/transactions/commit",
             post(table::commit_transaction),
         )
+        // View routes (V4.2)
+        .route(
+            "/iceberg/v1/{prefix}/namespaces/{ns}/views",
+            get(view::list_views).post(view::create_view),
+        )
+        .route(
+            "/iceberg/v1/{prefix}/namespaces/{ns}/views/{view}",
+            get(view::load_view)
+                .post(view::replace_view)
+                .delete(view::drop_view)
+                .head(view::view_exists),
+        )
+        .route("/iceberg/v1/{prefix}/views/rename", post(view::rename_view))
+        // Scan Planning routes (V4.2) - OpenAPI primary paths
+        .route(
+            "/iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}/plan",
+            post(scan_planning::submit_plan),
+        )
+        .route(
+            "/iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}/plan/{plan_id}",
+            get(scan_planning::fetch_plan).delete(scan_planning::cancel_plan),
+        )
+        .route(
+            "/iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}/tasks",
+            post(scan_planning::fetch_tasks),
+        )
+        // Scan Planning alias paths (Java ResourcePaths)
+        .route(
+            "/iceberg/v1/{prefix}/tables/{table}/plan",
+            post(scan_planning::submit_plan_alias),
+        )
+        .route(
+            "/iceberg/v1/{prefix}/tables/{table}/plan/{plan_id}",
+            get(scan_planning::fetch_plan_alias).delete(scan_planning::cancel_plan_alias),
+        )
+        .route(
+            "/iceberg/v1/{prefix}/tables/{table}/tasks",
+            post(scan_planning::fetch_tasks_alias),
+        )
 }
 
 /// Validate warehouse query parameter against the configured default warehouse.
@@ -129,6 +171,19 @@ pub mod config {
             "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics".to_string(),
             "POST /v1/{prefix}/tables/rename".to_string(),
             "POST /v1/{prefix}/transactions/commit".to_string(),
+            // V4.2 View endpoints
+            "GET /v1/{prefix}/namespaces/{namespace}/views".to_string(),
+            "POST /v1/{prefix}/namespaces/{namespace}/views".to_string(),
+            "GET /v1/{prefix}/namespaces/{namespace}/views/{view}".to_string(),
+            "HEAD /v1/{prefix}/namespaces/{namespace}/views/{view}".to_string(),
+            "DELETE /v1/{prefix}/namespaces/{namespace}/views/{view}".to_string(),
+            "POST /v1/{prefix}/namespaces/{namespace}/views/{view}".to_string(),
+            "POST /v1/{prefix}/views/rename".to_string(),
+            // V4.2 Scan Planning endpoints
+            "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/plan".to_string(),
+            "GET /v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}".to_string(),
+            "DELETE /v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}".to_string(),
+            "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/tasks".to_string(),
         ]
     }
 

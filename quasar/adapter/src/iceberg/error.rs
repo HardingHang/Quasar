@@ -40,6 +40,11 @@ pub enum IcebergError {
     MetadataNotFoundException { message: String },
     NotImplementedException { message: String },
     NoSuchWarehouseException { message: String },
+    // V4.2 additions
+    NoSuchViewException { message: String },
+    ViewAlreadyExistsException { message: String },
+    AlreadyExistsException { message: String },
+    NoSuchSnapshotException { message: String },
 }
 
 impl IcebergError {
@@ -88,6 +93,20 @@ impl IcebergError {
             }
             IcebergError::NoSuchWarehouseException { message } => {
                 (message.clone(), "NoSuchWarehouseException".to_string(), 404)
+            }
+            IcebergError::NoSuchViewException { message } => {
+                (message.clone(), "NoSuchViewException".to_string(), 404)
+            }
+            IcebergError::ViewAlreadyExistsException { message } => (
+                message.clone(),
+                "ViewAlreadyExistsException".to_string(),
+                409,
+            ),
+            IcebergError::AlreadyExistsException { message } => {
+                (message.clone(), "AlreadyExistsException".to_string(), 409)
+            }
+            IcebergError::NoSuchSnapshotException { message } => {
+                (message.clone(), "NoSuchSnapshotException".to_string(), 404)
             }
         };
 
@@ -144,6 +163,33 @@ pub fn store_error_to_iceberg_table(err: StoreError) -> IcebergError {
         StoreError::AlreadyExists(msg) => {
             IcebergError::TableAlreadyExistsException { message: msg }
         }
+        StoreError::NamespaceNotEmpty { namespace } => IcebergError::CommitFailedException {
+            message: format!("namespace '{}' is not empty", namespace),
+        },
+        StoreError::DomainNotEmpty { domain } => IcebergError::CommitFailedException {
+            message: format!("domain '{}' is not empty", domain),
+        },
+        StoreError::Conflict { msg } => IcebergError::CommitFailedException { message: msg },
+        StoreError::InvalidInput(msg) => IcebergError::BadRequestException { message: msg },
+        StoreError::DatabaseUnavailable { .. } => IcebergError::ServiceUnavailableException {
+            message: "service temporarily unavailable".to_string(),
+        },
+        StoreError::Timeout { operation } => IcebergError::TimeoutException {
+            message: format!("operation '{}' timed out", operation),
+        },
+        StoreError::Internal { msg, source } => {
+            tracing::error!(error = ?source, %msg, "internal store error");
+            IcebergError::InternalServerError {
+                message: "An internal error occurred".to_string(),
+            }
+        }
+    }
+}
+
+pub fn store_error_to_iceberg_view(err: StoreError) -> IcebergError {
+    match err {
+        StoreError::NotFound(msg) => IcebergError::NoSuchViewException { message: msg },
+        StoreError::AlreadyExists(msg) => IcebergError::ViewAlreadyExistsException { message: msg },
         StoreError::NamespaceNotEmpty { namespace } => IcebergError::CommitFailedException {
             message: format!("namespace '{}' is not empty", namespace),
         },
@@ -389,5 +435,75 @@ mod tests {
             }),
             IcebergError::TimeoutException { message } if message.contains("load_table")
         ));
+    }
+
+    #[test]
+    fn test_store_error_to_iceberg_view_mapping() {
+        assert!(matches!(
+            store_error_to_iceberg_view(StoreError::NotFound("bar".into())),
+            IcebergError::NoSuchViewException { message } if message == "bar"
+        ));
+        assert!(matches!(
+            store_error_to_iceberg_view(StoreError::AlreadyExists("bar".into())),
+            IcebergError::ViewAlreadyExistsException { message } if message == "bar"
+        ));
+        assert!(matches!(
+            store_error_to_iceberg_view(StoreError::Conflict {
+                msg: "conflict".into()
+            }),
+            IcebergError::CommitFailedException { message } if message == "conflict"
+        ));
+        assert!(matches!(
+            store_error_to_iceberg_view(StoreError::InvalidInput("bad".into())),
+            IcebergError::BadRequestException { message } if message == "bad"
+        ));
+        assert!(matches!(
+            store_error_to_iceberg_view(StoreError::Internal {
+                msg: "oops".into(),
+                source: None
+            }),
+            IcebergError::InternalServerError { message } if message == "An internal error occurred"
+        ));
+        assert!(matches!(
+            store_error_to_iceberg_view(StoreError::DatabaseUnavailable { source: None }),
+            IcebergError::ServiceUnavailableException { message } if message == "service temporarily unavailable"
+        ));
+        assert!(matches!(
+            store_error_to_iceberg_view(StoreError::Timeout {
+                operation: "load_view".into()
+            }),
+            IcebergError::TimeoutException { message } if message.contains("load_view")
+        ));
+    }
+
+    #[test]
+    fn test_v4_2_error_variants_to_response() {
+        let err = IcebergError::NoSuchViewException {
+            message: "View not found".to_string(),
+        };
+        let resp = err.to_error_response();
+        assert_eq!(resp.error.error_type, "NoSuchViewException");
+        assert_eq!(resp.error.code, 404);
+
+        let err = IcebergError::ViewAlreadyExistsException {
+            message: "View exists".to_string(),
+        };
+        let resp = err.to_error_response();
+        assert_eq!(resp.error.error_type, "ViewAlreadyExistsException");
+        assert_eq!(resp.error.code, 409);
+
+        let err = IcebergError::AlreadyExistsException {
+            message: "Already exists".to_string(),
+        };
+        let resp = err.to_error_response();
+        assert_eq!(resp.error.error_type, "AlreadyExistsException");
+        assert_eq!(resp.error.code, 409);
+
+        let err = IcebergError::NoSuchSnapshotException {
+            message: "Snapshot not found".to_string(),
+        };
+        let resp = err.to_error_response();
+        assert_eq!(resp.error.error_type, "NoSuchSnapshotException");
+        assert_eq!(resp.error.code, 404);
     }
 }

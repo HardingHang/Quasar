@@ -23,6 +23,7 @@ object_store = { workspace = true }
 strum = { workspace = true }
 futures-util = { version = "0.3", default-features = false }
 iceberg = { workspace = true }
+base64 = { version = "0.22", features = ["alloc"] }
 
 [dev-dependencies]
 quasar-storage = { workspace = true }

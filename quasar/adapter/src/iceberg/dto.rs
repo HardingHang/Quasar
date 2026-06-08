@@ -144,6 +144,142 @@ pub struct CommitTableRequest {
     pub updates: Vec<iceberg::TableUpdate>,
 }
 
+// ── View DTOs ──────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct CreateViewRequest {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    pub schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub representations: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sql: Option<String>,
+    #[serde(rename = "default-namespace", skip_serializing_if = "Option::is_none")]
+    pub default_namespace: Option<Vec<String>>,
+    #[serde(rename = "default-catalog", skip_serializing_if = "Option::is_none")]
+    pub default_catalog: Option<String>,
+    #[serde(default)]
+    pub properties: HashMap<String, String>,
+}
+
+#[derive(Deserialize)]
+pub struct CommitViewRequest {
+    pub requirements: Vec<super::view_metadata::ViewRequirement>,
+    pub updates: Vec<iceberg::ViewUpdate>,
+}
+
+#[derive(Serialize)]
+pub struct GetViewResponse {
+    #[serde(rename = "metadata-location")]
+    pub metadata_location: Option<String>,
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Deserialize, Default)]
+pub struct ListViewsQuery {
+    #[serde(rename = "pageToken")]
+    pub page_token: Option<String>,
+    #[serde(rename = "pageSize")]
+    pub page_size: Option<i32>,
+    #[serde(default)]
+    pub warehouse: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ListViewsResponse {
+    pub identifiers: Vec<quasar_core::ViewIdentifier>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "nextPageToken")]
+    pub next_page_token: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ViewIdentifier {
+    pub namespace: Vec<String>,
+    pub name: String,
+}
+
+#[derive(Deserialize)]
+pub struct RenameViewRequest {
+    pub source: ViewIdentifierInput,
+    pub destination: ViewIdentifierInput,
+}
+
+#[derive(Deserialize)]
+pub struct ViewIdentifierInput {
+    pub namespace: Vec<String>,
+    pub name: String,
+}
+
+// ── Scan Planning DTOs ─────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct SubmitPlanRequest {
+    #[serde(rename = "snapshot-id", skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<serde_json::Value>,
+    #[serde(rename = "case-sensitive", default)]
+    pub case_sensitive: Option<bool>,
+    #[serde(rename = "split-size", skip_serializing_if = "Option::is_none")]
+    pub split_size: Option<i64>,
+    #[serde(rename = "num-splits", skip_serializing_if = "Option::is_none")]
+    pub num_splits: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+pub struct SubmitPlanResponse {
+    #[serde(rename = "plan-id")]
+    pub plan_id: String,
+    #[serde(rename = "plan-task")]
+    pub plan_task: String,
+}
+
+#[derive(Serialize)]
+pub struct FetchPlanResponse {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "plan-task")]
+    pub plan_task: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct FetchTasksRequest {
+    #[serde(rename = "plan-task")]
+    pub plan_task: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct DataFile {
+    #[serde(rename = "file-path")]
+    pub file_path: String,
+    #[serde(rename = "file-format")]
+    pub file_format: String,
+    pub partition: serde_json::Value,
+    #[serde(rename = "record-count")]
+    pub record_count: i64,
+    #[serde(rename = "file-size-in-bytes")]
+    pub file_size_in_bytes: i64,
+    #[serde(rename = "column-masks", skip_serializing_if = "Option::is_none")]
+    pub column_masks: Option<serde_json::Value>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct FileScanTask {
+    #[serde(rename = "data-file")]
+    pub data_file: DataFile,
+    #[serde(
+        rename = "delete-files",
+        skip_serializing_if = "Vec::is_empty",
+        default
+    )]
+    pub delete_files: Vec<DataFile>,
+    pub start: i64,
+    pub length: i64,
+}
+
 // ── Transaction DTOs ───────────────────────────────────────
 
 #[derive(Deserialize)]
