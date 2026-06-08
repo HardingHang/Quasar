@@ -13,8 +13,10 @@ V4 采用小版本推进，避免把 Iceberg REST Catalog 全量能力、Spark E
 | 2 | `V4_REQUIREMENTS.md` | 定义 V4.0 必须交付范围、后续候选小版本和验收清单 |
 | 3 | `V4_DESIGN.md` | 承接 V4.0 的具体设计、数据模型、接口、错误映射和测试设计 |
 | 4 | `V4_1_REQUIREMENTS.md` | V4.1 需求澄清与范围定义（排除鉴权/安全/凭证功能） |
-| 5 | `V4_1_DESIGN.md`（后续创建） | 承接 V4.1 的具体设计、数据模型、接口、错误映射和测试设计 |
-| 6 | `PROGRESS.md`（后续创建） | 跟踪 V4 小版本开发进度 |
+| 5 | `V4_1_DESIGN.md` | 承接 V4.1 的具体设计、数据模型、接口、错误映射和测试设计 |
+| 6 | `V4_2_REQUIREMENTS.md` | V4.2 需求澄清与范围定义（Views 和 Scan Planning） |
+| 7 | `V4_2_DESIGN.md` | 承接 V4.2 的具体设计、数据模型、接口、错误映射和测试设计 |
+| 8 | `PROGRESS.md` | 跟踪 V4 小版本开发进度 |
 
 ## 小版本口径
 

@@ -1,8 +1,8 @@
 # Quasar V4 官方 REST API 能力清单
 
-> **版本**: V1.4
-> **日期**: 2026-06-06
-> **状态**: V4.1 已实现
+> **版本**: V1.7
+> **日期**: 2026-06-08
+> **状态**: V4.2 已实现
 >
 > 本文档维护 Quasar V4 需要对齐的官方 REST API 来源、端点能力和分小版本实现范围。
 > `V4_DESIGN.md` 只描述 Quasar 的实现选择；官方端点清单以本文档为准。
@@ -27,7 +27,7 @@ V4 的 Iceberg REST Catalog 协议基线固定为 **Apache Iceberg 1.10.x 发布
 **基线口径**:
 
 - Iceberg REST Catalog 1.10.x OpenAPI 共 30 个 operation（含 deprecated `POST /v1/oauth/tokens`）；排除 OAuth 后为 29 个 operation。
-- 1.10.x `BaseUpdate` discriminator 共 25 项映射：23 个 table 适用 + 2 个 view 适用（`add-view-version`、`set-current-view-version`）；`BaseRequirement` 共 9 项：8 个 table 适用 + 1 个 view 适用（`assert-view-uuid`）。
+- 1.10.x `BaseUpdate` discriminator 共 25 项：6 项 table/view 共用（`assign-uuid`、`upgrade-format-version`、`add-schema`、`set-location`、`set-properties`、`remove-properties`）+ 2 项 view-only（`add-view-version`、`set-current-view-version`）+ 17 项 table-only（其余全部）。`BaseRequirement` 共 9 项：1 项 table/view 共用（`assert-create`）+ 1 项 view-only（`assert-view-uuid`）+ 7 项 table-only（其余全部）。
 - 1.10.x 不包含 `POST /v1/{prefix}/namespaces/{namespace}/register-view`。
 - 1.10.x 不包含 `POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/sign`；S3 signing 是独立 S3 Signer API，官方路径为 `/v1/aws/s3/sign`。
 - OpenAPI 是 REST Catalog 路径权威；Java `ResourcePaths` 常量用于兼容性复核。若二者存在差异，设计文档必须明确主路径与兼容 alias。
@@ -154,16 +154,16 @@ Lance 官方路径不提供独立的 Domain path segment，所有 Namespace/Tabl
 
 V4.0 的最低要求是覆盖 Spark 3.5 + Iceberg 1.10.x E2E 会触发的 requirement/update，并对已知但暂未支持的官方 update 返回清晰错误。V4.1 补齐 `TableUpdate` 全集中的非安全类 actions（statistics 4 项、remove-schemas）；encryption key actions（`add-encryption-key`、`remove-encryption-key`）推迟到后续安全专项版本。
 
-注：1.10.x `BaseUpdate` discriminator 共 25 项；本表列出 23 个 table 适用项；`add-view-version` 与 `set-current-view-version` 是 ViewUpdate，将在 V4.2 view 章节单独登记。statistics（含 partition statistics）、remove-schemas 等 5 项 update 不在 V4.0 必须实现范围，归入 V4.1；encryption key 2 项推迟到后续安全专项版本。
+注：1.10.x `BaseUpdate` discriminator 共 25 项；本表列出 17 个 table-only 项 + 6 个 table/view 共用项（`assign-uuid`、`upgrade-format-version`、`add-schema`、`set-location`、`set-properties`、`remove-properties`）；2 个 view-only 项（`add-view-version`、`set-current-view-version`）将在 V4.2 §4.7 View 端点章节单独登记。statistics（含 partition statistics）、remove-schemas 等 5 项 update 不在 V4.0 必须实现范围，归入 V4.1；encryption key 2 项推迟到后续安全专项版本。
 
 ### 4.5 Table Scan Planning
 
 | 方法 | OpenAPI 官方路径 | 能力 | V4.0 | 后续候选 |
 |------|------------------|------|------|----------|
-| POST | `/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan` | 提交服务端 scan planning | 不实现 | V4.2 候选 |
-| GET | `/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}` | 获取 scan planning 结果 | 不实现 | V4.2 候选 |
-| DELETE | `/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}` | 取消 scan planning | 不实现 | V4.2 候选 |
-| POST | `/v1/{prefix}/namespaces/{namespace}/tables/{table}/tasks` | 拉取 plan-task token 对应的 FileScanTask 列表 | 不实现 | V4.2 候选 |
+| POST | `/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan` | 提交服务端 scan planning | V4.2 已实现 | 持续维护 |
+| GET | `/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}` | 获取 scan planning 结果 | V4.2 已实现 | 持续维护 |
+| DELETE | `/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}` | 取消 scan planning | V4.2 已实现 | 持续维护 |
+| POST | `/v1/{prefix}/namespaces/{namespace}/tables/{table}/tasks` | 拉取 plan-task token 对应的 FileScanTask 列表 | V4.2 已实现 | 持续维护 |
 
 兼容性注意：scan planning 在 OpenAPI 与 Java `ResourcePaths` 常量中存在路径差异。
 
@@ -182,13 +182,13 @@ V4.2 设计时必须确认 Spark/Java client 实际请求路径，必要时同�
 
 | 方法 | 官方路径 | 能力 | V4.0 | 后续候选 |
 |------|----------|------|------|----------|
-| GET | `/v1/{prefix}/namespaces/{namespace}/views` | 列出视图 | 不实现 | V4.2 候选 |
-| POST | `/v1/{prefix}/namespaces/{namespace}/views` | 创建视图 | 不实现 | V4.2 候选 |
-| GET | `/v1/{prefix}/namespaces/{namespace}/views/{view}` | 加载视图 | 不实现 | V4.2 候选 |
-| POST | `/v1/{prefix}/namespaces/{namespace}/views/{view}` | 替换视图 | 不实现 | V4.2 候选 |
-| DELETE | `/v1/{prefix}/namespaces/{namespace}/views/{view}` | 删除视图 | 不实现 | V4.2 候选 |
-| HEAD | `/v1/{prefix}/namespaces/{namespace}/views/{view}` | 检查视图是否存在 | 不实现 | V4.2 候选 |
-| POST | `/v1/{prefix}/views/rename` | 重命名视图 | 不实现 | V4.2 候选 |
+| GET | `/v1/{prefix}/namespaces/{namespace}/views` | 列出视图 | V4.2 已实现 | 持续维护 |
+| POST | `/v1/{prefix}/namespaces/{namespace}/views` | 创建视图 | V4.2 已实现 | 持续维护 |
+| GET | `/v1/{prefix}/namespaces/{namespace}/views/{view}` | 加载视图 | V4.2 已实现 | 持续维护 |
+| POST | `/v1/{prefix}/namespaces/{namespace}/views/{view}` | 替换视图 | V4.2 已实现 | 持续维护 |
+| DELETE | `/v1/{prefix}/namespaces/{namespace}/views/{view}` | 删除视图 | V4.2 已实现 | 持续维护 |
+| HEAD | `/v1/{prefix}/namespaces/{namespace}/views/{view}` | 检查视图是否存在 | V4.2 已实现 | 持续维护 |
+| POST | `/v1/{prefix}/views/rename` | 重命名视图 | V4.2 已实现 | 持续维护 |
 
 说明：`POST /v1/{prefix}/namespaces/{namespace}/register-view` 不属于 Iceberg 1.10.x REST Catalog，若后续升级到 1.11+ 再重新评审。
 
@@ -266,6 +266,25 @@ Lance Table Schema / DML / Query / Index / Tag / Transaction 等 V3 未实现端
 
 ## 八、修订记录
 
+### V1.7 (2026-06-08)
+
+- §4.5 scan planning 端点：V4.0 列从"不实现"更新为"V4.2 已实现"，后续候选列更新为"持续维护"。
+- §4.7 view 端点：V4.0 列从"不实现"更新为"V4.2 已实现"，后续候选列更新为"持续维护"。
+- 文档头部状态从"V4.1 已实现"更新为"V4.2 已实现"。
+- 同步更新文档头部版本号为 V1.7、日期为 2026-06-08。
+
+### V1.6 (2026-06-06)
+
+- §一 基线口径修正：`BaseUpdate` 从"23 table + 2 view"修正为"6 table/view 共用 + 2 view-only + 17 table-only"；`BaseRequirement` 从"8 table + 1 view"修正为"1 table/view 共用 + 1 view-only + 7 table-only"。此修正与 iceberg crate 0.9.1 的 `ViewUpdate` enum（8 个 variant）和 Iceberg 1.10.x OpenAPI 的 `BaseRequirement` discriminator（`assert-create` 对 table/view 共用）一致。
+- §4.4 注释修正：从"本表列出 23 个 table 适用项"改为"本表列出 17 个 table-only 项 + 6 个 table/view 共用项"，明确共用项归属。
+- 同步更新文档头部版本号为 V1.6、日期为 2026-06-06。
+
+### V1.5 (2026-06-06)
+
+- §4.5 scan planning 端点后续候选列调整：从"V4.2 候选"改为"V4.2 需实现"。
+- §4.7 view 端点后续候选列调整：从"V4.2 候选"改为"V4.2 需实现"。
+- 同步更新文档头部版本号为 V1.5、日期为 2026-06-06。
+
 ### V1.4 (2026-06-06)
 
 - §4.6 transactions 端点：V4.0 列从"不实现"更新为"V4.1 已实现"，后续候选列更新为"持续维护"。
@@ -281,7 +300,7 @@ Lance Table Schema / DML / Query / Index / Tag / Transaction 等 V3 未实现端
 ### V1.2 (2026-05-19)
 
 - §4.4 TableUpdate 列表补全两个 1.10.x table 适用 update：`set-partition-statistics`、`remove-partition-statistics`；并在 §4.4 末尾追加 ViewUpdate / V4.1 候选范围说明。
-- §一 基线口径补充 1.10.x `BaseUpdate`（25 项 = 23 table + 2 view）与 `BaseRequirement`（9 项 = 8 table + 1 view）总数声明。
+- §一 基线口径补充 1.10.x `BaseUpdate`（25 项：6 table/view 共用 + 2 view-only + 17 table-only）与 `BaseRequirement`（9 项：1 table/view 共用 + 1 view-only + 7 table-only）总数声明。
 - §4.3 load_table 行措辞收紧为"维持 V3 行为；`If-None-Match` 头部、snapshot 参数化加载视为 V4.3 候选评估"。
 - §4.5 scan planning 路径差异显式列出两条 alias（OpenAPI 路径 vs Java `ResourcePaths` 常量路径），便于 V4.2 设计直接采用。
 

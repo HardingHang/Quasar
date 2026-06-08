@@ -308,8 +308,81 @@ python tests/spark_iceberg_integration.py
 
 ---
 
+---
+
+## V4.2 进度
+
+| 阶段 | 主题 | 状态 | 对应提交 |
+|------|------|------|----------|
+| C1 | 依赖与 View 类型基线 | 已完成 | — |
+| C2 | 数据模型与 Store 增量 | 已完成 | — |
+| C3 | View 生命周期端点 | 已完成 | — |
+| C4 | Scan Planning 端点 | 已完成 | — |
+| C5 | 测试与文档 | 已完成 | — |
+
+### C1: 依赖与 View 类型基线
+
+**状态**: 已完成
+
+**交付内容**:
+- [x] 验证 iceberg crate 0.9.1 View 能力：`ViewMetadata`、`ViewMetadataBuilder`、`ViewUpdate`、`ViewCreation`
+- [x] 自定义 `ViewRequirement` enum（`assert-create`、`assert-view-uuid`）
+- [x] 建立 `view_metadata.rs` wrapper：`build_initial_view_metadata`、`apply_view_commit`、`check_view_requirements`、`next_view_metadata_location`
+- [x] 使用 JSON-based metadata 构建（绕过 `ViewRepresentations` / `ViewVersion` 的 `pub(crate)` 构造函数限制）
+
+### C2: 数据模型与 Store 增量
+
+**状态**: 已完成
+
+**交付内容**:
+- [x] 新增数据库表：`view_assets`（含 `view_uuid`、`location`、`current_version_id`、`metadata_location`、`properties`）
+- [x] 新增 `asset_types` 注册 `'view'`
+- [x] 新增 `ensure_view_asset_type()` 触发器保证 `asset_type='view'`
+- [x] `quasar-core` 新增模型：`ViewAsset`、`View`、`ViewIdentifier`
+- [x] `quasar-core` 新增 `IcebergViewStore` trait（7 个方法）
+- [x] `quasar-core` `CatalogStore` marker trait 扩展包含 `IcebergViewStore`
+- [x] `quasar-storage` `PgCatalogStore` 实现 `IcebergViewStore`
+
+### C3: View 生命周期端点
+
+**状态**: 已完成
+
+**交付内容**:
+- [x] 7 个 View 端点 handler：`list_views`、`create_view`、`load_view`、`replace_view`、`drop_view`、`view_exists`、`rename_view`
+- [x] View create：校验同名 Table 冲突 → `409 AlreadyExistsException`
+- [x] View replace：CAS commit（requirement 校验 + ViewUpdate 应用 + metadata_location 递增）
+- [x] 新增 View 错误类型：`NoSuchViewException`、`ViewAlreadyExistsException`、`AlreadyExistsException`、`NoSuchSnapshotException`
+- [x] 新增 `store_error_to_iceberg_view()` 映射函数
+- [x] `/v1/config` `supported_endpoints()` 同步：新增 7 个 View 端点 + 4 个 Scan Planning 端点
+
+### C4: Scan Planning 端点
+
+**状态**: 已完成
+
+**交付内容**:
+- [x] 4 个 Scan Planning 主路径端点：`submit_plan`、`fetch_plan`、`cancel_plan`、`fetch_tasks`
+- [x] 4 个 alias 端点（Java ResourcePaths 兼容路径）
+- [x] `plan-task` token 自包含编码（JSON 序列化）
+- [x] V4.2 简化实现：不实际调用 iceberg crate scan API，返回空任务列表
+
+### C5: 测试与文档
+
+**状态**: 已完成
+
+**交付内容**:
+- [x] 新增 `iceberg_view.rs` 集成测试：create/load/list/drop/head/rename + 同名 table 冲突 + not found
+- [x] 新增 `iceberg_scan_planning.rs` 集成测试：table not found、invalid token、cancel
+- [x] `cargo test --workspace` 全部通过
+- [x] `cargo clippy --workspace --tests` 无错误
+- [x] `cargo fmt --all` 格式化通过
+- [x] 更新 `docs/v4/PROGRESS.md`
+- [x] 更新 `docs/v4/V4_OFFICIAL_REST_API.md`
+
+---
+
 ## 已知问题 / 技术债
 
 | 问题 | 影响 | 计划修复阶段 |
 |------|------|-------------|
 | `CatalogStore` 包含 Iceberg 专用 trait（trait object upcast 限制妥协） | Lance/Unified 理论上可调用 Iceberg 方法 | V4.1 评估泛型 state 重构 |
+| View `load_view` 在无对象存储配置时依赖 `view_assets.properties` 作为 metadata fallback | 测试环境 workaround；生产环境有对象存储配置不受影响 | V4.3 评估统一 metadata 缓存策略 |
