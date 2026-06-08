@@ -171,6 +171,33 @@ pub struct AssetVersionWithTabular {
     pub tabular_version: TabularAssetVersion,
 }
 
+/// ViewAsset: view extension layer (Iceberg-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewAsset {
+    pub asset_id: Uuid,
+    pub view_uuid: Uuid,
+    pub location: String,
+    pub current_version_id: i32,
+    pub metadata_location: String,
+    pub properties: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// View: Asset + ViewAsset combination.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct View {
+    pub asset: Asset,
+    pub view: ViewAsset,
+}
+
+/// ViewIdentifier: view identifier for REST responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewIdentifier {
+    pub namespace: Vec<String>,
+    pub name: String,
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

@@ -14,12 +14,12 @@ pub use error::StoreError;
 pub use metrics::{Counter, MetricsRegistry, MetricsState};
 pub use models::{
     Asset, AssetVersion, AssetVersionWithTabular, AssetWithTabular, Domain, Namespace, PatchField,
-    TabularAsset, TabularAssetVersion,
+    TabularAsset, TabularAssetVersion, View, ViewAsset, ViewIdentifier,
 };
 pub use store::{
     AssetStore, CasCommitStore, CatalogStore, DomainPatch, DomainStore, IcebergCatalogStore,
     IcebergMetricsStore, IcebergPurgeStore, IcebergRegisterStore, IcebergStagingStore,
-    IcebergTransactionStore, NamespaceStore, TabularStore, TabularVersionStore, UnifiedQueryStore,
-    VersionStore,
+    IcebergTransactionStore, IcebergViewStore, NamespaceStore, TabularStore, TabularVersionStore,
+    UnifiedQueryStore, VersionStore,
 };
 pub use validation::validate_name;

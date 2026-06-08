@@ -317,3 +317,49 @@ CREATE TABLE IF NOT EXISTS iceberg_purge_operations (
 
 CREATE INDEX IF NOT EXISTS idx_iceberg_purge_operations_table_time
     ON iceberg_purge_operations(domain_name, namespace_name, table_name, requested_at DESC);
+
+-- ----------------------------------------------------------------------------
+-- view_assets (V4.2)
+--
+-- View extension table for Iceberg views. No `format` column (views are
+-- Iceberg-only in V4.2).
+-- ----------------------------------------------------------------------------
+
+INSERT INTO asset_types (name, comment)
+VALUES ('view', 'Iceberg View')
+ON CONFLICT DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS view_assets (
+    asset_id UUID PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
+    view_uuid UUID NOT NULL,
+    location TEXT NOT NULL,
+    current_version_id INT NOT NULL,
+    metadata_location TEXT NOT NULL,
+    properties JSONB NOT NULL DEFAULT '{}'::JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_view_assets_uuid ON view_assets(view_uuid);
+
+-- Trigger: ensure view_assets references an asset with asset_type='view'
+CREATE OR REPLACE FUNCTION ensure_view_asset_type()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM assets
+        WHERE id = NEW.asset_id
+          AND asset_type = 'view'
+    ) THEN
+        RAISE EXCEPTION 'view asset % must reference an asset with asset_type=view', NEW.asset_id
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_view_assets_type_check ON view_assets;
+CREATE TRIGGER trg_view_assets_type_check
+BEFORE INSERT OR UPDATE OF asset_id ON view_assets
+FOR EACH ROW
+EXECUTE FUNCTION ensure_view_asset_type();

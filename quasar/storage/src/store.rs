@@ -3,8 +3,9 @@ use deadpool_postgres::Pool;
 use quasar_core::{
     Asset, AssetStore, AssetVersion, CasCommitStore, Domain, DomainPatch, DomainStore,
     IcebergMetricsStore, IcebergPurgeStore, IcebergRegisterStore, IcebergStagingStore,
-    IcebergTransactionStore, Namespace, NamespaceStore, PatchField, StoreError, TabularAsset,
-    TabularAssetVersion, TabularStore, TabularVersionStore, UnifiedQueryStore, VersionStore,
+    IcebergTransactionStore, IcebergViewStore, Namespace, NamespaceStore, PatchField, StoreError,
+    TabularAsset, TabularAssetVersion, TabularStore, TabularVersionStore, UnifiedQueryStore,
+    VersionStore,
 };
 use std::collections::HashMap;
 use tokio_postgres::error::SqlState;
@@ -159,6 +160,41 @@ fn row_to_tabular_version(row: &Row) -> Result<TabularAssetVersion, StoreError> 
         version_id: try_get!(row, "version_id"),
         metadata_location: try_get!(row, "metadata_location"),
         created_at: try_get!(row, "tabular_created_at"),
+    })
+}
+
+fn row_to_view_asset(row: &Row) -> Result<quasar_core::ViewAsset, StoreError> {
+    // GET_BY_NAME returns both a.id and va.asset_id; CREATE_VIEW_EXTENSION
+    // only returns asset_id. Since a.id == va.asset_id (FK), we prefer the
+    // explicit "asset_id" column when available, falling back to "id" (from
+    // the assets side in GET_BY_NAME) for backward compatibility.
+    let asset_id: Uuid = row
+        .try_get("asset_id")
+        .ok()
+        .flatten()
+        .or_else(|| row.try_get("id").ok().flatten())
+        .ok_or_else(|| StoreError::Internal {
+            msg: "row_to_view_asset: neither 'asset_id' nor 'id' column found".to_string(),
+            source: None,
+        })?;
+    Ok(quasar_core::ViewAsset {
+        asset_id,
+        view_uuid: try_get!(row, "view_uuid"),
+        location: try_get!(row, "location"),
+        current_version_id: try_get!(row, "current_version_id"),
+        metadata_location: try_get!(row, "metadata_location"),
+        properties: try_get!(row, "view_properties"),
+        created_at: try_get!(row, "view_created_at"),
+        updated_at: try_get!(row, "view_updated_at"),
+    })
+}
+
+fn row_to_view(row: &Row) -> Result<quasar_core::View, StoreError> {
+    let asset = row_to_asset(row)?;
+    let view_asset = row_to_view_asset(row)?;
+    Ok(quasar_core::View {
+        asset,
+        view: view_asset,
     })
 }
 
@@ -1772,6 +1808,291 @@ impl IcebergPurgeStore for PgCatalogStore {
             )));
         }
         Ok(())
+    }
+}
+
+// ── IcebergViewStore ───────────────────────────────────────────────────────
+
+#[async_trait]
+impl IcebergViewStore for PgCatalogStore {
+    async fn create_view(
+        &self,
+        domain_name: &str,
+        namespace_name: &str,
+        view_name: &str,
+        view_uuid: Uuid,
+        location: &str,
+        metadata_location: &str,
+        current_version_id: i32,
+        properties: serde_json::Value,
+    ) -> Result<quasar_core::View, StoreError> {
+        let mut client = self.get_client().await?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(internal_err("create_view transaction start"))?;
+
+        // Step 1: Insert assets row using the shared asset::CREATE query.
+        let asset_row = tx
+            .query_opt(
+                queries::asset::CREATE,
+                &[
+                    &domain_name,
+                    &namespace_name,
+                    &view_name,
+                    &"view",
+                    &Option::<String>::None,
+                    &serde_json::json!({}),
+                ],
+            )
+            .await
+            .map_err(|e| {
+                if let Some(db_err) = e.as_db_error() {
+                    if db_err.code() == &SqlState::UNIQUE_VIOLATION {
+                        return StoreError::AlreadyExists(format!(
+                            "view '{}' in namespace '{}'",
+                            view_name, namespace_name
+                        ));
+                    }
+                }
+                classify_pg_error("create_view", e)
+            })?
+            .ok_or_else(|| StoreError::NotFound(format!("namespace '{}'", namespace_name)))?;
+
+        let asset = row_to_asset(&asset_row)?;
+
+        // Step 2: Insert view_assets extension row.
+        let view_row = tx
+            .query_one(
+                queries::view::CREATE_VIEW_EXTENSION,
+                &[
+                    &asset.id,
+                    &view_uuid,
+                    &location,
+                    &current_version_id,
+                    &metadata_location,
+                    &properties,
+                ],
+            )
+            .await
+            .map_err(|e| {
+                if let Some(db_err) = e.as_db_error() {
+                    if db_err.code() == &SqlState::CHECK_VIOLATION {
+                        // Trigger trg_view_assets_type_check rejects non-view assets
+                        return StoreError::Conflict {
+                            msg: db_err.message().to_string(),
+                        };
+                    }
+                }
+                classify_pg_error("create_view extension", e)
+            })?;
+
+        let view_asset = row_to_view_asset(&view_row)?;
+
+        tx.commit()
+            .await
+            .map_err(internal_err("create_view transaction commit"))?;
+
+        Ok(quasar_core::View {
+            asset,
+            view: view_asset,
+        })
+    }
+
+    async fn get_view(
+        &self,
+        domain_name: &str,
+        namespace_name: &str,
+        view_name: &str,
+    ) -> Result<quasar_core::View, StoreError> {
+        let client = self.get_client().await?;
+        let row = client
+            .query_opt(
+                queries::view::GET_BY_NAME,
+                &[&domain_name, &namespace_name, &view_name],
+            )
+            .await
+            .map_err(internal_err("get_view"))?
+            .ok_or_else(|| StoreError::NotFound(format!("view '{}'", view_name)))?;
+
+        row_to_view(&row)
+    }
+
+    async fn commit_view(
+        &self,
+        domain_name: &str,
+        namespace_name: &str,
+        view_name: &str,
+        expected_location: &str,
+        new_location: &str,
+    ) -> Result<(), StoreError> {
+        let client = self.get_client().await?;
+        let row = client
+            .query_opt(
+                queries::view::CAS_UPDATE_METADATA_LOCATION,
+                &[
+                    &new_location,
+                    &domain_name,
+                    &namespace_name,
+                    &view_name,
+                    &expected_location,
+                ],
+            )
+            .await
+            .map_err(internal_err("commit_view cas"))?;
+
+        match row {
+            None => Err(StoreError::Conflict {
+                msg: format!(
+                    "metadata_location mismatch for view '{}.{}'",
+                    namespace_name, view_name
+                ),
+            }),
+            Some(_) => Ok(()),
+        }
+    }
+
+    async fn drop_view(
+        &self,
+        domain_name: &str,
+        namespace_name: &str,
+        view_name: &str,
+    ) -> Result<(), StoreError> {
+        let client = self.get_client().await?;
+        let n = client
+            .execute(
+                queries::view::DELETE,
+                &[&domain_name, &namespace_name, &view_name],
+            )
+            .await
+            .map_err(internal_err("drop_view"))?;
+
+        if n == 0 {
+            return Err(StoreError::NotFound(format!("view '{}'", view_name)));
+        }
+        Ok(())
+    }
+
+    async fn list_views(
+        &self,
+        domain_name: &str,
+        namespace_name: &str,
+        offset: i64,
+        limit: i64,
+    ) -> Result<Vec<quasar_core::ViewIdentifier>, StoreError> {
+        let client = self.get_client().await?;
+        let rows = client
+            .query(
+                queries::view::LIST_BY_NAMESPACE,
+                &[&domain_name, &namespace_name, &limit, &offset],
+            )
+            .await
+            .map_err(internal_err("list_views"))?;
+
+        Ok(rows
+            .iter()
+            .map(|row| {
+                let name: String = row.get("name");
+                quasar_core::ViewIdentifier {
+                    namespace: vec![namespace_name.to_string()],
+                    name,
+                }
+            })
+            .collect())
+    }
+
+    async fn rename_view(
+        &self,
+        source_domain: &str,
+        source_namespace: &str,
+        source_name: &str,
+        dest_domain: &str,
+        dest_namespace: &str,
+        dest_name: &str,
+    ) -> Result<(), StoreError> {
+        let client = self.get_client().await?;
+
+        let map_err = |e: tokio_postgres::Error| -> StoreError {
+            if let Some(db_err) = e.as_db_error() {
+                if db_err.code() == &SqlState::UNIQUE_VIOLATION {
+                    let target_ns = if source_namespace == dest_namespace {
+                        source_namespace
+                    } else {
+                        dest_namespace
+                    };
+                    return StoreError::AlreadyExists(format!(
+                        "view '{}' in namespace '{}'",
+                        dest_name, target_ns
+                    ));
+                }
+            }
+            classify_pg_error("rename_view", e)
+        };
+
+        let n = if source_namespace != dest_namespace {
+            let target_row = client
+                .query_opt(
+                    queries::namespace::GET_BY_NAME,
+                    &[&dest_domain, &dest_namespace],
+                )
+                .await
+                .map_err(internal_err("rename_view lookup target namespace"))?;
+
+            let target_ns_id: Uuid = match target_row {
+                Some(row) => row.get("id"),
+                None => {
+                    return Err(StoreError::NotFound(format!(
+                        "target namespace '{}'",
+                        dest_namespace
+                    )));
+                }
+            };
+
+            client
+                .execute(
+                    queries::view::RENAME_WITH_NAMESPACE,
+                    &[
+                        &source_domain,
+                        &source_namespace,
+                        &source_name,
+                        &dest_name,
+                        &target_ns_id,
+                    ],
+                )
+                .await
+                .map_err(map_err)?
+        } else {
+            client
+                .execute(
+                    queries::view::RENAME,
+                    &[&source_domain, &source_namespace, &source_name, &dest_name],
+                )
+                .await
+                .map_err(map_err)?
+        };
+
+        if n == 0 {
+            return Err(StoreError::NotFound(format!("view '{}'", source_name)));
+        }
+        Ok(())
+    }
+
+    async fn view_exists(
+        &self,
+        domain_name: &str,
+        namespace_name: &str,
+        view_name: &str,
+    ) -> Result<bool, StoreError> {
+        let client = self.get_client().await?;
+        let row = client
+            .query_one(
+                queries::view::EXISTS,
+                &[&domain_name, &namespace_name, &view_name],
+            )
+            .await
+            .map_err(internal_err("view_exists"))?;
+
+        Ok(row.get(0))
     }
 }
 

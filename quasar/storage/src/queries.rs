@@ -542,6 +542,118 @@ pub mod iceberg_metrics {
     "#;
 }
 
+/// Queries against `view_assets` (V4.2).
+pub mod view {
+    /// Insert a view_assets extension row. Used after the `assets` row is already
+    /// inserted via `queries::asset::CREATE` within the same transaction.
+    /// Parameters: $1 asset_id, $2 view_uuid, $3 location, $4 current_version_id,
+    /// $5 metadata_location, $6 properties (JSONB).
+    pub const CREATE_VIEW_EXTENSION: &str = r#"
+        INSERT INTO view_assets (asset_id, view_uuid, location, current_version_id, metadata_location, properties)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING asset_id, view_uuid, location, current_version_id, metadata_location,
+                  properties AS view_properties, created_at AS view_created_at, updated_at AS view_updated_at
+    "#;
+
+    /// Look up a view by (domain_name, namespace_name, view_name).
+    /// Parameters: $1 domain_name, $2 namespace_name, $3 view_name.
+    pub const GET_BY_NAME: &str = r#"
+        SELECT a.id, a.namespace_id, a.name, a.asset_type, a.comment, a.properties,
+               a.deleted_at, a.created_by, a.updated_by, a.created_at, a.updated_at,
+               va.asset_id, va.view_uuid, va.location, va.current_version_id,
+               va.metadata_location, va.properties AS view_properties,
+               va.created_at AS view_created_at, va.updated_at AS view_updated_at
+        FROM assets a
+        JOIN view_assets va ON a.id = va.asset_id
+        JOIN namespaces ns ON a.namespace_id = ns.id
+        JOIN domains d ON ns.domain_id = d.id
+        WHERE d.name = $1 AND ns.name = $2 AND a.name = $3
+          AND a.deleted_at IS NULL AND a.asset_type = 'view'
+    "#;
+
+    /// List views in a namespace.
+    /// Parameters: $1 domain_name, $2 namespace_name, $3 limit, $4 offset.
+    pub const LIST_BY_NAMESPACE: &str = r#"
+        SELECT a.name
+        FROM assets a
+        JOIN namespaces ns ON a.namespace_id = ns.id
+        JOIN domains d ON ns.domain_id = d.id
+        WHERE d.name = $1 AND ns.name = $2
+          AND a.deleted_at IS NULL AND a.asset_type = 'view'
+        ORDER BY a.name
+        LIMIT $3 OFFSET $4
+    "#;
+
+    /// Delete a view (assets row; view_assets cascades via FK).
+    /// Parameters: $1 domain_name, $2 namespace_name, $3 view_name.
+    pub const DELETE: &str = r#"
+        DELETE FROM assets a
+        USING namespaces ns, domains d
+        WHERE ns.id = a.namespace_id
+          AND d.id = ns.domain_id
+          AND d.name = $1 AND ns.name = $2 AND a.name = $3
+          AND a.deleted_at IS NULL AND a.asset_type = 'view'
+    "#;
+
+    /// Rename a view within the same namespace.
+    /// Parameters: $1 domain_name, $2 namespace_name, $3 current_name, $4 new_name.
+    pub const RENAME: &str = r#"
+        UPDATE assets a
+        SET name = $4,
+            updated_at = NOW()
+        FROM namespaces ns, domains d
+        WHERE ns.id = a.namespace_id
+          AND d.id = ns.domain_id
+          AND d.name = $1 AND ns.name = $2 AND a.name = $3
+          AND a.deleted_at IS NULL AND a.asset_type = 'view'
+    "#;
+
+    /// Rename a view and move it to a different namespace within the same domain.
+    /// Parameters: $1 domain_name, $2 src_namespace_name, $3 current_name,
+    /// $4 new_name, $5 new_namespace_id.
+    pub const RENAME_WITH_NAMESPACE: &str = r#"
+        UPDATE assets a
+        SET name = $4,
+            namespace_id = $5,
+            updated_at = NOW()
+        FROM namespaces ns, domains d
+        WHERE ns.id = a.namespace_id
+          AND d.id = ns.domain_id
+          AND d.name = $1 AND ns.name = $2 AND a.name = $3
+          AND a.deleted_at IS NULL AND a.asset_type = 'view'
+    "#;
+
+    /// Check whether a view exists.
+    /// Parameters: $1 domain_name, $2 namespace_name, $3 view_name.
+    pub const EXISTS: &str = r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM assets a
+            JOIN namespaces ns ON a.namespace_id = ns.id
+            JOIN domains d ON ns.domain_id = d.id
+            WHERE d.name = $1 AND ns.name = $2 AND a.name = $3
+              AND a.deleted_at IS NULL AND a.asset_type = 'view'
+        )
+    "#;
+
+    /// CAS update of a view's metadata_location.
+    /// Parameters: $1 new_location, $2 domain_name, $3 namespace_name,
+    /// $4 view_name, $5 expected_location.
+    pub const CAS_UPDATE_METADATA_LOCATION: &str = r#"
+        UPDATE view_assets va
+        SET metadata_location = $1,
+            updated_at = NOW()
+        FROM assets a
+        JOIN namespaces ns ON a.namespace_id = ns.id
+        JOIN domains d ON ns.domain_id = d.id
+        WHERE va.asset_id = a.id
+          AND d.name = $2 AND ns.name = $3 AND a.name = $4
+          AND a.deleted_at IS NULL AND a.asset_type = 'view'
+          AND va.metadata_location IS NOT DISTINCT FROM $5
+        RETURNING va.asset_id
+    "#;
+}
+
 /// Queries against `iceberg_purge_operations` (V4.0 C2).
 pub mod iceberg_purge {
     /// Insert a purge operation record. Parameters: $1 domain_name,
@@ -701,6 +813,45 @@ mod tests {
         assert!(
             asset::GET_UNIFIED.contains("LEFT JOIN tabular_assets"),
             "GET_UNIFIED must LEFT JOIN tabular_assets so non-table assets surface as None"
+        );
+    }
+
+    #[test]
+    fn view_constants_are_well_formed() {
+        assert_constant("view::CREATE_VIEW_EXTENSION", view::CREATE_VIEW_EXTENSION);
+        assert_constant("view::GET_BY_NAME", view::GET_BY_NAME);
+        assert_constant("view::LIST_BY_NAMESPACE", view::LIST_BY_NAMESPACE);
+        assert_constant("view::DELETE", view::DELETE);
+        assert_constant("view::RENAME", view::RENAME);
+        assert_constant("view::RENAME_WITH_NAMESPACE", view::RENAME_WITH_NAMESPACE);
+        assert_constant("view::EXISTS", view::EXISTS);
+        assert_constant(
+            "view::CAS_UPDATE_METADATA_LOCATION",
+            view::CAS_UPDATE_METADATA_LOCATION,
+        );
+    }
+
+    #[test]
+    fn view_queries_filter_by_view_type() {
+        assert!(
+            view::GET_BY_NAME.contains("asset_type = 'view'"),
+            "view GET_BY_NAME must filter by asset_type='view'"
+        );
+        assert!(
+            view::LIST_BY_NAMESPACE.contains("asset_type = 'view'"),
+            "view LIST_BY_NAMESPACE must filter by asset_type='view'"
+        );
+    }
+
+    #[test]
+    fn view_cas_uses_optimistic_predicate() {
+        assert!(
+            view::CAS_UPDATE_METADATA_LOCATION.contains("IS NOT DISTINCT FROM"),
+            "view CAS update must check prior metadata_location with IS NOT DISTINCT FROM"
+        );
+        assert!(
+            view::CAS_UPDATE_METADATA_LOCATION.contains("RETURNING"),
+            "view CAS update must RETURN affected rows for caller to detect Conflict"
         );
     }
 
