@@ -1,6 +1,8 @@
 # Quasar 开发进度跟踪
 
-> 本文档记录 Quasar 项目的当前开发版本、所处阶段及完成情况。Agent 开发前应先查阅本文档确认当前状态。
+> ⚠️ **历史文档**：本文档记录早期 MVP 阶段进度，已不再维护。
+> 当前权威文档：[`docs/REQUIREMENTS.md`](./REQUIREMENTS.md)（需求）与 [`docs/DESIGN.md`](./DESIGN.md)（设计）。
+> 历史版本文档归档于 [`docs/archive/`](./archive/)。
 
 ---
 

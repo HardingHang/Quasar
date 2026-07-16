@@ -1,5 +1,9 @@
 # 项目定位与设计目标
 
+> ⚠️ **历史文档**：本文档描述早期 MVP 形态，已不再维护。
+> 当前权威文档：[`docs/REQUIREMENTS.md`](./REQUIREMENTS.md)（需求）与 [`docs/DESIGN.md`](./DESIGN.md)（设计）。
+> 历史版本文档归档于 [`docs/archive/`](./archive/)。
+
 **项目名称：Quasar**
 
 ## 寓意

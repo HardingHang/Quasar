@@ -2,7 +2,7 @@
 
 > 本文档是 Agent 参与 Quasar 项目开发时的**入口指南**。开发前请阅读本指南，按指引查阅相关文档和规范。
 >
-> **项目进度跟踪：** 当前开发状态和阶段信息请查阅 `docs/PROGRESS.md`。
+> **项目文档入口：** 需求与设计权威文档为 `docs/REQUIREMENTS.md` 与 `docs/DESIGN.md`，开发前必读（见下方"开发前必读"）。
 
 ---
 
@@ -89,10 +89,13 @@ Project/
 
 | 顺序 | 文档 | 作用 |
 |------|------|------|
-| 1 | `docs/ARCHITECTURE.md` | 理解项目定位、设计目标、双协议架构、Namespace 隔离策略 |
-| 2 | `docs/mvp/MVP_REQUIREMENTS.md` | 理解 MVP 范围、功能需求、非功能需求、端点清单 |
-| 3 | `docs/mvp/DATA_MODEL.md` | 理解核心实体、DDL、CatalogStore trait、并发控制机制 |
-| 4 | `docs/mvp/MVP_DESIGN.md` | 理解完整设计规格，特别关注当前阶段的验收标准 |
+| 1 | `docs/REQUIREMENTS.md` | **当前权威**：项目定位、功能/非功能需求、数据模型需求、并发控制、错误处理、验收标准 |
+| 2 | `docs/DESIGN.md` | **当前权威**：架构总览、Crate 分层、数据模型设计、Store trait、三套协议 API 设计、Commit/Metadata/Scan Planning、错误映射、Feature Flag、Server 组装 |
+| 3 | `docs/DEPLOYMENT.md` | 部署与验证流程（最小部署 / Lance 集成 / Spark 集成） |
+| 4 | `docs/TEST_MATRIX.md` | 测试覆盖矩阵 |
+| 5 | `docs/archive/` | 历史版本文档（MVP/V2/V3/V4.0~V4.2）归档，仅作参考 |
+
+> ⚠️ `docs/ARCHITECTURE.md`、`docs/PROGRESS.md`、`docs/ROADMAP.md`、`docs/EVOLUTION.md` 为早期历史文档，已不再维护，以 `REQUIREMENTS.md` / `DESIGN.md` 为准。
 
 **开发过程中必须遵守的规范：**
 - `docs/conventions/COMMIT_CONVENTION.md` — 每次提交前确认 message 格式

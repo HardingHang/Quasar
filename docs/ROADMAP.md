@@ -1,5 +1,8 @@
 # Roadmap
 
+> ⚠️ **历史文档**：本框架未填充，已不再维护。
+> 当前权威文档：[`docs/REQUIREMENTS.md`](./REQUIREMENTS.md)（需求，含明确不做事项清单）与 [`docs/DESIGN.md`](./DESIGN.md)（设计）。
+
 以下内容框架供后续填充，当前暂不填写具体范围和时间。
 
 ## V0.x 阶段
