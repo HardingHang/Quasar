@@ -26,24 +26,19 @@
 │              Arc<dyn CatalogStore>                           │
 └──────────────────────────┬───────────────────────────────────┘
                            │
-┌──────────────────────────┼───────────────────────────────────┐
-│                     quasar-adapter                           │
-│  ┌───────────────────────┼───────────────────────────────┐   │
-│  │    quasar-core        │   (traits + models + errors)  │   │
-│  │  ┌────────────────────┴───────────────────────────┐   │   │
-│  │  │ DomainStore | NamespaceStore | AssetTypeStore  │   │   │
-│  │  │ AssetStore | VersionStore | TagStore          │   │   │
-│  │  │ UnifiedQueryStore | CasCommitStore            │   │   │
-│  │  │ CatalogStore | AdapterRegistry                │   │   │
-│  │  └────────────────────────────────────────────────┘   │   │
-│  └───────────────────────────────────────────────────────┘   │
-└──────────────────────────┬───────────────────────────────────┘
+        ┌──────────────────┴──────────────────┐
+        │                                     │
+┌───────┴───────┐                     ┌───────┴───────┐
+│ quasar-adapter│                     │ quasar-storage│
+│ (协议适配层)   │                     │ (存储层实现)   │
+└───────┬───────┘                     └───────┬───────┘
+        │                                     │
+        └──────────────────┬──────────────────┘
                            │
-┌──────────────────────────┼───────────────────────────────────┐
-│                     quasar-storage                           │
-│              PgCatalogStore (impl all traits)                │
-│            queries.rs (SQL 常量) | schema migrations         │
-└──────────────────────────┬───────────────────────────────────┘
+                    ┌──────┴──────┐
+                    │ quasar-core │
+                    │(traits/models)│
+                    └──────┬──────┘
                            │
                     PostgreSQL + object store (S3/MinIO/...)
 ```
@@ -159,7 +154,6 @@ server ──► adapter ──► core
 | `description` | TEXT | 描述。 |
 | `mime_type` | TEXT | 可选。 |
 | `serialization_hint` | TEXT | 可选，如 `json`、`protobuf`。 |
-| `supports_cas_commit` | BOOL | 仅表格式。 |
 
 #### `domains`
 
@@ -199,7 +193,6 @@ server ──► adapter ──► core
 | `format` | TEXT FK→formats(name) | 可选格式。 |
 | `comment` | TEXT | 描述。 |
 | `properties` | JSONB | 治理/管理面属性。 |
-| `tags` | TEXT[] | 标签数组，或关联 `asset_tags`。 |
 | `deleted_at` | TIMESTAMPTZ | 软删除时间，NULL 表示活动。 |
 | `created_by` / `updated_by` | TEXT | 审计预留。 |
 | `created_at` / `updated_at` | TIMESTAMPTZ | — |
@@ -216,9 +209,9 @@ server ──► adapter ──► core
 | `asset_id` | UUID FK→assets | `ON DELETE CASCADE`。 |
 | `version_key` | TEXT | 格式原生版本标识。 |
 | `version_order` | BIGINT | 可比较顺序。 |
-| `metadata` | JSONB | 版本元数据。 |
-| `content_inline` | JSONB / BYTEA | 可选少量内联内容。 |
-| `content_pointer` | TEXT | 可选外部指针。 |
+| `version_properties` | JSONB | 版本属性。记录与格式无关的通用信息，如 commit message、作者、操作类型、自定义属性。不是 `content_pointer` 指向的格式原生元数据文件。 |
+| `content_inline` | JSONB | 可选少量内联内容（如小 JSON/YAML 配置）。实际工件文件通过 `content_pointer` 指向外部对象存储。 |
+| `content_pointer` | TEXT | 可选外部指针，指向对象存储中的实际工件文件。 |
 | `previous_version_id` | UUID FK→asset_versions | `ON DELETE SET NULL`。 |
 | `created_at` | TIMESTAMPTZ | — |
 
@@ -245,7 +238,7 @@ server ──► adapter ──► core
 | `location` | TEXT | 表根路径。 |
 | `metadata_location` | TEXT | 当前 metadata.json 指针。 |
 | `schema_snapshot` | JSONB | 当前 schema 缓存。 |
-| `current_version_id` | UUID FK→asset_versions | — |
+| `current_version_key` | TEXT | 当前版本的原生版本标识，对应 `asset_versions.version_key`；通过 `(asset_id, current_version_key)` 可 join 到 `asset_versions`。 |
 
 #### `view_assets`
 
@@ -254,13 +247,13 @@ server ──► adapter ──► core
 | `asset_id` | UUID PK FK→assets | `ON DELETE CASCADE`；触发器保证 `asset_type='view'`。 |
 | `view_uuid` | UUID | Iceberg view uuid。 |
 | `location` | TEXT | — |
-| `current_version_id` | UUID FK→asset_versions | — |
+| `current_version_key` | TEXT | 当前版本的原生版本标识，对应 `asset_versions.version_key`；通过 `(asset_id, current_version_key)` 可 join 到 `asset_versions`。 |
 | `metadata_location` | TEXT | — |
 
-#### `model_assets` / `agent_assets` / `tool_assets`
+#### 其他内置类型的扩展表
 
-- 根据具体资产类型定义，可存 `framework`、`runtime`、`signature`、`artifact_uri`、`capabilities`、`interface_schema`、`endpoint`、`auth_reference` 等字段。
-- 或使用 `jsonb` 通用扩展策略，避免频繁 DDL。
+- `model_assets`、`agent_assets`、`tool_assets`、`mcp_server_assets`、`fileset_assets`、`topic_assets` 等所有内置资产类型均使用 `dedicated_table` 扩展策略，各自拥有独立的类型扩展表。
+- 具体扩展表 Schema 在实际设计该资产类型接入时确定；基线阶段以 `tabular_assets` 和 `view_assets` 为示例。
 
 ---
 
@@ -311,9 +304,9 @@ server ──► adapter ──► core
 
 - 路径前缀 `/unified/v1/...`。
 - Domain/Namespace 管理。
-- Asset 管理（CRUD、重命名、恢复、删除）。
-- Version 管理。
-- AssetType/Format 注册。
+- Asset 管理：对没有原生协议的资产类型提供完整生命周期管理（CRUD、重命名、恢复、删除）；对已有原生协议的资产类型仅提供列表/获取，生命周期操作由原生协议负责。
+- Version 管理：对原生协议资产仅提供列表/获取；对非原生协议资产提供完整生命周期管理。
+- AssetType/Format 注册与管理。
 - 发现过滤。
 - 错误格式为 RFC-7807 Problem Details，扩展 `code` 与 `request_id`。
 
@@ -326,7 +319,7 @@ server ──► adapter ──► core
 1. 客户端调用原生端点。
 2. Adapter 解析协议请求，解析 Domain/Namespace/Asset。
 3. Adapter 校验资产类型与格式规则。
-4. Adapter 在事务内调用 store trait 创建/更新资产及版本。
+4. Adapter 在事务内调用 store trait：创建/更新资产身份与类型扩展字段，并将原生版本镜像写入 `asset_versions`（含 `version_key`、`version_order`、`content_pointer` 等）。
 5. Adapter 返回协议响应。
 
 ### 6.2 Unified API 数据流
@@ -340,7 +333,7 @@ server ──► adapter ──► core
 
 - `DELETE` 标记 `assets.deleted_at`。
 - 软删除期间版本历史保留。
-- `POST /restore` 清除 `deleted_at`（需名称唯一性仍满足）。
+- `POST /unified/v1/assets/{asset_id}/restore` 清除 `deleted_at`。若同一 Namespace 内同名资产已存在，则返回 `409 Conflict`，恢复失败；用户需先处理冲突资产。
 - 保留期后执行硬删除，级联清理扩展表与版本记录。
 
 ---
@@ -368,8 +361,9 @@ server ──► adapter ──► core
 
 ### 8.1 对象存储
 
-- Domain 配置 `storage_type`、`storage_config`、`warehouse`。
-- 默认使用全局共享后端；Domain 可覆盖。
+- 全局默认存储后端由环境变量提供：`QUASAR_WAREHOUSE_PATH`（根路径）及 `QUASAR_S3_*`（对象存储连接信息）。
+- Domain 配置 `storage_type`、`storage_config`、`warehouse`，用于覆盖全局默认后端。
+- 存储后端解析优先级：Domain 配置 > 全局环境变量。Domain 未指定 `warehouse` 时，使用 `QUASAR_WAREHOUSE_PATH`。
 - Native adapter 负责读写 Iceberg metadata.json、Lance manifest 等对象存储文件。
 
 ### 8.2 迁移
@@ -390,8 +384,7 @@ server ──► adapter ──► core
 | `QUASAR_HOST` | 否 | `0.0.0.0` | HTTP 监听地址。 |
 | `QUASAR_PORT` | 否 | `8080` | HTTP 监听端口。 |
 | `QUASAR_LOG_LEVEL` | 否 | `info` | tracing 日志级别。 |
-| `QUASAR_WAREHOUSE_PATH` | 否 | — | 默认 warehouse 路径。 |
-| `QUASAR_WAREHOUSE` | 否 | `default` | 默认 warehouse 名称。 |
+| `QUASAR_WAREHOUSE_PATH` | 否 | — | 全局默认对象存储根路径。当 Domain 未指定 `warehouse` 时使用；支持 `s3://...`、`/data/quasar/warehouse` 等 URI 或本地路径。 |
 | `QUASAR_S3_ENDPOINT` | 否 | — | S3/MinIO endpoint。 |
 | `QUASAR_S3_ACCESS_KEY` | 否 | — | S3 access key。 |
 | `QUASAR_S3_SECRET_KEY` | 否 | — | S3 secret key。 |
@@ -420,7 +413,7 @@ server ──► adapter ──► core
 以下设计细节留待后续实现设计文档确定：
 
 1. Store trait 与 Adapter 的具体签名、错误枚举、序列化类型。
-2. Adapter 注册机制：编译时 feature flag vs 运行时注册。
+2. Adapter 注册机制：采用编译时 feature flag；运行时动态插件作为后续版本可选方向。
 3. 层级 Namespace 的查询实现：物化路径 vs `ltree`。
 4. 内联内容大小限制与对象存储卸载策略。
 5. 软删除保留窗口与硬删除策略。

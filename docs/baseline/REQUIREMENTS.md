@@ -96,7 +96,7 @@ Quasar 不替代数据面系统。它记录身份、元数据、版本指针，�
 | `description` | 人类可读描述。 |
 | `category` | 逻辑分组：`tabular`、`view`、`model`、`agent`、`tool`、`generic`。 |
 | `validation_schema` | 可选的 JSON Schema，用于校验资产元数据。 |
-| `extension_strategy` | `jsonb`、`dedicated_table` 或 `reference_only`。 |
+| `extension_strategy` | 类型专属元数据字段的扩展存储策略：`jsonb`（通用 JSONB 扩展行）、`dedicated_table`（独立扩展表）、`reference_only`（不存储类型字段，仅依赖外部引用）。该策略只决定类型特定字段如何落库，与版本内容（`asset_versions.content_inline` / `content_pointer`）的存储方式无关。 |
 | `supports_native_protocol` | 该类型是否预期有原生协议适配器。 |
 
 **Format 字段**
@@ -107,19 +107,19 @@ Quasar 不替代数据面系统。它记录身份、元数据、版本指针，�
 | `description` | 人类可读描述。 |
 | `mime_type` | 可选 MIME 类型提示。 |
 | `serialization_hint` | 可选提示，如 `json`、`protobuf`、`parquet`。 |
-| `supports_cas_commit` | 仅用于表格式（Iceberg 为 true，Lance 为 false）。 |
 
 初始化时内置的资产类型：`table`、`view`、`model`、`agent`、`tool`、`mcp_server`、`fileset`、`topic`。内置格式包括：`iceberg`、`lance`、`onnx`、`gguf`、`safetensors`、`json`、`yaml`。
 
-### 4.2 内容存储策略
+所有内置资产类型均采用 `dedicated_table` 扩展策略，各自拥有独立的类型扩展表。具体扩展表 Schema 在实际设计该资产类型接入时确定；基线阶段以 `table` 和 `view` 为示例。
 
-每个资产类型选择以下三种策略之一：
+### 4.2 资产内容存储默认规则
 
-- `jsonb`：类型特定字段以 JSONB 形式存储在通用扩展行中。
-- `dedicated_table`：该类型拥有独立的扩展表，用于严格 Schema 与索引。
-- `reference_only`：目录仅存储外部指针；内容存放于别处。
+Quasar 默认采用 metadata-only 原则：目录只存储元数据、指针与引用，实际工件内容存放于外部对象存储。每个版本的内容通过 `asset_versions` 表的以下字段承载：
 
-默认规则是 metadata-only：目录存储指针与引用，实际工件内容存放于外部存储。当某种格式不自包含或外部存储不现实时，资产类型可选择存储少量内联内容。
+- `content_pointer`：指向外部对象存储中的工件文件（如 Iceberg `metadata.json`、Lance manifest）。
+- `content_inline`：仅在格式不自包含或外部存储不现实时，用于存放少量内联内容。
+
+本条与 §4.1 的 `extension_strategy` 是独立维度：后者决定类型专属元数据字段的存储方式，本条决定版本实际内容的存储方式。
 
 ---
 
@@ -130,7 +130,7 @@ Quasar 不替代数据面系统。它记录身份、元数据、版本指针，�
 - 顶层容器与租户边界。
 - 拥有全局唯一的人类可读名称。
 - 可携带可选的 tenant 标签，供外部认证系统使用。
-- 定义默认存储后端，并支持按 Domain 覆盖。
+- 系统提供全局默认存储后端（由环境变量配置）；Domain 可覆盖 `storage_type`、`storage_config` 与 `warehouse`。优先级：Domain 配置 > 全局环境变量。
 - 当 Domain 内仍存在 Namespace 时，禁止删除。
 
 ### 5.2 Namespace
@@ -151,9 +151,9 @@ Quasar 不替代数据面系统。它记录身份、元数据、版本指针，�
 ### 5.4 Version
 
 - 每个资产都拥有版本历史。
-- 一个版本包含 `version_key`、`version_order`、版本元数据、内容（内联或指针）、前一版本指针。
+- 一个版本包含 `version_key`、`version_order`、版本属性（`version_properties`，与格式无关的通用信息）、内容（`content_inline` 内联或 `content_pointer` 外部指针）、前一版本指针。
 - 最新版本通过 `version_order DESC` 解析。
-- 对于已自行维护版本历史的原生协议资产类型，目录既可以将原生版本镜像到 `asset_versions`，也可以直接通过原生协议暴露其历史。无论如何，版本历史必须可观测且有序。
+- 对于原生协议资产类型（如 Iceberg、Lance），其原生版本必须在 `asset_versions` 中镜像保存。`version_key` 采用原生版本标识，`content_pointer` 指向原生元数据文件；版本历史通过 `version_order` 排序，保证 Unified API 与原生协议端点可观测到一致的版本历史。
 
 ---
 
@@ -168,7 +168,7 @@ Quasar 不替代数据面系统。它记录身份、元数据、版本指针，�
 
 Native adapter 是其资产生命周期操作的权威。它们直接通过核心 store trait 创建、更新、删除资产。
 
-未来资产类型可通过实现 adapter 插件契约添加原生协议。
+未来资产类型可通过新增 adapter 实现并开启对应 Cargo feature 添加原生协议；基线阶段所有 adapter 均为编译时静态包含，不支持运行时动态加载。
 
 ### 6.2 Unified API
 
@@ -176,12 +176,11 @@ Unified API 是位于 `/unified/v1/...` 的、与格式和协议无关的管理�
 
 - Domain 生命周期管理。
 - Namespace 生命周期管理，包括层级路径。
-- 资产的列表/获取/更新/重命名/恢复/删除。对于已有原生协议的资产类型，Unified API 不提供创建能力。
-- 版本的列表/获取/创建/删除。
+- 资产的列表/获取。对于已有原生协议的资产类型，Unified API 仅提供只读访问；创建、更新、重命名、恢复、删除等生命周期操作必须通过原生协议完成。
+- 对于没有原生协议的非表资产，Unified API 提供完整的生命周期管理（创建、更新、重命名、恢复、删除）。
+- 版本的列表/获取。对于原生协议资产，版本历史由 adapter 镜像到 `asset_versions`，Unified API 只读暴露。
 - AssetType 与 Format 的注册与管理。
 - 发现：按 Domain、Namespace 路径、资产类型、格式、标签、属性过滤。
-
-对于没有原生协议的非表资产，Unified API 同时是创建接口。
 
 ### 6.3 基础设施端点
 
@@ -230,6 +229,7 @@ Unified API 是位于 `/unified/v1/...` 的、与格式和协议无关的管理�
 - Domain 名称全局唯一；Namespace 路径在同一 Domain 内唯一；活动资产名称在同一 Namespace 内唯一。
 - 非法资产类型与格式被注册表拒绝。
 - 版本 `version_key` 在同一 Asset 内唯一；非空 `version_order` 在同一 Asset 内唯一。
+- 软删除资产恢复时，若同一 Namespace 内同名活动资产已存在，返回 `409 Conflict`。
 
 ### 9.2 Native protocol 验收
 
