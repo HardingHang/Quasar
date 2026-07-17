@@ -94,7 +94,7 @@ Quasar 不替代数据面系统。它记录身份、元数据、版本指针，�
 |------|------|
 | `name` | 唯一标识，例如 `table`、`model`。 |
 | `description` | 人类可读描述。 |
-| `category` | 逻辑分组：`tabular`、`view`、`model`、`agent`、`tool`、`generic`。 |
+| `category` | 逻辑分组：`tabular`、`view`、`model`、`agent`、`tool`、`mcp_server`、`fileset`、`topic`、`generic`。 |
 | `validation_schema` | 可选的 JSON Schema，用于校验资产元数据。 |
 | `extension_strategy` | 类型专属元数据字段的扩展存储策略：`jsonb`（通用 JSONB 扩展行）、`dedicated_table`（独立扩展表）、`reference_only`（不存储类型字段，仅依赖外部引用）。该策略只决定类型特定字段如何落库，与版本内容（`asset_versions.content_inline` / `content_pointer`）的存储方式无关。 |
 | `supports_native_protocol` | 该类型是否预期有原生协议适配器。 |
@@ -128,7 +128,7 @@ Quasar 默认采用 metadata-only 原则：目录只存储元数据、指针与�
 ### 5.1 Domain
 
 - 顶层容器与租户边界。
-- 拥有全局唯一的人类可读名称。
+- 拥有全局唯一的人类可读名称，命名规则为 URL-safe slug：`^[a-z0-9][a-z0-9_-]{0,62}$`（小写字母、数字、连字符、下划线，以字母或数字开头）。
 - 可携带可选的 tenant 标签，供外部认证系统使用。
 - 系统提供全局默认存储后端（由环境变量配置）；Domain 可覆盖 `storage_type`、`storage_config` 与 `warehouse`。优先级：Domain 配置 > 全局环境变量。
 - 当 Domain 内仍存在 Namespace 时，禁止删除。
@@ -139,6 +139,7 @@ Quasar 默认采用 metadata-only 原则：目录只存储元数据、指针与�
 - 路径以文本形式物化，并存储 `depth` 整数以支持前缀查询。
 - 资产名称在叶子 Namespace 内唯一。
 - 创建 Namespace 时可隐式创建中间路径节点。
+- 当 Namespace 内仍存在子 Namespace 或 Asset 时，禁止删除。
 
 ### 5.3 Asset
 
@@ -152,7 +153,7 @@ Quasar 默认采用 metadata-only 原则：目录只存储元数据、指针与�
 
 - 每个资产都拥有版本历史。
 - 一个版本包含 `version_key`、`version_order`、版本属性（`version_properties`，与格式无关的通用信息）、内容（`content_inline` 内联或 `content_pointer` 外部指针）、前一版本指针。
-- 最新版本通过 `version_order DESC` 解析。
+- 最新版本通过 `assets.current_version_key` 确定；`version_order` 用于版本历史的排序与遍历。
 - 对于原生协议资产类型（如 Iceberg、Lance），其原生版本必须在 `asset_versions` 中镜像保存。`version_key` 采用原生版本标识，`content_pointer` 指向原生元数据文件；版本历史通过 `version_order` 排序，保证 Unified API 与原生协议端点可观测到一致的版本历史。
 
 ---
@@ -178,7 +179,7 @@ Unified API 是位于 `/unified/v1/...` 的、与格式和协议无关的管理�
 - Namespace 生命周期管理，包括层级路径。
 - 资产的列表/获取。对于已有原生协议的资产类型，Unified API 仅提供只读访问；创建、更新、重命名、恢复、删除等生命周期操作必须通过原生协议完成。
 - 对于没有原生协议的非表资产，Unified API 提供完整的生命周期管理（创建、更新、重命名、恢复、删除）。
-- 版本的列表/获取。对于原生协议资产，版本历史由 adapter 镜像到 `asset_versions`，Unified API 只读暴露。
+- 版本的列表/获取。对于原生协议资产，版本历史由 adapter 镜像到 `asset_versions`，Unified API 只读暴露；原生协议资产的版本不可删除，删除能力仅对非原生协议资产开放。
 - AssetType 与 Format 的注册与管理。
 - 发现：按 Domain、Namespace 路径、资产类型、格式、标签、属性过滤。
 
@@ -228,7 +229,7 @@ Unified API 是位于 `/unified/v1/...` 的、与格式和协议无关的管理�
 - 从空数据库按内置迁移初始化成功，服务可正常启动；迁移可重复执行。
 - Domain 名称全局唯一；Namespace 路径在同一 Domain 内唯一；活动资产名称在同一 Namespace 内唯一。
 - 非法资产类型与格式被注册表拒绝。
-- 版本 `version_key` 在同一 Asset 内唯一；非空 `version_order` 在同一 Asset 内唯一。
+- 版本 `version_key` 在同一 Asset 内唯一；`version_order` 在同一 Asset 内唯一且非空。
 - 软删除资产恢复时，若同一 Namespace 内同名活动资产已存在，返回 `409 Conflict`。
 
 ### 9.2 Native protocol 验收
@@ -240,7 +241,7 @@ Unified API 是位于 `/unified/v1/...` 的、与格式和协议无关的管理�
 ### 9.3 Unified API 验收
 
 - Domain、Namespace、Asset、Version 的 CRUD 与过滤按本需求实现。
-- 对已有原生协议的资产类型，Unified API 创建端点返回 405 或等效拒绝。
+- 对已有原生协议的资产类型，Unified API 的创建、更新、重命名、恢复、删除等写端点均返回 `405` 或等效拒绝；列表/获取端点保持可用。
 - 错误格式为 RFC-7807 Problem Details，且不泄漏到标准协议端点。
 
 ### 9.4 构建与部署验收
@@ -255,7 +256,7 @@ Unified API 是位于 `/unified/v1/...` 的、与格式和协议无关的管理�
 
 ## 10. 待明确与延期事项
 
-以下需求细节留待后续专门讨论：
+以下需求细节留待后续专门讨论。本节关注**需求层面未明确的功能与约束**；实现层面的技术方案延期事项见 `docs/baseline/DESIGN.md` §10。
 
 1. 各资产类型的具体 JSON Schema 与校验规则。
 2. 内联内容大小限制与对象存储卸载阈值。

@@ -141,7 +141,7 @@ server ──► adapter ──► core
 |------|------|------|
 | `name` | TEXT PK | 唯一标识，如 `table`、`model`。 |
 | `description` | TEXT | 描述。 |
-| `category` | TEXT | `tabular`、`view`、`model`、`agent`、`tool`、`generic`。 |
+| `category` | TEXT | `tabular`、`view`、`model`、`agent`、`tool`、`mcp_server`、`fileset`、`topic`、`generic`。 |
 | `validation_schema` | JSONB | 可选 JSON Schema。 |
 | `extension_strategy` | TEXT | `jsonb` / `dedicated_table` / `reference_only`。 |
 | `supports_native_protocol` | BOOL | 是否预期有原生协议。 |
@@ -160,7 +160,7 @@ server ──► adapter ──► core
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `id` | UUID PK | `gen_random_uuid()`。 |
-| `name` | TEXT UNIQUE | 全局唯一，用于 API 路径与权限边界。 |
+| `name` | TEXT UNIQUE | 全局唯一，用于 API 路径与权限边界；命名规则为 URL-safe slug：`^[a-z0-9][a-z0-9_-]{0,62}$`。 |
 | `tenant` | TEXT | 可选，供外部认证系统使用。 |
 | `comment` | TEXT | 描述。 |
 | `properties` | JSONB | 自定义属性。 |
@@ -193,6 +193,7 @@ server ──► adapter ──► core
 | `format` | TEXT FK→formats(name) | 可选格式。 |
 | `comment` | TEXT | 描述。 |
 | `properties` | JSONB | 治理/管理面属性。 |
+| `current_version_key` | TEXT | 当前版本的原生版本标识，对应 `asset_versions.version_key`；通过 `(id, current_version_key)` 可 join 到 `asset_versions`。 |
 | `deleted_at` | TIMESTAMPTZ | 软删除时间，NULL 表示活动。 |
 | `created_by` / `updated_by` | TEXT | 审计预留。 |
 | `created_at` / `updated_at` | TIMESTAMPTZ | — |
@@ -208,7 +209,7 @@ server ──► adapter ──► core
 | `id` | UUID PK | — |
 | `asset_id` | UUID FK→assets | `ON DELETE CASCADE`。 |
 | `version_key` | TEXT | 格式原生版本标识。 |
-| `version_order` | BIGINT | 可比较顺序。 |
+| `version_order` | BIGINT NOT NULL | 可比较顺序，用于版本历史排序。 |
 | `version_properties` | JSONB | 版本属性。记录与格式无关的通用信息，如 commit message、作者、操作类型、自定义属性。不是 `content_pointer` 指向的格式原生元数据文件。 |
 | `content_inline` | JSONB | 可选少量内联内容（如小 JSON/YAML 配置）。实际工件文件通过 `content_pointer` 指向外部对象存储。 |
 | `content_pointer` | TEXT | 可选外部指针，指向对象存储中的实际工件文件。 |
@@ -217,7 +218,8 @@ server ──► adapter ──► core
 
 **约束**：
 - `UNIQUE(asset_id, version_key)`。
-- partial unique `uq_asset_versions_order` on `(asset_id, version_order) WHERE version_order IS NOT NULL`。
+- `UNIQUE(asset_id, version_order)`。
+- partial unique `uq_asset_versions_root` on `(asset_id) WHERE previous_version_id IS NULL`；保证每个资产至多一个根版本。
 
 #### `asset_tags`
 
@@ -238,7 +240,6 @@ server ──► adapter ──► core
 | `location` | TEXT | 表根路径。 |
 | `metadata_location` | TEXT | 当前 metadata.json 指针。 |
 | `schema_snapshot` | JSONB | 当前 schema 缓存。 |
-| `current_version_key` | TEXT | 当前版本的原生版本标识，对应 `asset_versions.version_key`；通过 `(asset_id, current_version_key)` 可 join 到 `asset_versions`。 |
 
 #### `view_assets`
 
@@ -247,7 +248,6 @@ server ──► adapter ──► core
 | `asset_id` | UUID PK FK→assets | `ON DELETE CASCADE`；触发器保证 `asset_type='view'`。 |
 | `view_uuid` | UUID | Iceberg view uuid。 |
 | `location` | TEXT | — |
-| `current_version_key` | TEXT | 当前版本的原生版本标识，对应 `asset_versions.version_key`；通过 `(asset_id, current_version_key)` 可 join 到 `asset_versions`。 |
 | `metadata_location` | TEXT | — |
 
 #### 其他内置类型的扩展表
@@ -267,7 +267,7 @@ server ──► adapter ──► core
 | `NamespaceStore` | `create_namespace`, `get_namespace`, `list_namespaces`, `delete_namespace`, `resolve_path`. |
 | `AssetTypeStore` | `register_asset_type`, `register_format`, `list_asset_types`, `get_asset_type`, `get_format`. |
 | `AssetStore` | `create_asset`, `get_asset`, `list_assets`, `update_asset`, `rename_asset`, `soft_delete_asset`, `restore_asset`, `hard_delete_asset`. |
-| `VersionStore` | `create_version`, `get_version`, `list_versions`, `get_latest_version`, `delete_version`. |
+| `VersionStore` | `create_version`, `get_version`, `list_versions`, `get_latest_version`, `delete_version`（`delete_version` 仅对非原生协议资产开放；原生协议资产版本不可删除）。 |
 | `TagStore` | `add_tag`, `remove_tag`, `list_assets_by_tag`. |
 | `UnifiedQueryStore` | `query_assets` with filters (domain, namespace, type, format, tags, properties). |
 | `CasCommitStore` | `compare_and_swap_pointer` for tabular assets requiring CAS. |
@@ -305,7 +305,7 @@ server ──► adapter ──► core
 - 路径前缀 `/unified/v1/...`。
 - Domain/Namespace 管理。
 - Asset 管理：对没有原生协议的资产类型提供完整生命周期管理（CRUD、重命名、恢复、删除）；对已有原生协议的资产类型仅提供列表/获取，生命周期操作由原生协议负责。
-- Version 管理：对原生协议资产仅提供列表/获取；对非原生协议资产提供完整生命周期管理。
+- Version 管理：对原生协议资产仅提供列表/获取，且版本不可删除；对非原生协议资产提供完整生命周期管理（含创建与删除）。
 - AssetType/Format 注册与管理。
 - 发现过滤。
 - 错误格式为 RFC-7807 Problem Details，扩展 `code` 与 `request_id`。
@@ -410,7 +410,7 @@ server ──► adapter ──► core
 
 ## 10. 待明确与延期事项
 
-以下设计细节留待后续实现设计文档确定：
+以下设计细节留待后续实现设计文档确定。本节关注**实现层面未明确的技术方案**；需求层面的功能与约束延期事项见 `docs/baseline/REQUIREMENTS.md` §10。
 
 1. Store trait 与 Adapter 的具体签名、错误枚举、序列化类型。
 2. Adapter 注册机制：采用编译时 feature flag；运行时动态插件作为后续版本可选方向。
