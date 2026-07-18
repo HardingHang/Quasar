@@ -45,9 +45,9 @@
 
 ### 1.2 设计原则
 
-1. **官方协议优先**：REST 路径、请求/响应字段和错误模型对齐 Iceberg 1.10.x / Lance REST Namespace 规范。
+1. **官方协议优先**：REST 路径、请求/响应字段和错误模型对齐 Iceberg 1.11.x / Lance REST Namespace 规范。
 2. **声明即实现**：`/iceberg/v1/config` 的 `endpoints` 只返回实际已实现端点。
-3. **元数据兼容优先**：Quasar 写出的 Iceberg metadata.json 能被 Spark Iceberg 1.10.x client 读回。
+3. **元数据兼容优先**：Quasar 写出的 Iceberg metadata.json 能被 Spark Iceberg 1.11.x client 读回。
 4. **Catalog 状态由 PostgreSQL 仲裁**：元数据指针与版本顺序由数据库条件更新保证。
 5. **对象存储失败可诊断**：容忍对象存储与 PostgreSQL 的非原子窗口，但必须返回明确错误并记录路径上下文。
 6. **身份与扩展分离**：`assets` 统一身份层，类型特有字段进入扩展表或 JSONB。
@@ -160,8 +160,7 @@ server ──► adapter ──► core
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `id` | UUID PK | `gen_random_uuid()`。 |
-| `name` | TEXT UNIQUE | 全局唯一，用于 API 路径与权限边界；命名规则为 URL-safe slug：`^[a-z0-9][a-z0-9_-]{0,62}$`。 |
-| `tenant` | TEXT | 可选，供外部认证系统使用。 |
+| `name` | TEXT UNIQUE | 全局唯一，用于 API 路径；命名规则为 URL-safe slug：`^[a-z0-9][a-z0-9_-]{0,62}$`。 |
 | `comment` | TEXT | 描述。 |
 | `properties` | JSONB | 自定义属性。 |
 | `storage_type` | TEXT | s3 / minio / hdfs / local。 |
@@ -176,7 +175,7 @@ server ──► adapter ──► core
 |------|------|------|
 | `id` | UUID PK | — |
 | `domain_id` | UUID FK→domains | `ON DELETE RESTRICT`。 |
-| `path` | TEXT | 层级路径，如 `analytics/teams/finance`。 |
+| `path` | TEXT | 层级路径，如 `analytics/teams/finance`；路径段命名规则为 URL-safe slug：`^[a-z0-9][a-z0-9_-]{0,62}$`。 |
 | `depth` | INT | 路径深度。 |
 | `comment` / `properties` | TEXT / JSONB | — |
 | `created_at` / `updated_at` | TIMESTAMPTZ | — |
@@ -188,14 +187,13 @@ server ──► adapter ──► core
 |------|------|------|
 | `id` | UUID PK | 治理能力统一引用该 ID。 |
 | `namespace_id` | UUID FK→namespaces | `ON DELETE RESTRICT`。 |
-| `name` | TEXT | 同一 Namespace 内活动资产名唯一。 |
+| `name` | TEXT | 同一 Namespace 内活动资产名唯一；命名规则为 URL-safe slug：`^[a-z0-9][a-z0-9_-]{0,62}$`。 |
 | `asset_type` | TEXT FK→asset_types(name) | 资产类型。 |
 | `format` | TEXT FK→formats(name) | 可选格式。 |
 | `comment` | TEXT | 描述。 |
 | `properties` | JSONB | 治理/管理面属性。 |
 | `current_version_key` | TEXT | 当前版本的原生版本标识，对应 `asset_versions.version_key`；通过 `(id, current_version_key)` 可 join 到 `asset_versions`。 |
 | `deleted_at` | TIMESTAMPTZ | 软删除时间，NULL 表示活动。 |
-| `created_by` / `updated_by` | TEXT | 审计预留。 |
 | `created_at` / `updated_at` | TIMESTAMPTZ | — |
 
 **索引**：
@@ -213,7 +211,7 @@ server ──► adapter ──► core
 | `version_properties` | JSONB | 版本属性。记录与格式无关的通用信息，如 commit message、作者、操作类型、自定义属性。不是 `content_pointer` 指向的格式原生元数据文件。 |
 | `content_inline` | JSONB | 可选少量内联内容（如小 JSON/YAML 配置）。实际工件文件通过 `content_pointer` 指向外部对象存储。 |
 | `content_pointer` | TEXT | 可选外部指针，指向对象存储中的实际工件文件。 |
-| `previous_version_id` | UUID FK→asset_versions | `ON DELETE SET NULL`。 |
+| `previous_version_id` | UUID FK→asset_versions | `ON DELETE RESTRICT`；防止删除被后继版本引用的版本，保护版本链完整性。 |
 | `created_at` | TIMESTAMPTZ | — |
 
 **约束**：
@@ -267,7 +265,7 @@ server ──► adapter ──► core
 | `NamespaceStore` | `create_namespace`, `get_namespace`, `list_namespaces`, `delete_namespace`, `resolve_path`. |
 | `AssetTypeStore` | `register_asset_type`, `register_format`, `list_asset_types`, `get_asset_type`, `get_format`. |
 | `AssetStore` | `create_asset`, `get_asset`, `list_assets`, `update_asset`, `rename_asset`, `soft_delete_asset`, `restore_asset`, `hard_delete_asset`. |
-| `VersionStore` | `create_version`, `get_version`, `list_versions`, `get_latest_version`, `delete_version`（`delete_version` 仅对非原生协议资产开放；原生协议资产版本不可删除）。 |
+| `VersionStore` | `create_version`, `get_version`, `list_versions`, `get_latest_version`, `delete_version`（`delete_version` 仅对非原生协议资产开放；原生协议资产版本不可删除）。`create_version` 时自动将 `assets.current_version_key` 更新为最新版本的 `version_key`；`get_latest_version` 基于 `assets.current_version_key` 查询，若其为 `NULL` 则返回 `NotFound`。 |
 | `TagStore` | `add_tag`, `remove_tag`, `list_assets_by_tag`. |
 | `UnifiedQueryStore` | `query_assets` with filters (domain, namespace, type, format, tags, properties). |
 | `CasCommitStore` | `compare_and_swap_pointer` for tabular assets requiring CAS. |
@@ -291,7 +289,7 @@ server ──► adapter ──► core
 
 - 路径前缀 `/iceberg/v1/...`。
 - `{prefix}` 映射为 Domain 名。
-- 覆盖 Namespace、Table、View、Transaction、Scan Planning、Metrics 端点（见需求文档 §6.1）。
+- 覆盖 Namespace、Table、View、Transaction、Metrics 端点（见需求文档 §7.1）。
 - 错误格式为 Iceberg JSON error body。
 
 ### 5.2 Lance REST Namespace
@@ -319,7 +317,7 @@ server ──► adapter ──► core
 1. 客户端调用原生端点。
 2. Adapter 解析协议请求，解析 Domain/Namespace/Asset。
 3. Adapter 校验资产类型与格式规则。
-4. Adapter 在事务内调用 store trait：创建/更新资产身份与类型扩展字段，并将原生版本镜像写入 `asset_versions`（含 `version_key`、`version_order`、`content_pointer` 等）。
+4. Adapter 在事务内调用 store trait：创建/更新资产身份与类型扩展字段，将原生版本镜像写入 `asset_versions`（含 `version_key`、`version_order`、`content_pointer` 等），并将 `assets.current_version_key` 更新为最新版本的 `version_key`。
 5. Adapter 返回协议响应。
 
 ### 6.2 Unified API 数据流
@@ -410,7 +408,7 @@ server ──► adapter ──► core
 
 ## 10. 待明确与延期事项
 
-以下设计细节留待后续实现设计文档确定。本节关注**实现层面未明确的技术方案**；需求层面的功能与约束延期事项见 `docs/baseline/REQUIREMENTS.md` §10。
+以下设计细节留待后续实现设计文档确定。本节关注**实现层面未明确的技术方案**；需求层面的功能与约束延期事项见 `docs/baseline/REQUIREMENTS.md` §11。
 
 1. Store trait 与 Adapter 的具体签名、错误枚举、序列化类型。
 2. Adapter 注册机制：采用编译时 feature flag；运行时动态插件作为后续版本可选方向。
