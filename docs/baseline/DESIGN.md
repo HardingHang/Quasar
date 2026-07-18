@@ -253,6 +253,124 @@ server ──► adapter ──► core
 - `model`、`agent`、`tool`、`mcp_server`、`fileset`、`topic` 等类型不预置，后续通过 Unified API 注册后，按 `dedicated_table` 扩展策略创建对应扩展表。
 - 具体扩展表 Schema 在实际设计该资产类型接入时确定。
 
+### 3.4 数据库 Schema DDL
+
+以下为与 §3.2 / §3.3 表结构对应的完整建表语句，作为迁移脚本（见 §8.4）的实现依据：
+
+```sql
+-- 注册表
+CREATE TABLE asset_types (
+    name TEXT PRIMARY KEY,
+    description TEXT,
+    category TEXT NOT NULL CHECK (category IN ('tabular', 'view', 'model', 'agent', 'tool', 'mcp_server', 'fileset', 'topic', 'generic')),
+    validation_schema JSONB,
+    extension_strategy TEXT NOT NULL CHECK (extension_strategy IN ('jsonb', 'dedicated_table', 'reference_only')),
+    supports_native_protocol BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+CREATE TABLE formats (
+    name TEXT PRIMARY KEY,
+    description TEXT,
+    mime_type TEXT,
+    serialization_hint TEXT
+);
+
+-- 第一层：Domain
+CREATE TABLE domains (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL UNIQUE,
+    comment TEXT,
+    properties JSONB,
+    storage_type TEXT,
+    storage_config JSONB,
+    warehouse TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 第二层：Namespace
+CREATE TABLE namespaces (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    domain_id UUID NOT NULL REFERENCES domains(id) ON DELETE RESTRICT,
+    path TEXT NOT NULL,
+    depth INTEGER NOT NULL,
+    comment TEXT,
+    properties JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(domain_id, path)
+);
+
+-- 第三层：Asset
+CREATE TABLE assets (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    namespace_id UUID NOT NULL REFERENCES namespaces(id) ON DELETE RESTRICT,
+    name TEXT NOT NULL,
+    asset_type TEXT NOT NULL REFERENCES asset_types(name),
+    format TEXT REFERENCES formats(name),
+    comment TEXT,
+    properties JSONB,
+    current_version_key TEXT,
+    deleted_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 索引
+CREATE UNIQUE INDEX uq_assets_active_name ON assets(namespace_id, name) WHERE deleted_at IS NULL;
+CREATE INDEX idx_assets_type_active ON assets(asset_type) WHERE deleted_at IS NULL;
+CREATE INDEX idx_assets_namespace ON assets(namespace_id) WHERE deleted_at IS NULL;
+
+-- 版本层
+CREATE TABLE asset_versions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    asset_id UUID NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    version_key TEXT NOT NULL,
+    version_order BIGINT NOT NULL,
+    version_properties JSONB,
+    content_inline JSONB,
+    content_pointer TEXT,
+    previous_version_id UUID REFERENCES asset_versions(id) ON DELETE RESTRICT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(asset_id, version_key),
+    UNIQUE(asset_id, version_order)
+);
+
+-- 单根约束
+CREATE UNIQUE INDEX uq_asset_versions_root ON asset_versions(asset_id) WHERE previous_version_id IS NULL;
+
+-- 标签层
+CREATE TABLE asset_tags (
+    asset_id UUID NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    tag TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY(asset_id, tag)
+);
+
+-- 类型扩展表：tabular_assets
+CREATE TABLE tabular_assets (
+    asset_id UUID PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
+    location TEXT NOT NULL,
+    metadata_location TEXT,
+    schema_snapshot JSONB
+);
+
+-- 类型扩展表：view_assets
+CREATE TABLE view_assets (
+    asset_id UUID PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
+    view_uuid UUID,
+    location TEXT,
+    metadata_location TEXT
+);
+
+-- 迁移记录
+CREATE TABLE schema_migrations (
+    version INTEGER PRIMARY KEY,
+    description TEXT NOT NULL,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
 ---
 
 ## 4. Store Trait 设计
@@ -279,7 +397,136 @@ server ──► adapter ──► core
 - 负责协议请求解析、请求校验、store trait 调用、协议响应构造。
 - 负责将内部 `CatalogError` 映射为协议特定错误格式。
 
-> **延期**：具体 trait 签名、错误枚举、序列化类型、adapter 注册机制（编译时 vs 运行时）将在后续实现设计文档中确定。
+> Trait 签名见 §4.3，错误枚举定义见 §7.4。adapter 注册机制（编译时 vs 运行时）与序列化类型的最终取舍仍在后续实现设计文档中确定（见 §10）。
+
+### 4.3 Trait 签名
+
+以下 trait 定义位于 `core` crate，是 `storage` 实现与 `adapter` 调用的唯一契约。所有 trait 通过 `async_trait` 声明，错误统一返回 `CatalogError`（定义见 §7.4）。
+
+```rust
+#[async_trait]
+pub trait DomainStore: Send + Sync {
+    async fn create_domain(&self, input: CreateDomain) -> Result<Domain, CatalogError>;
+    async fn get_domain(&self, name: &str) -> Result<Domain, CatalogError>;
+    async fn list_domains(&self, page: Page) -> Result<PageResult<Domain>, CatalogError>;
+    async fn update_domain(&self, name: &str, patch: DomainPatch) -> Result<Domain, CatalogError>;
+    async fn delete_domain(&self, name: &str) -> Result<(), CatalogError>;
+}
+
+#[async_trait]
+pub trait NamespaceStore: Send + Sync {
+    async fn create_namespace(&self, domain: &str, path: &str, input: CreateNamespace) -> Result<Namespace, CatalogError>;
+    async fn get_namespace(&self, domain: &str, path: &str) -> Result<Namespace, CatalogError>;
+    async fn list_namespaces(&self, domain: &str, prefix: Option<&str>, page: Page) -> Result<PageResult<Namespace>, CatalogError>;
+    async fn update_namespace(&self, domain: &str, path: &str, patch: NamespacePatch) -> Result<Namespace, CatalogError>;
+    async fn delete_namespace(&self, domain: &str, path: &str) -> Result<(), CatalogError>;
+    async fn resolve_path(&self, domain: &str, path: &str) -> Result<Namespace, CatalogError>;
+}
+
+#[async_trait]
+pub trait AssetStore: Send + Sync {
+    async fn create_asset(&self, input: CreateAsset) -> Result<Asset, CatalogError>;
+    async fn get_asset(&self, id: Uuid) -> Result<Asset, CatalogError>;
+    async fn get_asset_by_name(&self, domain: &str, namespace: &str, name: &str) -> Result<Asset, CatalogError>;
+    async fn list_assets(&self, filter: AssetFilter, page: Page) -> Result<PageResult<Asset>, CatalogError>;
+    async fn update_asset(&self, id: Uuid, patch: AssetPatch) -> Result<Asset, CatalogError>;
+    async fn rename_asset(&self, id: Uuid, new_name: &str) -> Result<Asset, CatalogError>;
+    async fn soft_delete_asset(&self, id: Uuid) -> Result<(), CatalogError>;
+    async fn restore_asset(&self, id: Uuid) -> Result<Asset, CatalogError>;
+    async fn hard_delete_asset(&self, id: Uuid) -> Result<(), CatalogError>;
+}
+
+#[async_trait]
+pub trait VersionStore: Send + Sync {
+    async fn create_version(&self, input: CreateVersion) -> Result<AssetVersion, CatalogError>;
+    async fn get_version(&self, asset_id: Uuid, version_key: &str) -> Result<AssetVersion, CatalogError>;
+    async fn list_versions(&self, asset_id: Uuid, page: Page) -> Result<PageResult<AssetVersion>, CatalogError>;
+    async fn get_latest_version(&self, asset_id: Uuid) -> Result<AssetVersion, CatalogError>;
+    async fn delete_version(&self, asset_id: Uuid, version_key: &str) -> Result<(), CatalogError>;
+}
+
+#[async_trait]
+pub trait TagStore: Send + Sync {
+    async fn add_tag(&self, asset_id: Uuid, tag: &str) -> Result<(), CatalogError>;
+    async fn remove_tag(&self, asset_id: Uuid, tag: &str) -> Result<(), CatalogError>;
+    async fn list_tags(&self, asset_id: Uuid) -> Result<Vec<String>, CatalogError>;
+    async fn list_assets_by_tag(&self, domain: &str, tag: &str, page: Page) -> Result<PageResult<Asset>, CatalogError>;
+}
+
+#[async_trait]
+pub trait UnifiedQueryStore: Send + Sync {
+    async fn query_assets(&self, query: AssetQuery) -> Result<PageResult<Asset>, CatalogError>;
+}
+
+#[async_trait]
+pub trait CasCommitStore: Send + Sync {
+    async fn compare_and_swap_pointer(
+        &self,
+        asset_id: Uuid,
+        expected_version_key: &str,
+        new_version: CreateVersion,
+    ) -> Result<AssetVersion, CatalogError>;
+}
+
+pub trait CatalogStore: DomainStore + NamespaceStore + AssetStore + VersionStore + TagStore + UnifiedQueryStore + CasCommitStore + Send + Sync {}
+```
+
+> `AssetTypeStore`（注册表读写：`register_asset_type`、`register_format`、`list_asset_types`、`get_asset_type`、`get_format`）同样属于 `CatalogStore` 的组合范畴，其签名风格与上述 trait 一致，在实现时按相同模式补充。
+
+#### 支撑类型
+
+分页、过滤与补丁类型同样定义在 `core` crate：
+
+```rust
+pub struct Page {
+    pub page: u32,
+    pub page_size: u32,
+}
+
+pub struct PageResult<T> {
+    pub items: Vec<T>,
+    pub total: u64,
+    pub page: u32,
+    pub page_size: u32,
+}
+
+pub struct AssetFilter {
+    pub domain: Option<String>,
+    pub namespace: Option<String>,
+    pub asset_type: Option<String>,
+    pub format: Option<String>,
+    pub tags: Vec<String>,
+    pub properties: HashMap<String, String>,
+    pub include_deleted: bool,
+}
+
+pub struct AssetQuery {
+    pub domain: String,
+    pub namespace_prefix: Option<String>,
+    pub asset_type: Option<String>,
+    pub format: Option<String>,
+    pub tags: Vec<String>,
+    pub properties: HashMap<String, String>,
+    pub include_deleted: bool,
+    pub page: Page,
+}
+
+pub struct AssetPatch {
+    pub comment: PatchField<String>,
+    pub properties: PatchField<serde_json::Value>,
+}
+
+pub enum PatchField<T> {
+    Set(T),
+    Unset,
+    NoChange,
+}
+```
+
+- `Page` / `PageResult`：所有列表方法的统一分页契约，对应 §5.4 的响应格式。
+- `AssetFilter`：`AssetStore::list_assets` 的过滤条件，全部字段可选组合。
+- `AssetQuery`：`UnifiedQueryStore::query_assets` 的查询条件，`domain` 必填，内嵌分页参数。
+- `PatchField<T>`：三态补丁语义——`Set` 更新为指定值、`Unset` 清除该字段、`NoChange` 保持不变，避免 `Option<Option<T>>` 的歧义。
 
 ---
 
@@ -311,6 +558,44 @@ server ──► adapter ──► core
 
 具体端点定义见需求文档 §6.2。
 
+### 5.4 统一分页与响应格式
+
+Unified API 的所有列表端点使用统一的分页响应格式，与 `PageResult<T>`（见 §4.3）一一对应：
+
+```json
+{
+  "items": [...],
+  "total": 100,
+  "page": 1,
+  "page_size": 20
+}
+```
+
+- `page` 从 1 开始；`page_size` 有服务端上限（超出时按上限截断）。
+- `total` 为满足过滤条件的记录总数，用于客户端分页计算。
+- 分页参数通过 query string 传递：`?page=1&page_size=20`。
+
+### 5.5 统一错误响应格式
+
+Unified API 的错误响应采用 RFC-7807 Problem Details，并扩展 `code` 与 `request_id` 字段：
+
+```json
+{
+  "type": "https://quasar.io/errors/not-found",
+  "title": "Not Found",
+  "status": 404,
+  "detail": "asset not found",
+  "instance": "/unified/v1/assets/...",
+  "code": "NOT_FOUND",
+  "request_id": "req-01H8XJ..."
+}
+```
+
+- `type`：错误类型的稳定 URI，供客户端程序化识别。
+- `code`：机器可读错误码，与 HTTP 状态码的映射见 §7.5。
+- `request_id`：请求唯一标识，与服务端日志关联，便于问题排查。
+- `detail` 遵循 §7.3 的脱敏规则，不包含 SQL、credential 等内部信息。
+
 ---
 
 ## 6. 数据流与生命周期
@@ -337,6 +622,38 @@ server ──► adapter ──► core
 - `POST /unified/v1/assets/{asset_id}/restore` 清除 `deleted_at`。若同一 Namespace 内同名资产已存在，则返回 `409 Conflict`，恢复失败；用户需先处理冲突资产。
 - 保留期后执行硬删除，级联清理扩展表与版本记录。
 
+### 6.4 并发控制设计
+
+#### current_version_key 乐观锁
+
+更新资产的 `current_version_key` 时使用条件更新：
+
+```sql
+UPDATE assets
+SET current_version_key = $1, updated_at = now()
+WHERE id = $2 AND (current_version_key = $3 OR current_version_key IS NULL)
+RETURNING *;
+```
+
+如果返回行数为 0，说明版本已被其他事务更新，返回 `Conflict`。
+
+#### CAS commit 实现
+
+`compare_and_swap_pointer` 在事务内执行：
+
+1. `SELECT current_version_key FROM assets WHERE id = $1 FOR UPDATE`
+2. 校验 `current_version_key == expected_version_key`
+3. `INSERT INTO asset_versions (...)`
+4. `UPDATE assets SET current_version_key = $new_version_key WHERE id = $1`
+5. 提交事务
+
+若步骤 2 失败，返回 `CommitFailedException`。
+
+#### 事务隔离级别
+
+- 默认使用 `READ COMMITTED`。
+- CAS commit 和软删除/恢复使用 `REPEATABLE READ` 防止幻读。
+
 ---
 
 ## 7. 错误处理设计
@@ -356,6 +673,83 @@ server ──► adapter ──► core
 - 不返回 SQL、S3 secret、连接串、credential。
 - 服务端日志可包含 metadata location 与 table location，但不得包含 credential。
 
+### 7.4 错误枚举定义
+
+`CatalogError` 定义在 `core` crate，是所有 store trait 的统一错误类型：
+
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum CatalogError {
+    #[error("not found: {0}")]
+    NotFound(String),
+
+    #[error("already exists: {0}")]
+    AlreadyExists(String),
+
+    #[error("conflict: {0}")]
+    Conflict(String),
+
+    #[error("validation failed: {0}")]
+    Validation(String),
+
+    #[error("transient error: {0}")]
+    Transient(String),
+
+    #[error("internal error: {0}")]
+    Internal(String),
+}
+```
+
+- `NotFound`：目标资源不存在（Domain、Namespace、Asset、Version 等）。
+- `AlreadyExists`：创建时违反唯一性约束（如同名资产、重复 tag）。
+- `Conflict`：并发冲突或状态冲突（如 CAS 失败、恢复时同名冲突）。
+- `Validation`：请求参数不合法（命名规则、必填字段、格式约束）。
+- `Transient`：可重试的临时错误（连接超时、连接池耗尽、序列化冲突）。
+- `Internal`：不可预期的内部错误；携带的上下文仅用于日志，响应时脱敏。
+
+### 7.5 HTTP 状态码映射
+
+各协议 adapter 按下表将 `CatalogError` 映射为协议特定的状态码与错误类型：
+
+| CatalogError | HTTP Status | Iceberg Error Type | RFC-7807 Code |
+|-------------|-------------|-------------------|---------------|
+| NotFound | 404 | NoSuchNamespaceException / NoSuchTableException | NOT_FOUND |
+| AlreadyExists | 409 | AlreadyExistsException | ALREADY_EXISTS |
+| Conflict | 409 | CommitFailedException | CONFLICT |
+| Validation | 400 | BadRequestException | VALIDATION_FAILED |
+| Transient | 503 | ServiceUnavailableException | TRANSIENT_ERROR |
+| Internal | 500 | InternalServerError | INTERNAL_ERROR |
+
+> `NotFound` 在 Iceberg 协议下根据资源类型进一步细分：`NoSuchNamespaceException`（Namespace）、`NoSuchTableException` / `NoSuchViewException`（Table/View）。
+
+### 7.6 错误响应格式
+
+Iceberg error body：
+
+```json
+{
+  "error": {
+    "message": "table already exists",
+    "type": "AlreadyExistsException",
+    "code": 409
+  }
+}
+```
+
+RFC-7807 Problem Details（Lance / Unified API）：
+
+```json
+{
+  "type": "https://quasar.io/errors/already-exists",
+  "title": "Already Exists",
+  "status": 409,
+  "detail": "table already exists",
+  "instance": "/unified/v1/domains/default/namespaces/analytics",
+  "code": "ALREADY_EXISTS",
+  "request_id": "req-01H8XJ..."
+}
+```
+
 ---
 
 ## 8. 对象存储与迁移
@@ -372,6 +766,51 @@ server ──► adapter ──► core
 - 使用内置迁移系统；`schema_migrations` 记录已应用版本。
 - 服务启动时按顺序应用未执行的迁移。
 - 迁移脚本幂等、可重试。
+
+### 8.3 对象存储路径设计
+
+#### 目录结构约定
+
+```
+{warehouse}/
+├── {domain}/
+│   ├── {namespace_path}/
+│   │   ├── {asset_name}/
+│   │   │   ├── metadata/          # Iceberg metadata.json 或 Lance manifest
+│   │   │   │   ├── v1.metadata.json
+│   │   │   │   ├── v2.metadata.json
+│   │   │   │   └── ...
+│   │   │   └── data/              # 实际数据文件（Iceberg/Lance 数据文件）
+│   │   │       └── ...
+```
+
+#### 路径模板
+
+- Iceberg metadata.json: `{warehouse}/{domain}/{namespace_path}/{asset_name}/metadata/v{version_order}.metadata.json`
+- Lance manifest: `{warehouse}/{domain}/{namespace_path}/{asset_name}/metadata/{version_key}.manifest`
+
+#### 路径冲突避免
+
+- 使用 `version_order` 或 `version_key` 作为文件名，天然避免冲突。
+- 并发写入同一版本时，通过 `current_version_key` CAS 保证只有一个成功（见 §6.4）。
+
+### 8.4 迁移脚本设计
+
+#### 文件命名
+
+```
+migrations/
+├── 0001_init.down.sql
+├── 0001_init.up.sql
+├── 0002_add_asset_tags.down.sql
+├── 0002_add_asset_tags.up.sql
+```
+
+#### 执行规则
+
+- 服务启动时按版本号升序执行未应用的 `.up.sql`。
+- 每个迁移在独立事务中执行。
+- 迁移失败则服务启动失败，不跳过。
 
 ---
 
@@ -407,13 +846,26 @@ server ──► adapter ──► core
 - 等待在途请求处理完毕。
 - 关闭连接池后退出。
 
+### 9.4 健康检查设计
+
+#### /healthz
+
+- 返回 `200 OK` 如果进程存活。
+- 不检查外部依赖。
+
+#### /readyz
+
+- 检查 PostgreSQL 连通性：`SELECT 1`。
+- 数据库不可达时返回 `503 Service Unavailable`。
+- 可选：检查对象存储连通性（基线阶段不检查）。
+
 ---
 
 ## 10. 待明确与延期事项
 
 以下设计细节留待后续实现设计文档确定。本节关注**实现层面未明确的技术方案**；需求层面的功能与约束延期事项见 `docs/baseline/REQUIREMENTS.md` §10。
 
-1. Store trait 与 Adapter 的具体签名、错误枚举、序列化类型。
+1. Adapter 的序列化类型与请求/响应结构体的具体定义（Store trait 签名见 §4.3，错误枚举见 §7.4）。
 2. Adapter 注册机制：采用编译时 feature flag；运行时动态插件作为后续版本可选方向。
 3. 层级 Namespace 的查询实现：物化路径 vs `ltree`。
 4. 内联内容大小限制与对象存储卸载策略。
