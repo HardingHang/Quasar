@@ -166,7 +166,6 @@ server ──► adapter ──► core
 | `storage_type` | TEXT | s3 / minio / hdfs / local。 |
 | `storage_config` | JSONB | 存储配置，不得明文存 credential。 |
 | `warehouse` | TEXT | 默认 warehouse 根路径。 |
-| `owner` | TEXT | 所有者标识。 |
 | `created_at` / `updated_at` | TIMESTAMPTZ | 时间戳。 |
 
 #### `namespaces`
@@ -248,10 +247,11 @@ server ──► adapter ──► core
 | `location` | TEXT | — |
 | `metadata_location` | TEXT | — |
 
-#### 其他内置类型的扩展表
+#### 其他资产类型的扩展表
 
-- `model_assets`、`agent_assets`、`tool_assets`、`mcp_server_assets`、`fileset_assets`、`topic_assets` 等所有内置资产类型均使用 `dedicated_table` 扩展策略，各自拥有独立的类型扩展表。
-- 具体扩展表 Schema 在实际设计该资产类型接入时确定；基线阶段以 `tabular_assets` 和 `view_assets` 为示例。
+- 基线阶段仅内置 `table` 和 `view` 两种资产类型，对应 `tabular_assets` 和 `view_assets` 扩展表。
+- `model`、`agent`、`tool`、`mcp_server`、`fileset`、`topic` 等类型不预置，后续通过 Unified API 注册后，按 `dedicated_table` 扩展策略创建对应扩展表。
+- 具体扩展表 Schema 在实际设计该资产类型接入时确定。
 
 ---
 
@@ -265,7 +265,7 @@ server ──► adapter ──► core
 | `NamespaceStore` | `create_namespace`, `get_namespace`, `list_namespaces`, `delete_namespace`, `resolve_path`. |
 | `AssetTypeStore` | `register_asset_type`, `register_format`, `list_asset_types`, `get_asset_type`, `get_format`. |
 | `AssetStore` | `create_asset`, `get_asset`, `list_assets`, `update_asset`, `rename_asset`, `soft_delete_asset`, `restore_asset`, `hard_delete_asset`. |
-| `VersionStore` | `create_version`, `get_version`, `list_versions`, `get_latest_version`, `delete_version`（`delete_version` 仅对非原生协议资产开放；原生协议资产版本不可删除）。`create_version` 时自动将 `assets.current_version_key` 更新为最新版本的 `version_key`；`get_latest_version` 基于 `assets.current_version_key` 查询，若其为 `NULL` 则返回 `NotFound`。 |
+| `VersionStore` | `create_version`, `get_version`, `list_versions`, `get_latest_version`, `delete_version`。`create_version` 自动更新 `assets.current_version_key`；`get_latest_version` 基于 `current_version_key` 查询；`delete_version` 仅对非原生协议资产开放（见需求文档 FR-V3、FR-V9）。 |
 | `TagStore` | `add_tag`, `remove_tag`, `list_assets_by_tag`. |
 | `UnifiedQueryStore` | `query_assets` with filters (domain, namespace, type, format, tags, properties). |
 | `CasCommitStore` | `compare_and_swap_pointer` for tabular assets requiring CAS. |
@@ -289,7 +289,7 @@ server ──► adapter ──► core
 
 - 路径前缀 `/iceberg/v1/...`。
 - `{prefix}` 映射为 Domain 名。
-- 覆盖 Namespace、Table、View、Transaction、Metrics 端点（见需求文档 §7.1）。
+- 覆盖 Config、Namespace、Table、View、Transaction、Metrics 端点（见需求文档 §6.1）。
 - 错误格式为 Iceberg JSON error body。
 
 ### 5.2 Lance REST Namespace
@@ -305,8 +305,11 @@ server ──► adapter ──► core
 - Asset 管理：对没有原生协议的资产类型提供完整生命周期管理（CRUD、重命名、恢复、删除）；对已有原生协议的资产类型仅提供列表/获取，生命周期操作由原生协议负责。
 - Version 管理：对原生协议资产仅提供列表/获取，且版本不可删除；对非原生协议资产提供完整生命周期管理（含创建与删除）。
 - AssetType/Format 注册与管理。
-- 发现过滤。
+- Tag 管理：为资产添加、移除、查询标签。
+- 发现过滤：按 Domain、Namespace、类型、格式、标签、属性组合过滤（见需求文档 §4.6）。
 - 错误格式为 RFC-7807 Problem Details，扩展 `code` 与 `request_id`。
+
+具体端点定义见需求文档 §6.2。
 
 ---
 
