@@ -408,7 +408,7 @@ server ──► adapter ──► core
 
 ## 10. 待明确与延期事项
 
-以下设计细节留待后续实现设计文档确定。本节关注**实现层面未明确的技术方案**；需求层面的功能与约束延期事项见 `docs/baseline/REQUIREMENTS.md` §11。
+以下设计细节留待后续实现设计文档确定。本节关注**实现层面未明确的技术方案**；需求层面的功能与约束延期事项见 `docs/baseline/REQUIREMENTS.md` §10。
 
 1. Store trait 与 Adapter 的具体签名、错误枚举、序列化类型。
 2. Adapter 注册机制：采用编译时 feature flag；运行时动态插件作为后续版本可选方向。
