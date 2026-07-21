@@ -176,7 +176,8 @@ server ──► adapter ──► core
 | `domain_id` | UUID FK→domains | `ON DELETE RESTRICT`。 |
 | `path` | TEXT | 层级路径，如 `analytics/teams/finance`；路径段命名规则为 URL-safe slug：`^[a-z0-9][a-z0-9_-]{0,62}$`。 |
 | `depth` | INT | 路径深度。 |
-| `comment` / `properties` | TEXT / JSONB | — |
+| `comment` | TEXT | 描述。 |
+| `properties` | JSONB | 自定义属性。 |
 | `created_at` / `updated_at` | TIMESTAMPTZ | — |
 | | `UNIQUE(domain_id, path)` | 约束。 |
 
@@ -191,7 +192,7 @@ server ──► adapter ──► core
 | `format` | TEXT FK→formats(name) | 可选格式。 |
 | `comment` | TEXT | 描述。 |
 | `properties` | JSONB | 治理/管理面属性。 |
-| `current_version_key` | TEXT | 当前版本的原生版本标识，对应 `asset_versions.version_key`；通过 `(id, current_version_key)` 可 join 到 `asset_versions`。 |
+| `current_version_key` | TEXT | 当前版本的原生版本标识，对应 `asset_versions.version_key`；通过 `asset_id = id AND version_key = current_version_key` 可 join 到 `asset_versions`。 |
 | `deleted_at` | TIMESTAMPTZ | 软删除时间，NULL 表示活动。 |
 | `created_at` / `updated_at` | TIMESTAMPTZ | — |
 
@@ -206,7 +207,6 @@ server ──► adapter ──► core
 | `id` | UUID PK | — |
 | `asset_id` | UUID FK→assets | `ON DELETE CASCADE`。 |
 | `version_key` | TEXT | 格式原生版本标识。 |
-| `version_order` | BIGINT NOT NULL | 可比较顺序，用于版本历史排序。 |
 | `version_properties` | JSONB | 版本属性。记录与格式无关的通用信息，如 commit message、作者、操作类型、自定义属性。不是 `content_pointer` 指向的格式原生元数据文件。 |
 | `content_inline` | JSONB | 可选少量内联内容（如小 JSON/YAML 配置）。实际工件文件通过 `content_pointer` 指向外部对象存储。 |
 | `content_pointer` | TEXT | 可选外部指针，指向对象存储中的实际工件文件。 |
@@ -215,7 +215,6 @@ server ──► adapter ──► core
 
 **约束**：
 - `UNIQUE(asset_id, version_key)`。
-- `UNIQUE(asset_id, version_order)`。
 - partial unique `uq_asset_versions_root` on `(asset_id) WHERE previous_version_id IS NULL`；保证每个资产至多一个根版本。
 
 #### `asset_tags`
@@ -233,7 +232,7 @@ server ──► adapter ──► core
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `asset_id` | UUID PK FK→assets | `ON DELETE CASCADE`；触发器保证 `asset_type='table'`。 |
+| `asset_id` | UUID PK FK→assets | `ON DELETE CASCADE`；应用层校验 `asset_type='table'`。 |
 | `location` | TEXT | 表根路径。 |
 | `metadata_location` | TEXT | 当前 metadata.json 指针。 |
 | `schema_snapshot` | JSONB | 当前 schema 缓存。 |
@@ -242,7 +241,7 @@ server ──► adapter ──► core
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `asset_id` | UUID PK FK→assets | `ON DELETE CASCADE`；触发器保证 `asset_type='view'`。 |
+| `asset_id` | UUID PK FK→assets | `ON DELETE CASCADE`；应用层校验 `asset_type='view'`。 |
 | `view_uuid` | UUID | Iceberg view uuid。 |
 | `location` | TEXT | — |
 | `metadata_location` | TEXT | — |
@@ -281,7 +280,7 @@ CREATE TABLE domains (
     name TEXT NOT NULL UNIQUE,
     comment TEXT,
     properties JSONB,
-    storage_type TEXT,
+    storage_type TEXT CHECK (storage_type IN ('s3', 'minio', 'hdfs', 'local')),
     storage_config JSONB,
     warehouse TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -326,14 +325,12 @@ CREATE TABLE asset_versions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     asset_id UUID NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
     version_key TEXT NOT NULL,
-    version_order BIGINT NOT NULL,
     version_properties JSONB,
     content_inline JSONB,
     content_pointer TEXT,
     previous_version_id UUID REFERENCES asset_versions(id) ON DELETE RESTRICT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE(asset_id, version_key),
-    UNIQUE(asset_id, version_order)
+    UNIQUE(asset_id, version_key)
 );
 
 -- 单根约束
@@ -365,11 +362,13 @@ CREATE TABLE view_assets (
 
 -- 迁移记录
 CREATE TABLE schema_migrations (
-    version INTEGER PRIMARY KEY,
+    version BIGINT PRIMARY KEY,
     description TEXT NOT NULL,
     applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
+
+> 所有表的 `updated_at` 由应用层在 UPDATE 语句中显式设置 `updated_at = now()`，不使用数据库触发器。
 
 ---
 
@@ -383,7 +382,7 @@ CREATE TABLE schema_migrations (
 | `NamespaceStore` | `create_namespace`, `get_namespace`, `list_namespaces`, `delete_namespace`, `resolve_path`. |
 | `AssetTypeStore` | `register_asset_type`, `register_format`, `list_asset_types`, `get_asset_type`, `get_format`. |
 | `AssetStore` | `create_asset`, `get_asset`, `list_assets`, `update_asset`, `rename_asset`, `soft_delete_asset`, `restore_asset`, `hard_delete_asset`. |
-| `VersionStore` | `create_version`, `get_version`, `list_versions`, `get_latest_version`, `delete_version`。`create_version` 自动更新 `assets.current_version_key`；`get_latest_version` 基于 `current_version_key` 查询；`delete_version` 仅对非原生协议资产开放（见需求文档 FR-V3、FR-V9）。 |
+| `VersionStore` | `create_version`, `get_version`, `list_versions`, `get_latest_version`, `delete_version`。`create_version` 自动更新 `assets.current_version_key`；`get_latest_version` 基于 `current_version_key` 查询；`delete_version` 仅对非原生协议资产开放（见需求文档 FR-V3、FR-V8）。 |
 | `TagStore` | `add_tag`, `remove_tag`, `list_assets_by_tag`. |
 | `UnifiedQueryStore` | `query_assets` with filters (domain, namespace, type, format, tags, properties). |
 | `CasCommitStore` | `compare_and_swap_pointer` for tabular assets requiring CAS. |
@@ -468,10 +467,17 @@ pub trait CasCommitStore: Send + Sync {
     ) -> Result<AssetVersion, CatalogError>;
 }
 
-pub trait CatalogStore: DomainStore + NamespaceStore + AssetStore + VersionStore + TagStore + UnifiedQueryStore + CasCommitStore + Send + Sync {}
-```
+#[async_trait]
+pub trait AssetTypeStore: Send + Sync {
+    async fn register_asset_type(&self, input: RegisterAssetType) -> Result<AssetType, CatalogError>;
+    async fn register_format(&self, input: RegisterFormat) -> Result<Format, CatalogError>;
+    async fn list_asset_types(&self, category: Option<&str>, page: Page) -> Result<PageResult<AssetType>, CatalogError>;
+    async fn get_asset_type(&self, name: &str) -> Result<AssetType, CatalogError>;
+    async fn get_format(&self, name: &str) -> Result<Format, CatalogError>;
+}
 
-> `AssetTypeStore`（注册表读写：`register_asset_type`、`register_format`、`list_asset_types`、`get_asset_type`、`get_format`）同样属于 `CatalogStore` 的组合范畴，其签名风格与上述 trait 一致，在实现时按相同模式补充。
+pub trait CatalogStore: DomainStore + NamespaceStore + AssetTypeStore + AssetStore + VersionStore + TagStore + UnifiedQueryStore + CasCommitStore + Send + Sync {}
+```
 
 #### 支撑类型
 
@@ -479,15 +485,15 @@ pub trait CatalogStore: DomainStore + NamespaceStore + AssetStore + VersionStore
 
 ```rust
 pub struct Page {
-    pub page: u32,
-    pub page_size: u32,
+    pub page: u64,
+    pub page_size: u64,
 }
 
 pub struct PageResult<T> {
     pub items: Vec<T>,
     pub total: u64,
-    pub page: u32,
-    pub page_size: u32,
+    pub page: u64,
+    pub page_size: u64,
 }
 
 pub struct AssetFilter {
@@ -521,11 +527,77 @@ pub enum PatchField<T> {
     Unset,
     NoChange,
 }
+
+// ---------- 创建与注册输入类型 ----------
+
+pub struct CreateDomain {
+    pub name: String,
+    pub comment: Option<String>,
+    pub properties: Option<serde_json::Value>,
+    pub storage_type: Option<String>,
+    pub storage_config: Option<serde_json::Value>,
+    pub warehouse: Option<String>,
+}
+
+pub struct DomainPatch {
+    pub comment: PatchField<String>,
+    pub properties: PatchField<serde_json::Value>,
+    pub storage_type: PatchField<String>,
+    pub storage_config: PatchField<serde_json::Value>,
+    pub warehouse: PatchField<String>,
+}
+
+pub struct CreateNamespace {
+    pub comment: Option<String>,
+    pub properties: Option<serde_json::Value>,
+}
+
+pub struct NamespacePatch {
+    pub comment: PatchField<String>,
+    pub properties: PatchField<serde_json::Value>,
+}
+
+pub struct CreateAsset {
+    pub domain: String,
+    pub namespace: String,
+    pub name: String,
+    pub asset_type: String,
+    pub format: Option<String>,
+    pub comment: Option<String>,
+    pub properties: Option<serde_json::Value>,
+}
+
+pub struct CreateVersion {
+    pub asset_id: Uuid,
+    pub version_key: String,
+    pub version_properties: Option<serde_json::Value>,
+    pub content_inline: Option<serde_json::Value>,
+    pub content_pointer: Option<String>,
+    pub previous_version_id: Option<Uuid>,
+}
+
+pub struct RegisterAssetType {
+    pub name: String,
+    pub description: Option<String>,
+    pub category: String,
+    pub validation_schema: Option<serde_json::Value>,
+    pub extension_strategy: String,
+    pub supports_native_protocol: bool,
+}
+
+pub struct RegisterFormat {
+    pub name: String,
+    pub description: Option<String>,
+    pub mime_type: Option<String>,
+    pub serialization_hint: Option<String>,
+}
 ```
 
+> 领域模型类型（`Domain`、`Namespace`、`Asset`、`AssetVersion`、`AssetType`、`Format`）与 §3.2 表结构一一对应，此处不再重复定义。
+
 - `Page` / `PageResult`：所有列表方法的统一分页契约，对应 §5.4 的响应格式。
-- `AssetFilter`：`AssetStore::list_assets` 的过滤条件，全部字段可选组合。
-- `AssetQuery`：`UnifiedQueryStore::query_assets` 的查询条件，`domain` 必填，内嵌分页参数。
+- `AssetFilter`：`AssetStore::list_assets` 的存储层过滤条件，用于已知 Domain/Namespace 上下文的资产列举；`namespace` 为精确匹配。
+- `AssetQuery`：`UnifiedQueryStore::query_assets` 的发现层查询条件，用于跨 Namespace 资产发现；`domain` 必填，`namespace_prefix` 为前缀匹配，支持层级查询。
 - `PatchField<T>`：三态补丁语义——`Set` 更新为指定值、`Unset` 清除该字段、`NoChange` 保持不变，避免 `Option<Option<T>>` 的歧义。
 
 ---
@@ -605,7 +677,7 @@ Unified API 的错误响应采用 RFC-7807 Problem Details，并扩展 `code` �
 1. 客户端调用原生端点。
 2. Adapter 解析协议请求，解析 Domain/Namespace/Asset。
 3. Adapter 校验资产类型与格式规则。
-4. Adapter 在事务内调用 store trait：创建/更新资产身份与类型扩展字段，将原生版本镜像写入 `asset_versions`（含 `version_key`、`version_order`、`content_pointer` 等），并将 `assets.current_version_key` 更新为最新版本的 `version_key`。
+4. Adapter 在事务内调用 store trait：创建/更新资产身份与类型扩展字段，将原生版本镜像写入 `asset_versions`（含 `version_key`、`content_pointer` 等），并将 `assets.current_version_key` 更新为最新版本的 `version_key`。
 5. Adapter 返回协议响应。
 
 ### 6.2 Unified API 数据流
@@ -651,8 +723,9 @@ RETURNING *;
 
 #### 事务隔离级别
 
-- 默认使用 `READ COMMITTED`。
-- CAS commit 和软删除/恢复使用 `REPEATABLE READ` 防止幻读。
+- 统一使用 `READ COMMITTED`（PostgreSQL / openGauss 默认级别）。
+- CAS commit、软删除/恢复、多表事务均通过 `SELECT ... FOR UPDATE` 显式锁定目标行，结合 RC 的语句级最新读，避免快照过期导致的 CAS 失败。
+- 多表事务按 `asset_id` 排序后依次锁定，防止死锁。
 
 ---
 
@@ -780,18 +853,20 @@ RFC-7807 Problem Details（Lance / Unified API）：
 │   │   │   │   ├── v1.metadata.json
 │   │   │   │   ├── v2.metadata.json
 │   │   │   │   └── ...
-│   │   │   └── data/              # 实际数据文件（Iceberg/Lance 数据文件）
+│   │   │   └── data/              # 实际数据文件，由 Iceberg/Lance client 直接写入，Quasar 不管理
 │   │   │       └── ...
 ```
 
 #### 路径模板
 
-- Iceberg metadata.json: `{warehouse}/{domain}/{namespace_path}/{asset_name}/metadata/v{version_order}.metadata.json`
+- Iceberg metadata.json: `{warehouse}/{domain}/{namespace_path}/{asset_name}/metadata/v{version_key}.metadata.json`
 - Lance manifest: `{warehouse}/{domain}/{namespace_path}/{asset_name}/metadata/{version_key}.manifest`
+
+> `namespace_path` 中的 `/` 会自然映射为对象存储的多级 key（如 `analytics/teams/finance` 对应 S3 key 前缀 `analytics/teams/finance/`）。
 
 #### 路径冲突避免
 
-- 使用 `version_order` 或 `version_key` 作为文件名，天然避免冲突。
+- 使用 `version_key` 作为文件名，天然避免冲突。
 - 并发写入同一版本时，通过 `current_version_key` CAS 保证只有一个成功（见 §6.4）。
 
 ### 8.4 迁移脚本设计
@@ -809,6 +884,7 @@ migrations/
 #### 执行规则
 
 - 服务启动时按版本号升序执行未应用的 `.up.sql`。
+- `.down.sql` 仅用于开发环境手动回滚，生产环境不自动执行。
 - 每个迁移在独立事务中执行。
 - 迁移失败则服务启动失败，不跳过。
 
@@ -820,7 +896,7 @@ migrations/
 
 | 变量名 | 必填 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `QUASAR_DATABASE_URL` | 是 | `postgres://postgres:postgres@localhost:5432/quasar` | PostgreSQL 连接串。 |
+| `QUASAR_DATABASE_URL` | 是 | `postgres://user:password@localhost:5432/quasar` | PostgreSQL 连接串；生产环境必须替换为实际凭据。 |
 | `QUASAR_HOST` | 否 | `0.0.0.0` | HTTP 监听地址。 |
 | `QUASAR_PORT` | 否 | `8080` | HTTP 监听端口。 |
 | `QUASAR_LOG_LEVEL` | 否 | `info` | tracing 日志级别。 |
@@ -867,11 +943,10 @@ migrations/
 
 1. Adapter 的序列化类型与请求/响应结构体的具体定义（Store trait 签名见 §4.3，错误枚举见 §7.4）。
 2. Adapter 注册机制：采用编译时 feature flag；运行时动态插件作为后续版本可选方向。
-3. 层级 Namespace 的查询实现：物化路径 vs `ltree`。
-4. 内联内容大小限制与对象存储卸载策略。
-5. 软删除保留窗口与硬删除策略。
-6. 从旧里程碑 Schema 到新通用 Schema 的迁移脚本。
-7. model、agent、tool、mcp_server 等资产类型的扩展表字段与原生协议。
+3. 内联内容大小限制与对象存储卸载策略。
+4. 软删除保留窗口与硬删除策略。
+5. 从旧里程碑 Schema 到新通用 Schema 的迁移脚本。
+6. model、agent、tool、mcp_server 等资产类型的扩展表字段与原生协议。
 
 ---
 

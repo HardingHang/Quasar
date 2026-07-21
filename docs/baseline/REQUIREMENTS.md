@@ -49,7 +49,7 @@ Quasar 不替代数据面系统。它记录身份、元数据、版本指针，�
 | **Asset** | 被注册的实体本身：表、视图、模型、Agent、Tool、MCP Server 等。 |
 | **AssetType** | 已注册的资产种类，例如 `table`、`view`、`model`、`agent`、`tool`。 |
 | **Format** | 资产的序列化或表示形式，例如 `iceberg`、`lance`、`onnx`、`gguf`、`json`。 |
-| **Version** | 资产的特定版本，通过类型原生的 `version_key` 与单调的 `version_order` 标识。 |
+| **Version** | 资产的特定版本，通过类型原生的 `version_key` 标识。 |
 | **Native protocol adapter** | 针对特定资产类型/格式实现上游标准协议的适配器。 |
 | **Unified API** | Quasar 自有的、与格式无关的管理与发现接口。 |
 | **Metadata-only** | Quasar 默认仅存储元数据、指针与引用；实际工件内容存放于外部存储。 |
@@ -131,16 +131,15 @@ Quasar 不替代数据面系统。它记录身份、元数据、版本指针，�
 
 | 编号 | 功能需求 | 验收标准 |
 |------|---------|---------|
-| FR-V1 | 每个资产拥有版本历史，版本包含 version_key、version_order、version_properties、内容、前一版本指针 | 创建版本后可通过 list_versions 查询到 |
+| FR-V1 | 每个资产拥有版本历史，版本包含 version_key、version_properties、内容、前一版本指针 | 创建版本后可通过 list_versions 查询到 |
 | FR-V2 | 原生协议资产的版本必须镜像到 `asset_versions` | Iceberg/Lance commit 后，`asset_versions` 中存在对应记录；`content_pointer` 指向原生元数据文件 |
 | FR-V3 | 最新版本通过 `assets.current_version_key` 确定 | create_version 时自动更新 `current_version_key`；get_latest_version 基于该字段查询 |
-| FR-V4 | `version_order` 为 NOT NULL 且在同一资产内唯一 | 用于版本历史排序；创建时自动分配或按原生协议规则生成 |
-| FR-V5 | 每个资产至多一个根版本（`previous_version_id IS NULL`） | 通过 partial unique 索引保证；尝试创建第二个根版本返回 `409 Conflict` |
-| FR-V6 | 版本链完整性保护 | `previous_version_id` 使用 `ON DELETE RESTRICT`；删除被后继引用的版本返回 `409 Conflict` |
-| FR-V7 | 查询版本详情（按 version_key 或 version_order） | 返回版本完整字段；不存在返回 `404 Not Found` |
-| FR-V8 | 列出资产的版本历史 | 按 `version_order` 排序；支持分页；可包含软删除资产的版本 |
-| FR-V9 | 删除版本（仅限非原生协议资产） | 原生协议资产版本不可删除；非原生协议资产可删除未被引用的版本 |
-| FR-V10 | 版本内容支持内联与外部指针两种方式 | `content_inline` 存小配置；`content_pointer` 存外部文件路径；两者至少其一 |
+| FR-V4 | 每个资产至多一个根版本（`previous_version_id IS NULL`） | 通过 partial unique 索引保证；尝试创建第二个根版本返回 `409 Conflict` |
+| FR-V5 | 版本链完整性保护 | `previous_version_id` 使用 `ON DELETE RESTRICT`；删除被后继引用的版本返回 `409 Conflict` |
+| FR-V6 | 查询版本详情（按 version_key） | 返回版本完整字段；不存在返回 `404 Not Found` |
+| FR-V7 | 列出资产的版本历史 | 按 `version_key` 或 `created_at` 排序；支持分页；可包含软删除资产的版本 |
+| FR-V8 | 删除版本（仅限非原生协议资产） | 原生协议资产版本不可删除；非原生协议资产可删除未被引用的版本 |
+| FR-V9 | 版本内容支持内联与外部指针两种方式 | `content_inline` 存小配置；`content_pointer` 存外部文件路径；两者至少其一 |
 
 ### 4.5 AssetType / Format 管理
 
@@ -179,7 +178,7 @@ Quasar 不替代数据面系统。它记录身份、元数据、版本指针，�
 | FR-P4 | Lance `{id}` 使用 `$` 分隔符序列化 Domain/Namespace/Table | 如 `{domain}${namespace}${table}`；解析正确 |
 | FR-P5 | `/iceberg/v1/config` 的 `endpoints` 字段与实际实现一致 | 只返回已实现的端点；客户端可据此探测能力 |
 | FR-P6 | 原生协议 adapter 是其资产生命周期操作的权威 | 创建、更新、删除、重命名、恢复等操作通过原生端点完成，直接调用 store trait |
-| FR-P7 | 原生协议版本镜像到 `asset_versions` | 每次 commit/变更都在 `asset_versions` 写入记录，含 version_key、version_order、content_pointer |
+| FR-P7 | 原生协议版本镜像到 `asset_versions` | 每次 commit/变更都在 `asset_versions` 写入记录，含 version_key、content_pointer |
 | FR-P8 | CAS commit 与多表事务并发冲突返回协议错误码 | Iceberg CAS 冲突返回 `409` 及 Iceberg 规范错误体；多表事务冲突按协议处理 |
 | FR-P9 | 协议错误格式映射正确 | Iceberg 返回 Iceberg JSON error body；Lance 返回 RFC-7807 Problem Details |
 | FR-P10 | 原生协议 adapter 通过编译时 feature flag 控制 | `--features iceberg` / `--features lance` 可独立启用/禁用对应 adapter |
@@ -193,11 +192,10 @@ Quasar 不替代数据面系统。它记录身份、元数据、版本指针，�
 | FR-C3 | Namespace 路径在同一 Domain 内唯一 | 创建重复路径返回 `409 Conflict` |
 | FR-C4 | 活动资产名称在同一 Namespace 内唯一 | 通过 partial unique 索引保证；创建重名活动资产返回 `409 Conflict` |
 | FR-C5 | 版本 version_key 在同一 Asset 内唯一 | 重复 version_key 返回 `409 Conflict` |
-| FR-C6 | 版本 version_order 在同一 Asset 内唯一且非空 | 重复或 NULL version_order 返回 `409 Conflict` |
-| FR-C7 | 软删除/恢复语义 | 软删除标记 `deleted_at`；恢复时若同名活动资产存在返回 `409 Conflict` |
-| FR-C8 | 原生协议资产版本不可变 | 原生协议资产版本只增不删；delete_version 对其返回 `405` |
-| FR-C9 | 版本链完整性 | `previous_version_id` 使用 `ON DELETE RESTRICT`；删除被引用版本返回 `409 Conflict` |
-| FR-C10 | 非法资产类型与格式被拒绝 | 创建资产时若 asset_type 或 format 未注册，返回 `400 Bad Request` |
+| FR-C6 | 软删除/恢复语义 | 软删除标记 `deleted_at`；恢复时若同名活动资产存在返回 `409 Conflict` |
+| FR-C7 | 原生协议资产版本不可变 | 原生协议资产版本只增不删；delete_version 对其返回 `405` |
+| FR-C8 | 版本链完整性 | `previous_version_id` 使用 `ON DELETE RESTRICT`；删除被引用版本返回 `409 Conflict` |
+| FR-C9 | 非法资产类型与格式被拒绝 | 创建资产时若 asset_type 或 format 未注册，返回 `400 Bad Request` |
 
 ### 4.9 Infrastructure 基础设施
 
@@ -283,9 +281,9 @@ Quasar 默认采用 metadata-only 原则：目录只存储元数据、指针与�
 ### 5.6 Version
 
 - 每个资产都拥有版本历史。
-- 一个版本包含 `version_key`、`version_order`、版本属性（`version_properties`，与格式无关的通用信息）、内容（`content_inline` 内联或 `content_pointer` 外部指针）、前一版本指针。
-- 最新版本通过 `assets.current_version_key` 确定；`version_order` 用于版本历史的排序与遍历。
-- 对于原生协议资产类型（如 Iceberg、Lance），其原生版本必须在 `asset_versions` 中镜像保存。`version_key` 采用原生版本标识，`content_pointer` 指向原生元数据文件；版本历史通过 `version_order` 排序，保证 Unified API 与原生协议端点可观测到一致的版本历史。
+- 一个版本包含 `version_key`、版本属性（`version_properties`，与格式无关的通用信息）、内容（`content_inline` 内联或 `content_pointer` 外部指针）、前一版本指针。
+- 最新版本通过 `assets.current_version_key` 确定；版本历史通过 `version_key`（原生协议可排序时）或 `created_at`（兜底）排序与遍历。
+- 对于原生协议资产类型（如 Iceberg、Lance），其原生版本必须在 `asset_versions` 中镜像保存。`version_key` 采用原生版本标识，`content_pointer` 指向原生元数据文件；版本历史通过 `version_key` 或 `created_at` 排序，保证 Unified API 与原生协议端点可观测到一致的版本历史。
 
 ---
 
@@ -385,7 +383,7 @@ Unified API 是位于 `/unified/v1/...` 的、与格式和协议无关的管理�
 - 从空数据库按内置迁移初始化成功，服务可正常启动；迁移可重复执行。
 - Domain 名称全局唯一；Namespace 路径在同一 Domain 内唯一；活动资产名称在同一 Namespace 内唯一。
 - 非法资产类型与格式被注册表拒绝。
-- 版本 `version_key` 在同一 Asset 内唯一；`version_order` 在同一 Asset 内唯一且非空。
+- 版本 `version_key` 在同一 Asset 内唯一。
 - 软删除资产恢复时，若同一 Namespace 内同名活动资产已存在，返回 `409 Conflict`。
 
 ### 9.2 Native protocol 验收
