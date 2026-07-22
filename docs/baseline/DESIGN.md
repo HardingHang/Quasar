@@ -137,6 +137,8 @@ server ──► adapter ──► core
 
 #### `asset_types`
 
+> 用途：资产类型的**全局注册表**。资产的 `asset_type` 必须在此注册；`category` 用于分类浏览；`validation_schema` 可选约束资产 properties；`extension_strategy` 决定类型特有字段的存储方式（`dedicated_table` 建扩展表，见 §3.3）；`supports_native_protocol` 供 Unified API 判定只读语义（见 §5.3）。内置 `table`、`view`，其余类型通过 Unified API 动态注册（FR-T3）。
+
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `name` | TEXT PK | 唯一标识，如 `table`、`model`。 |
@@ -148,6 +150,8 @@ server ──► adapter ──► core
 
 #### `formats`
 
+> 用途：格式注册表。格式与资产类型**正交**——同一类型可有多种格式（如 table 可以是 iceberg 或 lance）；资产的 `format` 必须在此注册，协议隔离按 `assets.format` 过滤。内置 `iceberg`、`lance`（FR-T3）。
+
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `name` | TEXT PK | 唯一标识，如 `iceberg`、`onnx`。 |
@@ -156,6 +160,8 @@ server ──► adapter ──► core
 | `serialization_hint` | TEXT | 可选，如 `json`、`protobuf`。 |
 
 #### `domains`
+
+> 用途：顶层组织边界（多团队/多环境隔离）。名称全局唯一并用于 API 路径（Iceberg `{prefix}`、Lance id 首段、Unified 路径段）。`storage_type`/`storage_config`/`warehouse` 为 Domain 级对象存储配置，未指定时回落全局环境变量（解析优先级见 §8.1）；`storage_config` 不得明文存 credential。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -170,6 +176,8 @@ server ──► adapter ──► core
 
 #### `namespaces`
 
+> 用途：Domain 内的**层级**命名空间，资产的容器。`path` 物化完整层级路径（段间 `/` 分隔，每段为 URL-safe slug），`depth` 冗余存储深度以支持前缀查询（FR-N3）；创建时隐式创建中间节点（FR-N2）；`ON DELETE RESTRICT` + 应用层非空校验保证只能删除空 Namespace。
+
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `id` | UUID PK | — |
@@ -182,6 +190,8 @@ server ──► adapter ──► core
 | | `UNIQUE(domain_id, path)` | 约束。 |
 
 #### `assets`
+
+> 用途：所有资产的**统一身份**。治理操作（软删除/恢复/标签）统一引用 `id`（重命名不影响引用）；`format` 上移到本表后，协议隔离（Iceberg/Lance 各自只认自己的格式）按此列过滤，无需 JOIN 扩展表；`current_version_key` 指向当前版本，是 CAS 成功后同步更新的结果而非校验锚点（见 §6.4）；`deleted_at` 为软删除标记，软删除期间名字被释放（部分唯一索引仅约束活动资产）。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -202,6 +212,8 @@ server ──► adapter ──► core
 
 #### `asset_versions`
 
+> 用途：版本历史，**不可变**（无 `updated_at`）。原生协议 commit 时镜像写入（FR-V2）；`version_key` 为格式原生标识（Iceberg = metadata 序号如 `00001`，Lance = 原生版本号）；`content_pointer` 指向对象存储中的元数据文件（Iceberg 为完整 metadata_location，Lance 为 manifest 路径）；`previous_version_id` 构成版本链——`ON DELETE RESTRICT` 防止删除被后继引用的版本，单根约束保证每资产至多一个根版本；CAS 路径下前驱由存储层自动链接（见 §6.4 S4）。
+
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `id` | UUID PK | — |
@@ -219,6 +231,8 @@ server ──► adapter ──► core
 
 #### `asset_tags`
 
+> 用途：资产标签（治理标注），供 Discovery 按标签过滤（FR-Q5）。标签写入不触碰原生协议状态，因此对所有资产（含原生协议资产）开放。
+
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `asset_id` | UUID FK→assets | `ON DELETE CASCADE`。 |
@@ -230,6 +244,8 @@ server ──► adapter ──► core
 
 #### `tabular_assets`
 
+> 用途：`table` 类型的扩展表（`extension_strategy = dedicated_table`）。`metadata_location` 是当前内容指针的**热路径缓存**——load 时无需 join 版本表，也是 CAS 的校验锚点（见 §6.4）；`schema_snapshot` 为当前 schema 缓存。`asset_type='table'` 由应用层校验（不使用数据库触发器）。
+
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `asset_id` | UUID PK FK→assets | `ON DELETE CASCADE`；应用层校验 `asset_type='table'`。 |
@@ -238,6 +254,8 @@ server ──► adapter ──► core
 | `schema_snapshot` | JSONB | 当前 schema 缓存。 |
 
 #### `view_assets`
+
+> 用途：`view` 类型的扩展表。`view_uuid` 对应 Iceberg view metadata 中的 uuid（commit 时校验 `assert-view-uuid`）；`metadata_location` 同为当前内容指针缓存。`asset_type='view'` 由应用层校验。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -370,6 +388,53 @@ CREATE TABLE schema_migrations (
 
 > 所有表的 `updated_at` 由应用层在 UPDATE 语句中显式设置 `updated_at = now()`，不使用数据库触发器。
 
+### 3.5 协议实现层辅助表（Iceberg adapter 私有）
+
+以下三张表是 **Iceberg adapter 的实现层私表**，用于支撑 Iceberg REST spec 的 stage-create、metrics、purge 能力。它们**不属于通用模型**：不挂 `assets` 外键（`iceberg_scan_metrics_reports.asset_id` 除外）、不被其他 adapter 感知、Schema 由 Iceberg adapter 私有演进。它们与通用表包含在同一个迁移版本中（见 §8.4）。
+
+#### `iceberg_staged_tables`
+
+用途：Iceberg `stage-create` 的暂存记录。客户端以 `stage-create=true` 创建表时，元数据先暂存于此（默认 24 小时过期），首个 commit 到达时转正为正式资产；超时未 commit 的记录可被清理。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | UUID PK | — |
+| `domain_name` / `namespace_path` / `table_name` | TEXT | 弱引用（无 FK），按名定位暂存表；`namespace_path` 为层级路径。 |
+| `table_uuid` | UUID | 暂存表的 table-uuid，commit 转正时校验。 |
+| `location` | TEXT | 表根路径。 |
+| `metadata_location` | TEXT | 暂存 metadata.json 指针。 |
+| `metadata_json` | JSONB | 暂存的完整元数据。 |
+| `properties` | JSONB | 表属性。 |
+| `expires_at` | TIMESTAMPTZ | 过期时间；过期记录视为不存在。 |
+| `created_at` | TIMESTAMPTZ | — |
+| | `UNIQUE(domain_name, namespace_path, table_name)` | 同名暂存表唯一。 |
+
+#### `iceberg_scan_metrics_reports`
+
+用途：Iceberg `POST .../tables/{table}/metrics` 端点上报的 scan metrics 记录，仅追加、供运维分析。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | UUID PK | — |
+| `asset_id` | UUID FK→assets | `ON DELETE SET NULL`；资产删除后报告保留。 |
+| `domain_name` / `namespace_path` / `table_name` | TEXT | 上报时的名字快照（资产可能随后重命名）。 |
+| `report` | JSONB | 客户端上报的原始报告。 |
+| `user_agent` | TEXT | 客户端标识。 |
+| `created_at` | TIMESTAMPTZ | — |
+
+#### `iceberg_purge_operations`
+
+用途：`DROP TABLE ...?purgeRequested=true` 时记录 purge 操作状态，用于跟踪/补偿对象存储文件的清理过程（catalog 行删除与对象文件删除无法同事务）。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | UUID PK | 操作 ID。 |
+| `domain_name` / `namespace_path` / `table_name` / `table_location` | TEXT | 被 purge 表的定位信息快照。 |
+| `metadata_location` | TEXT | 删除时的 metadata.json 指针。 |
+| `status` | TEXT | `started` / `catalog_dropped` / `completed` / `failed`。 |
+| `error_message` | TEXT | 失败原因。 |
+| `requested_at` / `completed_at` | TIMESTAMPTZ | — |
+
 ---
 
 ## 4. Store Trait 设计
@@ -382,12 +447,14 @@ CREATE TABLE schema_migrations (
 | `NamespaceStore` | `create_namespace`, `get_namespace`, `list_namespaces`, `delete_namespace`, `resolve_path`. |
 | `AssetTypeStore` | `register_asset_type`, `register_format`, `list_asset_types`, `get_asset_type`, `get_format`. |
 | `AssetStore` | `create_asset`, `get_asset`, `list_assets`, `update_asset`, `rename_asset`, `soft_delete_asset`, `restore_asset`, `hard_delete_asset`. |
-| `VersionStore` | `create_version`, `get_version`, `list_versions`, `get_latest_version`, `delete_version`。`create_version` 自动更新 `assets.current_version_key`；`get_latest_version` 基于 `current_version_key` 查询；`delete_version` 仅对非原生协议资产开放（见需求文档 FR-V3、FR-V8）。 |
-| `TagStore` | `add_tag`, `remove_tag`, `list_assets_by_tag`. |
+| `VersionStore` | `create_version`, `get_version`, `list_versions`, `get_latest_version`。`create_version` 自动更新 `assets.current_version_key`；`get_latest_version` 基于 `current_version_key` 查询。`delete_version` 基线延后、无调用方（见需求文档 §10）。 |
+| `TagStore` | `add_tag`, `remove_tag`, `list_tags`, `list_assets_by_tag`. |
 | `UnifiedQueryStore` | `query_assets` with filters (domain, namespace, type, format, tags, properties). |
-| `CasCommitStore` | `compare_and_swap_pointer` for tabular assets requiring CAS. |
+| `CasCommitStore` | `compare_and_swap_pointer`：以当前内容指针为锚点的 CAS 版本提交（见 §6.4）。 |
 | `CatalogStore` | Marker trait combining all stores. |
 | `AdapterRegistry` | Register and route native protocol adapters. |
+
+> **协议扩展 trait**：通用 `CatalogStore` 之外，原生 adapter 可拥有协议专属的扩展 trait。当前唯一实例是 `IcebergCatalogStore` = `CatalogStore` + 6 个 Iceberg 扩展 trait：`IcebergStagingStore`（stage-create 暂存/转正）、`IcebergRegisterStore`（register 外部表）、`IcebergMetricsStore`（scan metrics 记录）、`IcebergPurgeStore`（purge 操作跟踪）、`IcebergTransactionStore`（多表事务原子 commit）、`IcebergViewStore`（view 生命周期）。这些能力无法用通用 trait 组合实现（如多表事务要求单事务内多表 CAS 整体回滚），其操作落在 §3.5 的协议私表上。扩展 trait 与通用 trait 遵循同样的错误、分页与支撑类型约定。
 
 ### 4.2 Adapter 契约
 
@@ -403,75 +470,95 @@ CREATE TABLE schema_migrations (
 以下 trait 定义位于 `core` crate，是 `storage` 实现与 `adapter` 调用的唯一契约。所有 trait 通过 `async_trait` 声明，错误统一返回 `CatalogError`（定义见 §7.4）。
 
 ```rust
+/// Domain 生命周期。Domain 是顶层组织边界，按名称寻址（名称全局唯一）。
 #[async_trait]
 pub trait DomainStore: Send + Sync {
     async fn create_domain(&self, input: CreateDomain) -> Result<Domain, CatalogError>;
     async fn get_domain(&self, name: &str) -> Result<Domain, CatalogError>;
-    async fn list_domains(&self, page: Page) -> Result<PageResult<Domain>, CatalogError>;
+    async fn list_domains(&self, offset: u64, limit: u64) -> Result<Vec<Domain>, CatalogError>;
     async fn update_domain(&self, name: &str, patch: DomainPatch) -> Result<Domain, CatalogError>;
+    /// 仅空 Domain 可删除；非空返回 Conflict。
     async fn delete_domain(&self, name: &str) -> Result<(), CatalogError>;
 }
 
+/// 层级 Namespace 生命周期。Namespace 按 (domain, path) 寻址，path 如 `analytics/teams/finance`。
 #[async_trait]
 pub trait NamespaceStore: Send + Sync {
+    /// 创建 path 指向的 Namespace；中间节点不存在时隐式创建。
     async fn create_namespace(&self, domain: &str, path: &str, input: CreateNamespace) -> Result<Namespace, CatalogError>;
     async fn get_namespace(&self, domain: &str, path: &str) -> Result<Namespace, CatalogError>;
-    async fn list_namespaces(&self, domain: &str, prefix: Option<&str>, page: Page) -> Result<PageResult<Namespace>, CatalogError>;
+    /// prefix 为路径前缀过滤（层级查询）；None 列出 Domain 下全部。
+    async fn list_namespaces(&self, domain: &str, prefix: Option<&str>, offset: u64, limit: u64) -> Result<Vec<Namespace>, CatalogError>;
     async fn update_namespace(&self, domain: &str, path: &str, patch: NamespacePatch) -> Result<Namespace, CatalogError>;
+    /// 仅空 Namespace（无子节点、无资产）可删除；非空返回 Conflict。
     async fn delete_namespace(&self, domain: &str, path: &str) -> Result<(), CatalogError>;
+    /// 解析层级路径到 Namespace 实体；供 adapter 将协议路径换算为内部实体。
     async fn resolve_path(&self, domain: &str, path: &str) -> Result<Namespace, CatalogError>;
 }
 
+/// Asset 生命周期。治理操作按 id 寻址（重命名不影响引用）；协议路径按名解析。
+/// 基线下所有资产均为原生协议资产：create/update/rename/soft_delete 由原生 adapter 调用，
+/// Unified API 仅调用读取方法与 restore（见需求文档 §4.3）。
 #[async_trait]
 pub trait AssetStore: Send + Sync {
     async fn create_asset(&self, input: CreateAsset) -> Result<Asset, CatalogError>;
     async fn get_asset(&self, id: Uuid) -> Result<Asset, CatalogError>;
     async fn get_asset_by_name(&self, domain: &str, namespace: &str, name: &str) -> Result<Asset, CatalogError>;
-    async fn list_assets(&self, filter: AssetFilter, page: Page) -> Result<PageResult<Asset>, CatalogError>;
+    async fn list_assets(&self, filter: AssetFilter, offset: u64, limit: u64) -> Result<Vec<Asset>, CatalogError>;
     async fn update_asset(&self, id: Uuid, patch: AssetPatch) -> Result<Asset, CatalogError>;
     async fn rename_asset(&self, id: Uuid, new_name: &str) -> Result<Asset, CatalogError>;
     async fn soft_delete_asset(&self, id: Uuid) -> Result<(), CatalogError>;
+    /// 恢复软删除资产；同 Namespace 同名活动资产已存在时返回 Conflict。
     async fn restore_asset(&self, id: Uuid) -> Result<Asset, CatalogError>;
+    /// 级联清理扩展表与版本记录；保留窗口策略见需求文档 §10。
     async fn hard_delete_asset(&self, id: Uuid) -> Result<(), CatalogError>;
 }
 
+/// 版本历史。create_version 由原生 adapter 在 commit 时镜像调用，
+/// 并自动将 assets.current_version_key 更新为新版本的 version_key。
+/// 基线不提供 delete_version（延后，见需求文档 §10）。
 #[async_trait]
 pub trait VersionStore: Send + Sync {
     async fn create_version(&self, input: CreateVersion) -> Result<AssetVersion, CatalogError>;
     async fn get_version(&self, asset_id: Uuid, version_key: &str) -> Result<AssetVersion, CatalogError>;
-    async fn list_versions(&self, asset_id: Uuid, page: Page) -> Result<PageResult<AssetVersion>, CatalogError>;
+    async fn list_versions(&self, asset_id: Uuid, offset: u64, limit: u64) -> Result<Vec<AssetVersion>, CatalogError>;
+    /// 基于 assets.current_version_key 查询当前版本。
     async fn get_latest_version(&self, asset_id: Uuid) -> Result<AssetVersion, CatalogError>;
-    async fn delete_version(&self, asset_id: Uuid, version_key: &str) -> Result<(), CatalogError>;
 }
 
+/// 资产标签（治理标注）。标签写入不触碰原生协议状态，对所有资产开放。
 #[async_trait]
 pub trait TagStore: Send + Sync {
     async fn add_tag(&self, asset_id: Uuid, tag: &str) -> Result<(), CatalogError>;
     async fn remove_tag(&self, asset_id: Uuid, tag: &str) -> Result<(), CatalogError>;
     async fn list_tags(&self, asset_id: Uuid) -> Result<Vec<String>, CatalogError>;
-    async fn list_assets_by_tag(&self, domain: &str, tag: &str, page: Page) -> Result<PageResult<Asset>, CatalogError>;
+    async fn list_assets_by_tag(&self, domain: &str, tag: &str, offset: u64, limit: u64) -> Result<Vec<Asset>, CatalogError>;
 }
 
+/// Discovery 查询：跨 Namespace 的资产发现，domain 必填，namespace_prefix 前缀匹配。
 #[async_trait]
 pub trait UnifiedQueryStore: Send + Sync {
-    async fn query_assets(&self, query: AssetQuery) -> Result<PageResult<Asset>, CatalogError>;
+    async fn query_assets(&self, query: AssetQuery) -> Result<Vec<Asset>, CatalogError>;
 }
 
+/// CAS 版本提交：以"当前内容指针"为锚点（tabular 资产即 metadata_location）。
+/// 事务内锁定 assets 行、校验指针、插入镜像版本并更新 current_version_key（见 §6.4）。
 #[async_trait]
 pub trait CasCommitStore: Send + Sync {
     async fn compare_and_swap_pointer(
         &self,
         asset_id: Uuid,
-        expected_version_key: &str,
+        expected_pointer: &str,
         new_version: CreateVersion,
     ) -> Result<AssetVersion, CatalogError>;
 }
 
+/// 资产类型与格式注册表（全局资源）。
 #[async_trait]
 pub trait AssetTypeStore: Send + Sync {
     async fn register_asset_type(&self, input: RegisterAssetType) -> Result<AssetType, CatalogError>;
     async fn register_format(&self, input: RegisterFormat) -> Result<Format, CatalogError>;
-    async fn list_asset_types(&self, category: Option<&str>, page: Page) -> Result<PageResult<AssetType>, CatalogError>;
+    async fn list_asset_types(&self, category: Option<&str>, offset: u64, limit: u64) -> Result<Vec<AssetType>, CatalogError>;
     async fn get_asset_type(&self, name: &str) -> Result<AssetType, CatalogError>;
     async fn get_format(&self, name: &str) -> Result<Format, CatalogError>;
 }
@@ -479,66 +566,80 @@ pub trait AssetTypeStore: Send + Sync {
 pub trait CatalogStore: DomainStore + NamespaceStore + AssetTypeStore + AssetStore + VersionStore + TagStore + UnifiedQueryStore + CasCommitStore + Send + Sync {}
 ```
 
+**分页约定**：所有列表方法统一 `(offset: u64, limit: u64)` 入参并返回当前页条目。当返回条数等于 `limit` 时，调用方（adapter）生成 `next_token = offset + 返回条数`；否则无下一页。token 的编解码在 adapter 协议层完成（见 §5.4），存储层不做 COUNT 查询。
+
 #### 支撑类型
 
-分页、过滤与补丁类型同样定义在 `core` crate：
+过滤、补丁与创建输入类型同样定义在 `core` crate。分页不使用独立类型：列表方法统一 `(offset, limit)` 入参（见上方分页约定）。
 
 ```rust
-pub struct Page {
-    pub page: u64,
-    pub page_size: u64,
-}
-
-pub struct PageResult<T> {
-    pub items: Vec<T>,
-    pub total: u64,
-    pub page: u64,
-    pub page_size: u64,
-}
-
+/// AssetStore::list_assets 的存储层过滤条件，用于已知 Domain/Namespace 上下文的资产列举。
 pub struct AssetFilter {
+    /// 按 Domain 名过滤；None 表示不限。
     pub domain: Option<String>,
+    /// 按 Namespace 路径精确匹配；None 表示不限。
     pub namespace: Option<String>,
+    /// 按资产类型过滤（如 `table`、`view`）。
     pub asset_type: Option<String>,
+    /// 按格式过滤（如 `iceberg`、`lance`）。
     pub format: Option<String>,
+    /// 按标签过滤；多个标签为 AND 关系。
     pub tags: Vec<String>,
+    /// 按 properties 精确匹配过滤；多个条件为 AND 关系。
     pub properties: HashMap<String, String>,
+    /// 是否包含软删除资产；默认 false（仅活动资产）。
     pub include_deleted: bool,
 }
 
+/// UnifiedQueryStore::query_assets 的发现层查询条件，用于跨 Namespace 资产发现。
 pub struct AssetQuery {
+    /// 目标 Domain（必填）。
     pub domain: String,
+    /// Namespace 路径前缀（层级查询）；None 表示整个 Domain。
     pub namespace_prefix: Option<String>,
     pub asset_type: Option<String>,
     pub format: Option<String>,
     pub tags: Vec<String>,
     pub properties: HashMap<String, String>,
     pub include_deleted: bool,
-    pub page: Page,
+    /// 分页偏移与页大小（语义同列表方法的分页约定）。
+    pub offset: u64,
+    pub limit: u64,
 }
 
+/// 三态补丁字段：区分"不修改"与"清除为 NULL"，避免 `Option<Option<T>>` 的歧义。
+pub enum PatchField<T> {
+    /// 更新为指定值。
+    Set(T),
+    /// 清除该字段（置 NULL）。
+    Unset,
+    /// 保持不变（请求中未携带该字段）。
+    NoChange,
+}
+
+/// Asset 的可补丁字段（comment、properties）。
 pub struct AssetPatch {
     pub comment: PatchField<String>,
     pub properties: PatchField<serde_json::Value>,
 }
 
-pub enum PatchField<T> {
-    Set(T),
-    Unset,
-    NoChange,
-}
-
 // ---------- 创建与注册输入类型 ----------
 
+/// 创建 Domain 的输入。未指定 warehouse 时使用全局 QUASAR_WAREHOUSE_PATH。
 pub struct CreateDomain {
+    /// 全局唯一名称，URL-safe slug。
     pub name: String,
     pub comment: Option<String>,
     pub properties: Option<serde_json::Value>,
+    /// 对象存储后端类型：s3 / minio / hdfs / local。
     pub storage_type: Option<String>,
+    /// 后端连接配置；不得明文存 credential（用 secret 引用）。
     pub storage_config: Option<serde_json::Value>,
+    /// Domain 级默认对象存储根路径，覆盖全局默认。
     pub warehouse: Option<String>,
 }
 
+/// Domain 的可补丁字段。
 pub struct DomainPatch {
     pub comment: PatchField<String>,
     pub properties: PatchField<serde_json::Value>,
@@ -547,58 +648,73 @@ pub struct DomainPatch {
     pub warehouse: PatchField<String>,
 }
 
+/// 创建 Namespace 的输入（Domain 与路径在 trait 方法参数中给出）。
 pub struct CreateNamespace {
     pub comment: Option<String>,
     pub properties: Option<serde_json::Value>,
 }
 
+/// Namespace 的可补丁字段。
 pub struct NamespacePatch {
     pub comment: PatchField<String>,
     pub properties: PatchField<serde_json::Value>,
 }
 
+/// 创建 Asset 的输入（由原生 adapter 调用）。
 pub struct CreateAsset {
     pub domain: String,
+    /// Namespace 层级路径。
     pub namespace: String,
+    /// 资产名，URL-safe slug；同 Namespace 内活动资产唯一。
     pub name: String,
+    /// 已注册的资产类型。
     pub asset_type: String,
+    /// 可选格式（如 iceberg、lance）；兼容性由 adapter 校验。
     pub format: Option<String>,
     pub comment: Option<String>,
     pub properties: Option<serde_json::Value>,
 }
 
+/// 创建版本的输入（由原生 adapter 在 commit 时镜像调用）。
 pub struct CreateVersion {
     pub asset_id: Uuid,
+    /// 格式原生版本标识：Iceberg 为 metadata 序号（如 `00001`），Lance 为原生版本号。
     pub version_key: String,
+    /// 版本属性：commit message、作者、操作类型等格式无关信息。
     pub version_properties: Option<serde_json::Value>,
+    /// 可选少量内联内容（小 JSON/YAML 配置）。
     pub content_inline: Option<serde_json::Value>,
+    /// 外部内容指针：Iceberg 为完整 metadata_location，Lance 为 manifest 路径。
     pub content_pointer: Option<String>,
+    /// 前驱版本；CAS 路径下由存储层自动链接，无需调用方传入（见 §6.4）。
     pub previous_version_id: Option<Uuid>,
 }
 
+/// 注册资产类型的输入。
 pub struct RegisterAssetType {
     pub name: String,
     pub description: Option<String>,
+    /// 分类：tabular / view / model / agent / tool / mcp_server / fileset / topic / generic。
     pub category: String,
+    /// 可选 JSON Schema，用于校验资产 properties。
     pub validation_schema: Option<serde_json::Value>,
+    /// 类型字段存储策略：jsonb / dedicated_table / reference_only。
     pub extension_strategy: String,
+    /// 是否预期有原生协议（影响 Unified API 只读判定）。
     pub supports_native_protocol: bool,
 }
 
+/// 注册格式的输入。
 pub struct RegisterFormat {
     pub name: String,
     pub description: Option<String>,
     pub mime_type: Option<String>,
+    /// 序列化提示，如 json、protobuf。
     pub serialization_hint: Option<String>,
 }
 ```
 
 > 领域模型类型（`Domain`、`Namespace`、`Asset`、`AssetVersion`、`AssetType`、`Format`）与 §3.2 表结构一一对应，此处不再重复定义。
-
-- `Page` / `PageResult`：所有列表方法的统一分页契约，对应 §5.4 的响应格式。
-- `AssetFilter`：`AssetStore::list_assets` 的存储层过滤条件，用于已知 Domain/Namespace 上下文的资产列举；`namespace` 为精确匹配。
-- `AssetQuery`：`UnifiedQueryStore::query_assets` 的发现层查询条件，用于跨 Namespace 资产发现；`domain` 必填，`namespace_prefix` 为前缀匹配，支持层级查询。
-- `PatchField<T>`：三态补丁语义——`Set` 更新为指定值、`Unset` 清除该字段、`NoChange` 保持不变，避免 `Option<Option<T>>` 的歧义。
 
 ---
 
@@ -620,32 +736,25 @@ pub struct RegisterFormat {
 ### 5.3 Unified API
 
 - 路径前缀 `/unified/v1/...`。
-- Domain/Namespace 管理。
-- Asset 管理：对没有原生协议的资产类型提供完整生命周期管理（CRUD、重命名、恢复、删除）；对已有原生协议的资产类型仅提供列表/获取，生命周期操作由原生协议负责。
-- Version 管理：对原生协议资产仅提供列表/获取，且版本不可删除；对非原生协议资产提供完整生命周期管理（含创建与删除）。
+- Domain/Namespace 管理：完整生命周期（Domain 无原生协议可管，Namespace 非资产，均由 Unified 负责）。
+- Asset：基线不假设非原生协议资产，所有资产生命周期归原生协议，Unified 仅提供**只读**（列表/按名/按 ID 获取）；唯一写例外是软删除恢复 `POST /assets/{asset_id}/restore` 与标签管理（治理操作，不触碰原生状态）。
+- Version：只读（列表/获取）；版本由原生 adapter 镜像，基线不提供版本创建/删除端点。
 - AssetType/Format 注册与管理。
-- Tag 管理：为资产添加、移除、查询标签。
-- 发现过滤：按 Domain、Namespace、类型、格式、标签、属性组合过滤（见需求文档 §4.6）。
+- 发现过滤：按 Domain、Namespace 前缀、类型、格式、标签、属性组合过滤（见需求文档 §4.6）。
 - 错误格式为 RFC-7807 Problem Details，扩展 `code` 与 `request_id`。
+
+寻址风格（集合/成员分离）：单资产操作统一走 `/unified/v1/assets/{asset_id}`；层级名路径仅用于创建（Namespace/Domain）与按名查找（`GET .../namespaces/{ns}/assets/{asset}`）；`GET /unified/v1/assets` 为跨 Namespace 的 Discovery 集合查询。同 Namespace 内活动资产名唯一（`uq_assets_active_name`），保证按名查找结果唯一。
 
 具体端点定义见需求文档 §6.2。
 
-### 5.4 统一分页与响应格式
+### 5.4 统一分页
 
-Unified API 的所有列表端点使用统一的分页响应格式，与 `PageResult<T>`（见 §4.3）一一对应：
+所有协议的列表端点统一使用**令牌分页**（与 Iceberg/Lance 上游 spec 一致）：
 
-```json
-{
-  "items": [...],
-  "total": 100,
-  "page": 1,
-  "page_size": 20
-}
-```
-
-- `page` 从 1 开始；`page_size` 有服务端上限（超出时按上限截断）。
-- `total` 为满足过滤条件的记录总数，用于客户端分页计算。
-- 分页参数通过 query string 传递：`?page=1&page_size=20`。
+- 请求：`?pageToken=<token>&pageSize=<n>`；`pageSize` 有服务端上限（超出按上限截断）。
+- 响应：`{ "items": [...], "next_page_token": "<token>" }`；无下一页时省略 `next_page_token`。
+- token 对客户端不透明；当前实现为 offset 编码（`next_token = offset + 本页条数`，仅当本页条数等于 pageSize 时产生）。
+- 存储层对应 `(offset, limit)` 入参（见 §4.3 分页约定），不做 COUNT 查询；token ↔ offset 的编解码在 adapter 协议层完成。
 
 ### 5.5 统一错误响应格式
 
@@ -696,36 +805,83 @@ Unified API 的错误响应采用 RFC-7807 Problem Details，并扩展 `code` �
 
 ### 6.4 并发控制设计
 
-#### current_version_key 乐观锁
+#### CAS 锚点：当前内容指针
 
-更新资产的 `current_version_key` 时使用条件更新：
+版本提交的乐观锁锚点是**当前内容指针**（tabular 资产即 `tabular_assets.metadata_location`；未来的通用资产为当前版本的 `content_pointer`），而不是 `current_version_key`：
 
-```sql
-UPDATE assets
-SET current_version_key = $1, updated_at = now()
-WHERE id = $2 AND (current_version_key = $3 OR current_version_key IS NULL)
-RETURNING *;
+- 指针是协议语义的自然锚点——Iceberg 客户端 load 响应中即携带 `metadata-location`，且每次 commit 产生全局唯一的新指针（`NNNNN-uuid.metadata.json` 不会复用），指针相等 ⇔ 状态相等，天然防 ABA。
+- `current_version_key` 不是校验锚点，而是 CAS 成功后**同步更新的结果**。
+
+#### 锁外校验 + 锁内 CAS 的分工
+
+一次 Iceberg commit 的完整时序：
+
+```
+load(L1)                      -- adapter 按名解析资产，读到当前指针 L1
+  → 读 L1 的 metadata.json    -- 不可变文件，对象存储
+  → 校验 assert requirements  -- 锁外进行（见下）
+  → 构建新 metadata，写入 L2  -- 对象存储
+  → BEGIN
+  → 锁内重读指针并比对        -- 线性化点
+  → 插镜像版本 / 更新指针
+  → COMMIT
 ```
 
-如果返回行数为 0，说明版本已被其他事务更新，返回 `Conflict`。
+- **assert 校验在锁外**：requirements（如 `assert-ref-snapshot-id`）针对不可变的 L1 元数据校验，在写入 L2 之前完成，失败即快速返回 `CommitFailedException`。不进锁的原因：持 DB 行锁做对象存储网络 I/O 会把锁持有时间从毫秒拉到百毫秒级，高并发下导致锁竞争与连接池耗尽。
+- **指针 CAS 在锁内**：锁内重读指针与 L1 比对，通过则证明被校验的 L1 在此刻仍是当前状态——锁外校验结果在线性化点上有效。比对失败则回滚，客户端重试（重新 load 走一遍）。
+- 不能只用 assert snapshot 代替指针 CAS：requirements 可选（可为空），且 snapshot id 不等于完整状态（仅改 properties 的 commit 产生新指针但 snapshot 不变）。
 
-#### CAS commit 实现
+#### compare_and_swap_pointer 事务（S1–S6）
 
-`compare_and_swap_pointer` 在事务内执行：
+`compare_and_swap_pointer(asset_id, expected_pointer, new_version)` 在事务内执行（`$1`=asset_id，`$2`=expected_pointer，`$3`=新 version_key，`$4`=新 content_pointer，`$5`=version_properties，`$6`=新 schema_snapshot）：
 
-1. `SELECT current_version_key FROM assets WHERE id = $1 FOR UPDATE`
-2. 校验 `current_version_key == expected_version_key`
-3. `INSERT INTO asset_versions (...)`
-4. `UPDATE assets SET current_version_key = $new_version_key WHERE id = $1`
-5. 提交事务
+```sql
+BEGIN;
 
-若步骤 2 失败，返回 `CommitFailedException`。
+-- S1 锁资产行（同时取出当前 current_version_key）
+SELECT id, current_version_key FROM assets
+WHERE id = $1 AND deleted_at IS NULL
+FOR UPDATE;
+-- 0 行 → NotFound
+
+-- S2 读当前指针（锁已持有，无需再锁 tabular_assets）
+SELECT metadata_location FROM tabular_assets WHERE asset_id = $1;
+
+-- S3 应用层比对：S2 结果 ≠ $2 → ROLLBACK → Conflict（Iceberg 映射 CommitFailedException）
+
+-- S4 插入镜像版本，previous_version_id 自动链接当前版本
+--    （current_version_key 为 NULL 时子查询得 NULL → 根版本，受单根约束保护）
+INSERT INTO asset_versions
+    (id, asset_id, version_key, version_properties, content_pointer, previous_version_id)
+VALUES (
+    gen_random_uuid(), $1, $3, $5, $4,
+    (SELECT id FROM asset_versions
+     WHERE asset_id = $1 AND version_key = <S1 返回的 current_version_key>)
+);
+
+-- S5 更新当前版本指针
+UPDATE assets SET current_version_key = $3, updated_at = now() WHERE id = $1;
+
+-- S6 更新 tabular 热路径缓存（load 无需 join）
+UPDATE tabular_assets SET metadata_location = $4, schema_snapshot = $6 WHERE asset_id = $1;
+
+COMMIT;
+```
+
+要点：
+
+- **锁 assets 主键行即可**：同一资产的所有 commit 路径（单表、staged、多表事务中的该表分支）第一步都锁同一行，天然串行化；`tabular_assets` 与 `current_version_key` 的所有写入方都必须先持有这把锁（存储层纪律），故无需第二把锁。
+- `previous_version_id` 在 S4 自动链接，adapter 无需显式传递，版本链自然形成。
+- Iceberg 镜像版本：`version_key` = metadata 序号（`00001`…），`content_pointer` = 完整 metadata_location；建表（含 staged 转正）走同一套逻辑插入首个版本。
+- 事务失败时已写入对象存储的 L2 成为孤儿文件——对象存储无事务，这是固有代价；L2 文件名含 uuid 天然避免冲突，重试即可。
+- **Lance 不走 CAS**：版本创建由客户端显式给版本号，直接 `INSERT asset_versions` + S5/S6，重复版本靠 `UNIQUE(asset_id, version_key)` 兜底返回 `409`。
 
 #### 事务隔离级别
 
 - 统一使用 `READ COMMITTED`（PostgreSQL / openGauss 默认级别）。
 - CAS commit、软删除/恢复、多表事务均通过 `SELECT ... FOR UPDATE` 显式锁定目标行，结合 RC 的语句级最新读，避免快照过期导致的 CAS 失败。
-- 多表事务按 `asset_id` 排序后依次锁定，防止死锁。
+- 多表事务按 `asset_id` 升序依次锁定，防止死锁。
+- `update_*` 的 properties 合并使用单语句 JSONB 运算 `(properties - removals) || updates`，行锁天然串行化，无 lost-update。
 
 ---
 

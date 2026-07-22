@@ -112,33 +112,37 @@ Quasar 不替代数据面系统。它记录身份、元数据、版本指针，�
 
 ### 4.3 Asset 管理
 
+> 基线不假设存在非原生协议资产：所有资产均为原生协议资产，其创建、更新、重命名、删除等生命周期操作一律通过原生协议端点完成（见 §4.7）；Unified API 对资产只读，唯一例外是软删除恢复（FR-A9）与标签管理（FR-A3），二者属治理操作、不触碰原生协议状态。
+
 | 编号 | 功能需求 | 验收标准 |
 |------|---------|---------|
-| FR-A1 | 注册 Asset，需指定 Domain、Namespace 路径、名称、asset_type、可选 format | 名称为 URL-safe slug；活动资产名在同一 Namespace 内唯一；创建后可立即查询 |
-| FR-A2 | 资产携带 comment、properties 元数据 | 创建和更新时可设置；properties 为 JSONB |
-| FR-A3 | 资产支持标签（tag）管理 | 可通过 add_tag/remove_tag 操作；标签存储于 `asset_tags` 表 |
+| FR-A1 | 注册 Asset（通过原生协议端点），需指定 Domain、Namespace 路径、名称、asset_type、可选 format | 名称为 URL-safe slug；活动资产名在同一 Namespace 内唯一；创建后可立即查询；Unified API 不提供资产创建端点 |
+| FR-A2 | 资产携带 comment、properties 元数据 | 创建和更新时可设置（经原生协议端点）；properties 为 JSONB |
+| FR-A3 | 资产支持标签（tag）管理 | 可通过 Unified API 添加/移除/查询标签；标签存储于 `asset_tags` 表 |
 | FR-A4 | 查询 Asset 详情（按 ID 或 Domain + Namespace + 名称） | 返回 Asset 完整字段；不存在返回 `404 Not Found` |
 | FR-A5 | 列出 Asset，支持按 Domain、Namespace、类型、格式、标签、属性过滤 | 过滤条件可组合；支持分页；按名称排序 |
-| FR-A6 | 更新 Asset 的 comment、properties | 更新后立即生效；非法字段返回 `400 Bad Request` |
-| FR-A7 | 重命名 Asset | 新名称在同一 Namespace 内唯一；重命名后所有版本历史保留 |
-| FR-A8 | 软删除 Asset | 标记 `deleted_at`；软删除期间版本历史保留；名称释放可供新资产使用 |
-| FR-A9 | 恢复软删除的 Asset | 清除 `deleted_at`；若同名活动资产已存在，返回 `409 Conflict` |
+| FR-A6 | 更新 Asset 的 comment、properties（通过原生协议端点） | 更新后立即生效；非法字段返回 `400 Bad Request` |
+| FR-A7 | 重命名 Asset（通过原生协议端点） | 新名称在同一 Namespace 内唯一；重命名后所有版本历史保留 |
+| FR-A8 | 软删除 Asset（通过原生协议端点） | 标记 `deleted_at`；软删除期间版本历史保留；名称释放可供新资产使用 |
+| FR-A9 | 恢复软删除的 Asset（通过 Unified API，治理例外） | 清除 `deleted_at`；若同名活动资产已存在，返回 `409 Conflict` |
 | FR-A10 | 硬删除 Asset | 级联删除扩展表记录与版本记录；仅当软删除保留期后或管理员触发时执行 |
-| FR-A11 | 原生协议资产由 adapter 直接创建与变更 | Iceberg/Lance adapter 通过原生端点创建/更新资产；Unified API 对这些资产只读 |
+| FR-A11 | 原生协议资产由 adapter 直接创建与变更 | Iceberg/Lance adapter 通过原生端点创建/更新资产；Unified API 对资产只读（恢复与标签除外） |
 | FR-A12 | 资产类型与格式校验 | 创建时校验 asset_type 和 format 已注册；format 与 asset_type 的兼容性由 adapter 校验 |
 
 ### 4.4 Version 管理
 
+> 版本由原生协议 adapter 在 commit/变更时镜像创建（见 FR-V2）；Unified API 对版本只读。基线不假设存在非原生协议资产，因此**不提供版本创建与删除端点**（存储层 `delete_version` 延后，见 §10）。
+
 | 编号 | 功能需求 | 验收标准 |
 |------|---------|---------|
-| FR-V1 | 每个资产拥有版本历史，版本包含 version_key、version_properties、内容、前一版本指针 | 创建版本后可通过 list_versions 查询到 |
+| FR-V1 | 每个资产拥有版本历史，版本包含 version_key、version_properties、内容、前一版本指针 | 原生协议 commit 后可通过 list_versions 查询到对应版本 |
 | FR-V2 | 原生协议资产的版本必须镜像到 `asset_versions` | Iceberg/Lance commit 后，`asset_versions` 中存在对应记录；`content_pointer` 指向原生元数据文件 |
 | FR-V3 | 最新版本通过 `assets.current_version_key` 确定 | create_version 时自动更新 `current_version_key`；get_latest_version 基于该字段查询 |
 | FR-V4 | 每个资产至多一个根版本（`previous_version_id IS NULL`） | 通过 partial unique 索引保证；尝试创建第二个根版本返回 `409 Conflict` |
 | FR-V5 | 版本链完整性保护 | `previous_version_id` 使用 `ON DELETE RESTRICT`；删除被后继引用的版本返回 `409 Conflict` |
 | FR-V6 | 查询版本详情（按 version_key） | 返回版本完整字段；不存在返回 `404 Not Found` |
 | FR-V7 | 列出资产的版本历史 | 按 `version_key` 或 `created_at` 排序；支持分页；可包含软删除资产的版本 |
-| FR-V8 | 删除版本（仅限非原生协议资产） | 原生协议资产版本不可删除；非原生协议资产可删除未被引用的版本 |
+| FR-V8 | 版本不可删除 | 原生协议资产版本只增不删；基线不提供任何版本删除端点 |
 | FR-V9 | 版本内容支持内联与外部指针两种方式 | `content_inline` 存小配置；`content_pointer` 存外部文件路径；两者至少其一 |
 
 ### 4.5 AssetType / Format 管理
@@ -165,7 +169,7 @@ Quasar 不替代数据面系统。它记录身份、元数据、版本指针，�
 | FR-Q5 | 按标签（tag）过滤资产 | 返回包含指定标签的资产；多标签为 AND 关系 |
 | FR-Q6 | 按 properties 属性过滤资产 | 支持 `properties->>'key' = 'value'` 精确匹配；多条件为 AND 关系 |
 | FR-Q7 | 组合过滤条件 | Domain、Namespace、类型、格式、标签、属性可任意组合；各条件间为 AND 关系 |
-| FR-Q8 | 分页与排序 | 支持 page/page_size 分页；默认按名称排序；支持按 created_at/updated_at 排序 |
+| FR-Q8 | 分页与排序 | 支持 pageToken/pageSize 令牌分页（与原生协议一致）；默认按名称排序；支持按 created_at/updated_at 排序 |
 | FR-Q9 | 过滤时排除软删除资产 | 默认只返回活动资产；显式指定 `include_deleted=true` 时可返回软删除资产 |
 
 ### 4.7 Native Protocol
@@ -177,7 +181,7 @@ Quasar 不替代数据面系统。它记录身份、元数据、版本指针，�
 | FR-P3 | 提供 Lance REST Namespace 端点，路径前缀 `/lance/v1/...`，遵循 Lance REST Namespace spec（官方 OpenAPI 定义） | 路径、请求/响应格式、错误格式遵循上游规范 |
 | FR-P4 | Lance `{id}` 使用 `$` 分隔符序列化 Domain/Namespace/Table | 如 `{domain}${namespace}${table}`；解析正确 |
 | FR-P5 | `/iceberg/v1/config` 的 `endpoints` 字段与实际实现一致 | 只返回已实现的端点；客户端可据此探测能力 |
-| FR-P6 | 原生协议 adapter 是其资产生命周期操作的权威 | 创建、更新、删除、重命名、恢复等操作通过原生端点完成，直接调用 store trait |
+| FR-P6 | 原生协议 adapter 是其资产生命周期操作的权威 | 创建、更新、删除、重命名等操作通过原生端点完成，直接调用 store trait（软删除恢复除外，由 Unified API 提供，见 FR-A9） |
 | FR-P7 | 原生协议版本镜像到 `asset_versions` | 每次 commit/变更都在 `asset_versions` 写入记录，含 version_key、content_pointer |
 | FR-P8 | CAS commit 与多表事务并发冲突返回协议错误码 | Iceberg CAS 冲突返回 `409` 及 Iceberg 规范错误体；多表事务冲突按协议处理 |
 | FR-P9 | 协议错误格式映射正确 | Iceberg 返回 Iceberg JSON error body；Lance 返回 RFC-7807 Problem Details |
@@ -193,7 +197,7 @@ Quasar 不替代数据面系统。它记录身份、元数据、版本指针，�
 | FR-C4 | 活动资产名称在同一 Namespace 内唯一 | 通过 partial unique 索引保证；创建重名活动资产返回 `409 Conflict` |
 | FR-C5 | 版本 version_key 在同一 Asset 内唯一 | 重复 version_key 返回 `409 Conflict` |
 | FR-C6 | 软删除/恢复语义 | 软删除标记 `deleted_at`；恢复时若同名活动资产存在返回 `409 Conflict` |
-| FR-C7 | 原生协议资产版本不可变 | 原生协议资产版本只增不删；delete_version 对其返回 `405` |
+| FR-C7 | 原生协议资产版本不可变 | 原生协议资产版本只增不删；基线不提供版本删除端点 |
 | FR-C8 | 版本链完整性 | `previous_version_id` 使用 `ON DELETE RESTRICT`；删除被引用版本返回 `409 Conflict` |
 | FR-C9 | 非法资产类型与格式被拒绝 | 创建资产时若 asset_type 或 format 未注册，返回 `400 Bad Request` |
 
@@ -311,18 +315,21 @@ Native adapter 是其资产生命周期操作的权威。它们直接通过核�
 
 **Lance REST Namespace 端点**
 
-- Namespace：`GET /lance/v1/namespace/{id}/list`；`POST /lance/v1/namespace/{id}/create`；`GET /lance/v1/namespace/{id}/describe`；`POST /lance/v1/namespace/{id}/drop`
-- Table：`GET /lance/v1/namespace/{id}/table/list`；`POST /lance/v1/namespace/{id}/table/{table}/declare`；`GET /lance/v1/namespace/{id}/table/{table}/describe`；`POST /lance/v1/namespace/{id}/table/{table}/deregister`
+- Namespace：`GET /lance/v1/namespace/{id}/list`；`POST /lance/v1/namespace/{id}/create`；`POST /lance/v1/namespace/{id}/describe`；`POST /lance/v1/namespace/{id}/drop`
+- Table：`GET /lance/v1/namespace/{id}/table/list`；`POST /lance/v1/table/{id}/declare`；`POST /lance/v1/table/{id}/describe`；`POST /lance/v1/table/{id}/deregister`
+
+> Table 端点的 `{id}` 为完整表标识（`{domain}${namespace}${table}`，见 FR-P4），与官方 OpenAPI 一致；describe 为 POST（官方 OpenAPI 定义）。
 
 ### 6.2 Unified API
 
-Unified API 是位于 `/unified/v1/...` 的、与格式和协议无关的管理与发现接口：
+Unified API 是位于 `/unified/v1/...` 的、与格式和协议无关的管理与发现接口。基线不假设存在非原生协议资产（见 §4.3），因此资产与版本为**只读**，唯一写例外是软删除恢复与标签管理（治理操作）：
 
 - Domain 生命周期管理。
 - Namespace 生命周期管理，包括层级路径。
-- 资产的列表/获取。对于已有原生协议的资产类型，Unified API 仅提供只读访问；创建、更新、重命名、恢复、删除等生命周期操作必须通过原生协议完成。
-- 对于没有原生协议的资产类型，Unified API 提供完整的生命周期管理（创建、更新、重命名、恢复、删除）。
-- 版本的列表/获取。对于原生协议资产，版本历史由 adapter 镜像到 `asset_versions`，Unified API 只读暴露；原生协议资产的版本不可删除，删除能力仅对非原生协议资产开放。
+- 资产的只读访问：列表与获取（按 ID 或按 Domain + Namespace + 名称）。资产的创建、更新、重命名、删除等生命周期操作一律通过原生协议端点完成，Unified API 不提供资产写端点。
+- 软删除恢复：`POST /unified/v1/assets/{asset_id}/restore`，治理操作的唯一写例外。
+- 标签管理：为资产添加、移除、查询标签（治理标注，非生命周期操作）。
+- 版本的只读访问：列表与获取。版本历史由原生协议 adapter 镜像到 `asset_versions`；基线不提供版本创建与删除端点。
 - AssetType 与 Format 的注册与管理。
 - 发现：按 Domain、Namespace 路径、资产类型、格式、标签、属性过滤。
 
@@ -330,12 +337,15 @@ Unified API 是位于 `/unified/v1/...` 的、与格式和协议无关的管理�
 
 - Domain：`GET` / `POST /unified/v1/domains`；`GET` / `PATCH` / `DELETE /unified/v1/domains/{domain}`
 - Namespace：`GET` / `POST /unified/v1/domains/{domain}/namespaces`；`GET` / `PATCH` / `DELETE /unified/v1/domains/{domain}/namespaces/{namespace}`
-- Asset：`GET` / `POST /unified/v1/domains/{domain}/namespaces/{namespace}/assets`；`GET` / `PATCH` / `DELETE /unified/v1/domains/{domain}/namespaces/{namespace}/assets/{asset}`；`POST /unified/v1/assets/{asset_id}/restore`
-- Version：`GET` / `POST /unified/v1/domains/{domain}/namespaces/{namespace}/assets/{asset}/versions`；`GET` / `DELETE /unified/v1/domains/{domain}/namespaces/{namespace}/assets/{asset}/versions/{version}`
+- Asset（只读）：`GET /unified/v1/domains/{domain}/namespaces/{namespace}/assets`（列表）；`GET /unified/v1/domains/{domain}/namespaces/{namespace}/assets/{asset}`（按名）；`GET /unified/v1/assets/{asset_id}`（按 ID）
+- Restore：`POST /unified/v1/assets/{asset_id}/restore`
+- Tag：`GET` / `POST /unified/v1/assets/{asset_id}/tags`；`DELETE /unified/v1/assets/{asset_id}/tags/{tag}`
+- Version（只读）：`GET /unified/v1/assets/{asset_id}/versions`；`GET /unified/v1/assets/{asset_id}/versions/{version}`
 - AssetType：`GET` / `POST /unified/v1/asset-types`；`GET /unified/v1/asset-types/{name}`
 - Format：`GET` / `POST /unified/v1/formats`；`GET /unified/v1/formats/{name}`
-- Tag：`GET` / `POST /unified/v1/assets/{asset_id}/tags`；`DELETE /unified/v1/assets/{asset_id}/tags/{tag}`
 - Discovery：`GET /unified/v1/assets`（支持查询参数过滤，见 §4.6）
+
+> 所有列表端点使用 pageToken/pageSize 令牌分页（见 §4.6 FR-Q8），与原生协议分页机制一致。
 
 ### 6.3 基础设施端点
 
@@ -394,8 +404,9 @@ Unified API 是位于 `/unified/v1/...` 的、与格式和协议无关的管理�
 
 ### 9.3 Unified API 验收
 
-- Domain、Namespace、Asset、Version 的 CRUD 与过滤按本需求实现。
-- 对已有原生协议的资产类型，Unified API 的创建、更新、重命名、恢复、删除等写端点均返回 `405` 或等效拒绝；列表/获取端点保持可用。
+- Domain、Namespace 的 CRUD，Asset/Version 的只读访问与过滤，按本需求实现。
+- Unified API 不提供资产创建、更新、重命名、删除及版本写端点（生命周期归原生协议）；资产列表/获取、软删除恢复、标签管理端点保持可用。
+- 列表端点使用 pageToken/pageSize 令牌分页。
 - 错误格式为 RFC-7807 Problem Details，且不泄漏到标准协议端点。
 
 ### 9.4 构建与部署验收
@@ -417,6 +428,7 @@ Unified API 是位于 `/unified/v1/...` 的、与格式和协议无关的管理�
 3. 软删除资产的保留窗口与硬删除策略。
 4. 从旧里程碑 Schema 到新通用 Schema 的迁移策略。
 5. model、agent、tool、mcp_server 等资产类型的具体原生协议（如有）。
+6. 版本删除能力（`delete_version`）：基线不假设非原生协议资产，无调用方；随非原生协议资产类型引入时开放。
 
 ---
 
