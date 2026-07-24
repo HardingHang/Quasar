@@ -4,7 +4,9 @@ pub mod metrics;
 
 use axum::{middleware, Extension, Router};
 use deadpool_postgres::Pool;
+#[cfg(any(feature = "lance", feature = "iceberg", feature = "unified"))]
 use quasar_storage::PgCatalogStore;
+#[cfg(any(feature = "lance", feature = "iceberg", feature = "unified"))]
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 
@@ -34,6 +36,7 @@ pub fn create_app(pool: Pool) -> Router {
 }
 
 pub fn create_app_with_config(pool: Pool, #[allow(unused_variables)] config: AppConfig) -> Router {
+    #[cfg(any(feature = "lance", feature = "iceberg", feature = "unified"))]
     let store = Arc::new(PgCatalogStore::new(pool.clone()));
     let metrics_state = metrics::MetricsState::default();
 
