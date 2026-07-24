@@ -9,10 +9,9 @@
 ## 项目简介
 
 **Quasar** 是一个面向 Lakehouse 架构的独立通用 Catalog Service 组件，用 Rust 编写。
-- 同时支持 **Iceberg REST Catalog** 和 **Lance REST Namespace** 两套标准协议
-- 核心模型格式无关（`Namespace → Asset → AssetVersion`）
+- 同时支持 **Iceberg REST Catalog** 和 **Lance REST Namespace** 两套标准协议，另有格式无关的 **Unified API**（管理/发现/治理）
+- 核心模型：`Domain → 层级 Namespace → Asset → AssetVersion`，资产类型/格式可注册扩展
 - 后端使用 PostgreSQL，无状态设计可水平扩展
-- MVP 分 Phase 1（Lance）和 Phase 2（Iceberg）两阶段交付
 
 ---
 
@@ -22,19 +21,17 @@
 Project/
 ├── AGENTS.md              # 本文件：Agent 开发入口指南
 ├── docs/
-│   ├── PROGRESS.md        # 当前开发状态与进度跟踪（版本、阶段、已完成项）
-│   ├── ARCHITECTURE.md    # 项目定位、设计目标、双协议架构、Namespace 隔离策略
-│   ├── ROADMAP.md         # 版本路线图（V0.x / V1.x 阶段规划）
+│   ├── REQUIREMENTS.md    # 权威需求基线（功能/非功能需求、数据模型需求、验收标准）
+│   ├── DESIGN.md          # 权威设计基线（架构、数据模型 DDL、Store trait、API、并发控制）
+│   ├── DEPLOYMENT.md      # 部署与验证流程
+│   ├── TEST_MATRIX.md     # 测试覆盖矩阵
 │   │
-│   ├── mvp/               # MVP 设计文档（当前开发目标）
-│   │   ├── MVP_REQUIREMENTS.md   # 功能需求、非功能需求、端点清单、关键约束
-│   │   ├── DATA_MODEL.md         # 核心实体、PostgreSQL DDL、CatalogStore trait、并发控制
-│   │   └── MVP_DESIGN.md         # 完整设计规格：架构、数据模型、端点、接口、开发阶段划分
+│   ├── conventions/       # 项目规范
+│   │   ├── COMMIT_CONVENTION.md      # Git commit message 格式规范
+│   │   ├── CODING_CONVENTION.md      # Rust 编码规范
+│   │   └── DEVELOPMENT_CONVENTION.md # 项目开发规范（测试、文档、审查、验收）
 │   │
-│   └── conventions/       # 项目规范
-│       ├── COMMIT_CONVENTION.md      # Git commit message 格式规范
-│       ├── CODING_CONVENTION.md      # Rust 编码规范
-│       └── DEVELOPMENT_CONVENTION.md # 项目开发规范（测试、文档、审查、验收）
+│   └── archive/           # 历史版本文档（mvp / v2 / v3 / v4.0~v4.2），仅作参考
 ```
 
 ---
@@ -47,13 +44,13 @@ Project/
 | 异步运行时 | `tokio` | `features = ["full"]` |
 | PostgreSQL 驱动 | `tokio-postgres` | |
 | 连接池 | `deadpool-postgres` | |
-| DB 迁移 | `refinery` | |
+| DB 迁移 | 自研迁移 runner | `storage/migrations/NNNN_*.up.sql` + `schema_migrations` 版本表，启动时按序应用 |
 | 序列化 | `serde` + `serde_json` | |
 | UUID | `uuid` | `features = ["v4"]` |
 | 错误定义 | `thiserror` | |
 | 日志 | `tracing` + `tracing-subscriber` | |
-| 配置加载 | `envy`（或 `dotenvy`） | 环境变量 + `.env` |
-| 对象存储 | `object_store` | Phase 2 引入，读写 S3/MinIO metadata.json |
+| 配置加载 | 手写环境变量读取（`server/src/config.rs`） | `QUASAR_*` 前缀 |
+| 对象存储 | `object_store` | 读写 S3/MinIO metadata.json |
 
 ---
 
@@ -63,10 +60,10 @@ Project/
 |-------|------|---------|
 | `core` | 数据结构 + trait 定义 | **禁止**依赖 axum、tokio-postgres 等框架 crate |
 | `storage` | PostgreSQL 实现 `CatalogStore` | 依赖 `core` |
-| `adapter` | 协议适配（`lance/` + `iceberg/`） | 依赖 `core`，**不依赖** `storage` |
+| `adapter` | 协议适配（`lance/` + `iceberg/` + `unified/`） | 依赖 `core`，**不依赖** `storage` |
 | `server` | 路由注册、启动、DI 组装 | 依赖所有 crate，负责将 `storage` 注入 `adapter` |
 
-> **关键依赖方向：** `adapter` 只通过 `CatalogStore` trait 操作存储，不知道具体实现是 PostgreSQL。`server` 负责创建 `PgCatalogStore` 并以 `Arc<dyn CatalogStore>` 注入给 `adapter`。这条约束不得违反。
+> **关键依赖方向：** `adapter` 只通过 `CatalogStore` trait 操作存储，不知道具体实现是 PostgreSQL。`server` 负责创建 `PgCatalogStore` 并以 `Arc<dyn CatalogStore>`（lance/unified）与 `Arc<dyn IcebergCatalogStore>`（iceberg）注入给 `adapter`。这条约束不得违反。
 
 ---
 
@@ -76,10 +73,12 @@ Project/
 - **不要**在 `adapter` 中直接依赖 `storage`，通过 `Arc<dyn CatalogStore>` 注入
 - **不要**在生产代码中使用 `unwrap()` / `expect()`（详见 `CODING_CONVENTION.md`）
 - **不要**发明私有 API 路径，端点必须严格遵循上游协议规范
-- **不要**在 `assets` 表中存储 `format` 字段，format 由所属 `namespace` 决定
-- **不要**使用 `ON DELETE CASCADE` 删除 Namespace 下的 Asset（规范要求非空 Namespace 不可删除）
-- **不要**在 `properties` 中冗余存储 `current_version`（Lance 由 `SELECT MAX(version)` 实时查询）
+- **不要**使用数据库触发器维护跨行不变量（asset_type 校验、版本链校验、updated_at 均走应用层）
 - **不要**使用字符串拼接 SQL，必须使用参数化查询（`$1`、`$2`）
+- 命名必须遵循 URL-safe slug 规则 `^[a-z0-9][a-z0-9_-]{0,62}$`（Domain/Namespace 路径段/Asset 名统一）
+- `format` 存储在 `assets.format`（FK→formats），协议隔离按此列过滤；**不要**在扩展表重复存储
+- 最新版本由 `assets.current_version_key` 确定（CAS 成功后同步更新）；**不要**引入 version_order 之类的冗余排序列
+- 数据库变更必须走 `storage/migrations/` 增量迁移，**不要**回退到单文件幂等 init.sql
 
 ---
 
@@ -90,7 +89,7 @@ Project/
 | 顺序 | 文档 | 作用 |
 |------|------|------|
 | 1 | `docs/REQUIREMENTS.md` | **当前权威**：项目定位、功能/非功能需求、数据模型需求、并发控制、错误处理、验收标准 |
-| 2 | `docs/DESIGN.md` | **当前权威**：架构总览、Crate 分层、数据模型设计、Store trait、三套协议 API 设计、Commit/Metadata/Scan Planning、错误映射、Feature Flag、Server 组装 |
+| 2 | `docs/DESIGN.md` | **当前权威**：架构总览、Crate 分层、数据模型 DDL、Store trait、三套协议 API 设计、版本镜像与 CAS 并发控制、错误映射、Feature Flag、Server 组装 |
 | 3 | `docs/DEPLOYMENT.md` | 部署与验证流程（最小部署 / Lance 集成 / Spark 集成） |
 | 4 | `docs/TEST_MATRIX.md` | 测试覆盖矩阵 |
 | 5 | `docs/archive/` | 历史版本文档（MVP/V2/V3/V4.0~V4.2）归档，仅作参考 |
@@ -103,24 +102,9 @@ Project/
 
 ---
 
-## 按开发阶段查阅文档
+## 版本背景
 
-### Phase 1：Lance REST Namespace（S0 ~ S7）
-
-| 阶段 | 主要工作 | 重点参考 |
-|------|---------|---------|
-| S0 ~ S2 | 项目骨架、Core 定义、Storage 实现 | `DATA_MODEL.md`（实体定义、DDL、trait 签名） |
-| S3 ~ S5 | Lance Adapter 端点实现 | `MVP_DESIGN.md` 第 5 章（Lance 端点）、第 9 章（Lance 错误格式 RFC-7807） |
-| S6 | 基础设施 | `MVP_DESIGN.md` 第 10 章（配置与部署） |
-| S7 | Lance 集成验证 | `MVP_DESIGN.md` S7 验收标准 |
-
-### Phase 2：Iceberg REST Catalog（S8 ~ S10）
-
-| 阶段 | 主要工作 | 重点参考 |
-|------|---------|---------|
-| S8 | Iceberg Namespace + Table CRUD | `MVP_DESIGN.md` 第 5 章（Iceberg 端点）、第 9 章（Iceberg 错误格式） |
-| S9 | Iceberg CAS Commit | `DATA_MODEL.md`（CAS SQL）、`MVP_DESIGN.md` 第 8 章（并发控制） |
-| S10 | Spark 集成验证 | `MVP_DESIGN.md` S10 验收标准 |
+当前代码与文档对应**基线重设计**（Domain → 层级 Namespace → Asset → AssetVersion、版本镜像、Unified API），早期 MVP/V2/V3/V4.x 阶段文档均归档于 `docs/archive/`（含各阶段 S0~S10 的划分与验收记录），仅作历史参考，不作为开发依据。
 
 ---
 
