@@ -3,18 +3,17 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use quasar_core::{CatalogStore, MetricsState, StoreError};
+use quasar_core::{validate_name, validate_namespace_path, CatalogError, IcebergCatalogStore};
 use std::sync::Arc;
 use uuid::Uuid;
 
 use super::dto::{
     CommitViewRequest, CreateViewRequest, GetViewResponse, ListViewsQuery, ListViewsResponse,
-    RenameViewRequest, WarehouseQuery,
+    RenameViewRequest,
 };
-use super::error::{store_error_to_iceberg_view, IcebergError};
-use super::{validate_warehouse, IcebergConfig};
+use super::error::{catalog_error_to_iceberg_view, IcebergError};
+use super::{validate_warehouse, CommitMetrics, IcebergConfig};
 use crate::object_store_util::{object_exists, read_json, s3_url_to_path, write_json};
-use quasar_core::validate_name;
 
 /// Write metadata JSON to object store if configured.
 async fn write_metadata_to_store(
@@ -81,29 +80,30 @@ async fn check_metadata_exists(location: &str, config: &IcebergConfig) -> bool {
     }
 }
 
-/// GET /iceberg/v1/{prefix}/namespaces/{ns}/views
+/// GET /iceberg/v1/{prefix}/namespaces/{ns}/views (dispatched)
 pub async fn list_views(
-    State(store): State<Arc<dyn CatalogStore>>,
-    Path((prefix, ns)): Path<(String, String)>,
-    Query(query): Query<ListViewsQuery>,
-    Extension(config): Extension<IcebergConfig>,
-) -> Result<impl IntoResponse, IcebergError> {
-    validate_warehouse(query.warehouse.as_deref(), &config)?;
+    store: &Arc<dyn IcebergCatalogStore>,
+    config: &IcebergConfig,
+    prefix: &str,
+    ns: &str,
+    query: ListViewsQuery,
+) -> Result<(StatusCode, Json<ListViewsResponse>), IcebergError> {
+    validate_warehouse(query.warehouse.as_deref(), config)?;
 
-    let limit = query.page_size.unwrap_or(100).clamp(1, 1000) as i64;
+    let limit = query.page_size.unwrap_or(100).clamp(1, 1000) as u64;
     let offset = query
         .page_token
         .as_ref()
-        .and_then(|t| t.parse::<i64>().ok())
+        .and_then(|t| t.parse::<u64>().ok())
         .unwrap_or(0);
 
     let views = store
-        .list_views(&prefix, &ns, offset, limit)
+        .list_views(prefix, ns, offset, limit)
         .await
-        .map_err(store_error_to_iceberg_view)?;
+        .map_err(catalog_error_to_iceberg_view)?;
 
-    let next_page_token = if views.len() as i64 >= limit {
-        Some((offset + views.len() as i64).to_string())
+    let next_page_token = if views.len() as u64 >= limit {
+        Some((offset + views.len() as u64).to_string())
     } else {
         None
     };
@@ -117,27 +117,28 @@ pub async fn list_views(
     ))
 }
 
-/// POST /iceberg/v1/{prefix}/namespaces/{ns}/views
+/// POST /iceberg/v1/{prefix}/namespaces/{ns}/views (dispatched)
 pub async fn create_view(
-    State(store): State<Arc<dyn CatalogStore>>,
-    Extension(config): Extension<IcebergConfig>,
-    Path((prefix, ns)): Path<(String, String)>,
-    Query(query): Query<WarehouseQuery>,
-    Json(req): Json<CreateViewRequest>,
-) -> Result<impl IntoResponse, IcebergError> {
-    validate_warehouse(query.warehouse.as_deref(), &config)?;
-    validate_name(&ns).map_err(store_error_to_iceberg_view)?;
-    validate_name(&req.name).map_err(store_error_to_iceberg_view)?;
+    store: &Arc<dyn IcebergCatalogStore>,
+    config: &IcebergConfig,
+    prefix: &str,
+    ns: &str,
+    warehouse: Option<&str>,
+    req: CreateViewRequest,
+) -> Result<(StatusCode, Json<GetViewResponse>), IcebergError> {
+    validate_warehouse(warehouse, config)?;
+    validate_namespace_path(ns).map_err(catalog_error_to_iceberg_view)?;
+    validate_name(&req.name).map_err(catalog_error_to_iceberg_view)?;
 
-    // Check for same-name table conflict
-    let table_exists = store
-        .asset_exists(&prefix, &ns, &req.name)
-        .await
-        .map_err(store_error_to_iceberg_view)?;
-    if table_exists {
-        return Err(IcebergError::AlreadyExistsException {
-            message: format!("Table with same name already exists: {}.{}", ns, req.name),
-        });
+    // Check for same-name asset conflict (e.g. an existing table).
+    match store.get_asset_by_name(prefix, ns, &req.name).await {
+        Ok(_) => {
+            return Err(IcebergError::AlreadyExistsException {
+                message: format!("Asset with same name already exists: {}.{}", ns, req.name),
+            });
+        }
+        Err(CatalogError::NotFound(_)) => {}
+        Err(e) => return Err(catalog_error_to_iceberg_view(e)),
     }
 
     let location = req.location.unwrap_or_else(|| {
@@ -186,7 +187,7 @@ pub async fn create_view(
     let metadata_location = format!("{}/metadata/00001-{}.metadata.json", location, view_uuid);
 
     // Write initial metadata.json to object store
-    write_metadata_to_store(&metadata_location, &metadata, &config).await?;
+    write_metadata_to_store(&metadata_location, &metadata, config).await?;
 
     // When no object store is configured, store metadata in properties as fallback
     let properties = if config.object_store.is_none() {
@@ -197,21 +198,20 @@ pub async fn create_view(
 
     let _view = store
         .create_view(
-            &prefix,
-            &ns,
+            prefix,
+            ns,
             &req.name,
             view_uuid,
             &location,
             &metadata_location,
-            1,
             properties,
         )
         .await
         .map_err(|e| match e {
-            StoreError::AlreadyExists(msg) => {
+            CatalogError::AlreadyExists(msg) => {
                 IcebergError::ViewAlreadyExistsException { message: msg }
             }
-            other => store_error_to_iceberg_view(other),
+            other => catalog_error_to_iceberg_view(other),
         })?;
 
     Ok((
@@ -223,70 +223,88 @@ pub async fn create_view(
     ))
 }
 
-/// GET /iceberg/v1/{prefix}/namespaces/{ns}/views/{view}
+/// GET /iceberg/v1/{prefix}/namespaces/{ns}/views/{view} (dispatched)
 pub async fn load_view(
-    State(store): State<Arc<dyn CatalogStore>>,
-    Extension(config): Extension<IcebergConfig>,
-    Path((prefix, ns, view)): Path<(String, String, String)>,
-    Query(query): Query<WarehouseQuery>,
-) -> Result<impl IntoResponse, IcebergError> {
-    validate_warehouse(query.warehouse.as_deref(), &config)?;
-    let view_record = store
-        .get_view(&prefix, &ns, &view)
-        .await
-        .map_err(store_error_to_iceberg_view)?;
+    store: &Arc<dyn IcebergCatalogStore>,
+    config: &IcebergConfig,
+    prefix: &str,
+    ns: &str,
+    view: &str,
+    warehouse: Option<&str>,
+) -> Result<(StatusCode, Json<GetViewResponse>), IcebergError> {
+    validate_warehouse(warehouse, config)?;
 
-    // Check metadata.json exists before loading
-    if !check_metadata_exists(&view_record.view.metadata_location, &config).await {
-        return Err(IcebergError::MetadataNotFoundException {
-            message: format!(
-                "metadata.json not found at {}",
-                view_record.view.metadata_location
-            ),
-        });
-    }
+    let view_record = store
+        .get_view(prefix, ns, view)
+        .await
+        .map_err(catalog_error_to_iceberg_view)?;
 
     // Use properties as fallback when object store is not configured
     let fallback = if config.object_store.is_none() {
-        Some(view_record.view.properties.clone())
+        view_record.asset.properties.clone()
     } else {
         None
     };
 
-    let metadata =
-        read_metadata_from_store(&view_record.view.metadata_location, fallback, &config).await?;
+    let metadata_location = match view_record.view.metadata_location {
+        Some(ref ml) => {
+            // Check metadata.json exists before loading
+            if !check_metadata_exists(ml, config).await {
+                return Err(IcebergError::MetadataNotFoundException {
+                    message: format!("metadata.json not found at {}", ml),
+                });
+            }
+            Some(ml.clone())
+        }
+        None => None,
+    };
+
+    let metadata = match metadata_location {
+        Some(ref ml) => read_metadata_from_store(ml, fallback, config).await?,
+        None => fallback.ok_or_else(|| IcebergError::InternalServerError {
+            message: "no metadata available".to_string(),
+        })?,
+    };
 
     Ok((
         StatusCode::OK,
         Json(GetViewResponse {
-            metadata_location: Some(view_record.view.metadata_location),
+            metadata_location,
             metadata,
         }),
     ))
 }
 
-/// POST /iceberg/v1/{prefix}/namespaces/{ns}/views/{view}
+/// POST /iceberg/v1/{prefix}/namespaces/{ns}/views/{view} (dispatched)
 /// Replace view (CAS commit).
+#[allow(clippy::too_many_arguments)]
 pub async fn replace_view(
-    State(store): State<Arc<dyn CatalogStore>>,
-    Extension(config): Extension<IcebergConfig>,
-    metrics: Option<Extension<MetricsState>>,
-    Path((prefix, ns, view)): Path<(String, String, String)>,
-    Query(query): Query<WarehouseQuery>,
-    Json(req): Json<CommitViewRequest>,
-) -> Result<impl IntoResponse, IcebergError> {
-    validate_warehouse(query.warehouse.as_deref(), &config)?;
-    let metrics = metrics.map(|e| e.0);
+    store: &Arc<dyn IcebergCatalogStore>,
+    config: &IcebergConfig,
+    metrics: CommitMetrics,
+    prefix: &str,
+    ns: &str,
+    view: &str,
+    warehouse: Option<&str>,
+    req: CommitViewRequest,
+) -> Result<(StatusCode, Json<GetViewResponse>), IcebergError> {
+    validate_warehouse(warehouse, config)?;
 
     let view_record = store
-        .get_view(&prefix, &ns, &view)
+        .get_view(prefix, ns, view)
         .await
-        .map_err(store_error_to_iceberg_view)?;
+        .map_err(catalog_error_to_iceberg_view)?;
 
-    let metadata_location = view_record.view.metadata_location;
+    let metadata_location =
+        view_record
+            .view
+            .metadata_location
+            .ok_or_else(|| IcebergError::CommitFailedException {
+                message: format!("View '{}.{}' has no metadata location", ns, view),
+            })?;
 
     // Check metadata.json exists before committing
-    if !check_metadata_exists(&metadata_location, &config).await {
+    if !check_metadata_exists(&metadata_location, config).await {
         return Err(IcebergError::CommitFailedException {
             message: format!(
                 "Cannot commit: metadata.json not found at {}",
@@ -296,7 +314,7 @@ pub async fn replace_view(
     }
 
     // Load current metadata from object store
-    let current_metadata_json = read_metadata_from_store(&metadata_location, None, &config).await?;
+    let current_metadata_json = read_metadata_from_store(&metadata_location, None, config).await?;
 
     // Apply requirements and updates
     let new_metadata_json = super::view_metadata::apply_view_commit(
@@ -312,32 +330,31 @@ pub async fn replace_view(
             .map_err(|msg| IcebergError::InternalServerError { message: msg })?;
 
     // Write new metadata.json to object store
-    write_metadata_to_store(&new_metadata_location, &new_metadata_json, &config).await?;
+    write_metadata_to_store(&new_metadata_location, &new_metadata_json, config).await?;
 
-    // CAS update via storage layer
+    // CAS commit: the store locks the asset row, compares the pointer,
+    // inserts the mirrored version and updates current_version_key + the
+    // view pointer cache (same S1–S6 discipline as tables, DESIGN §6.4).
+    let new_version_key = super::metadata::version_key_from_location(&new_metadata_location);
     store
         .commit_view(
-            &prefix,
-            &ns,
-            &view,
+            prefix,
+            ns,
+            view,
             &metadata_location,
             &new_metadata_location,
+            &new_version_key,
         )
         .await
         .map_err(|e| match e {
-            StoreError::Conflict { msg } => {
-                if let Some(ref m) = metrics {
-                    m.registry.record_iceberg_commit_conflict();
-                }
+            CatalogError::Conflict(msg) => {
+                metrics.record_conflict();
                 IcebergError::CommitFailedException { message: msg }
             }
-            StoreError::NotFound(msg) => IcebergError::NoSuchViewException { message: msg },
-            other => store_error_to_iceberg_view(other),
+            CatalogError::NotFound(msg) => IcebergError::NoSuchViewException { message: msg },
+            other => catalog_error_to_iceberg_view(other),
         })?;
-
-    if let Some(ref m) = metrics {
-        m.registry.record_iceberg_commit_success();
-    }
+    metrics.record_success();
 
     Ok((
         StatusCode::OK,
@@ -348,39 +365,43 @@ pub async fn replace_view(
     ))
 }
 
-/// DELETE /iceberg/v1/{prefix}/namespaces/{ns}/views/{view}
+/// DELETE /iceberg/v1/{prefix}/namespaces/{ns}/views/{view} (dispatched)
 pub async fn drop_view(
-    State(store): State<Arc<dyn CatalogStore>>,
-    Extension(config): Extension<IcebergConfig>,
-    Path((prefix, ns, view)): Path<(String, String, String)>,
-    Query(query): Query<WarehouseQuery>,
-) -> Result<impl IntoResponse, IcebergError> {
-    validate_warehouse(query.warehouse.as_deref(), &config)?;
+    store: &Arc<dyn IcebergCatalogStore>,
+    config: &IcebergConfig,
+    prefix: &str,
+    ns: &str,
+    view: &str,
+    warehouse: Option<&str>,
+) -> Result<StatusCode, IcebergError> {
+    validate_warehouse(warehouse, config)?;
 
     store
-        .drop_view(&prefix, &ns, &view)
+        .drop_view(prefix, ns, view)
         .await
-        .map_err(store_error_to_iceberg_view)?;
+        .map_err(catalog_error_to_iceberg_view)?;
 
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// HEAD /iceberg/v1/{prefix}/namespaces/{ns}/views/{view}
+/// HEAD /iceberg/v1/{prefix}/namespaces/{ns}/views/{view} (dispatched)
 pub async fn view_exists(
-    State(store): State<Arc<dyn CatalogStore>>,
-    Path((prefix, ns, view)): Path<(String, String, String)>,
-    Query(query): Query<WarehouseQuery>,
-    Extension(config): Extension<IcebergConfig>,
-) -> Result<impl IntoResponse, IcebergError> {
-    validate_warehouse(query.warehouse.as_deref(), &config)?;
-    let exists = match store.view_exists(&prefix, &ns, &view).await {
-        Ok(e) => e,
-        Err(StoreError::NotFound(_)) => false,
-        Err(e) => return Err(store_error_to_iceberg_view(e)),
-    };
+    store: &Arc<dyn IcebergCatalogStore>,
+    config: &IcebergConfig,
+    prefix: &str,
+    ns: &str,
+    view: &str,
+    warehouse: Option<&str>,
+) -> Result<StatusCode, IcebergError> {
+    validate_warehouse(warehouse, config)?;
+
+    let exists = store
+        .view_exists(prefix, ns, view)
+        .await
+        .map_err(catalog_error_to_iceberg_view)?;
 
     if exists {
-        Ok(StatusCode::OK)
+        Ok(StatusCode::NO_CONTENT)
     } else {
         Err(IcebergError::NoSuchViewException {
             message: format!("View '{}.{}' not found", ns, view),
@@ -390,63 +411,62 @@ pub async fn view_exists(
 
 /// POST /iceberg/v1/{prefix}/views/rename
 pub async fn rename_view(
-    State(store): State<Arc<dyn CatalogStore>>,
+    State(store): State<Arc<dyn IcebergCatalogStore>>,
     Path(prefix): Path<String>,
-    Query(query): Query<WarehouseQuery>,
+    Query(query): Query<super::dto::WarehouseQuery>,
     Extension(config): Extension<IcebergConfig>,
     Json(req): Json<RenameViewRequest>,
 ) -> Result<impl IntoResponse, IcebergError> {
     validate_warehouse(query.warehouse.as_deref(), &config)?;
-    validate_name(&req.source.name).map_err(store_error_to_iceberg_view)?;
-    validate_name(&req.destination.name).map_err(store_error_to_iceberg_view)?;
+    validate_name(&req.source.name).map_err(catalog_error_to_iceberg_view)?;
+    validate_name(&req.destination.name).map_err(catalog_error_to_iceberg_view)?;
 
-    let src_ns = req
-        .source
-        .namespace
-        .first()
-        .ok_or_else(|| IcebergError::BadRequestException {
+    if req.source.namespace.is_empty() {
+        return Err(IcebergError::BadRequestException {
             message: "source namespace must not be empty".to_string(),
-        })?;
-    let dst_ns =
-        req.destination
-            .namespace
-            .first()
-            .ok_or_else(|| IcebergError::BadRequestException {
-                message: "destination namespace must not be empty".to_string(),
-            })?;
-
-    // Verify destination namespace exists
-    let dest_exists = store
-        .namespace_exists(&prefix, dst_ns)
-        .await
-        .map_err(store_error_to_iceberg_view)?;
-    if !dest_exists {
-        return Err(IcebergError::NoSuchNamespaceException {
-            message: format!("Namespace '{}' not found", dst_ns),
+        });
+    }
+    if req.destination.namespace.is_empty() {
+        return Err(IcebergError::BadRequestException {
+            message: "destination namespace must not be empty".to_string(),
         });
     }
 
+    let src_ns = req.source.namespace.join("/");
+    let dst_ns = req.destination.namespace.join("/");
+
+    // Verify destination namespace exists
+    store
+        .get_namespace(&prefix, &dst_ns)
+        .await
+        .map_err(|e| match e {
+            CatalogError::NotFound(_) => IcebergError::NoSuchNamespaceException {
+                message: format!("Namespace '{}' not found", dst_ns),
+            },
+            other => catalog_error_to_iceberg_view(other),
+        })?;
+
     // Verify source view exists
     store
-        .get_view(&prefix, src_ns, &req.source.name)
+        .get_view(&prefix, &src_ns, &req.source.name)
         .await
-        .map_err(store_error_to_iceberg_view)?;
+        .map_err(catalog_error_to_iceberg_view)?;
 
     store
         .rename_view(
             &prefix,
-            src_ns,
+            &src_ns,
             &req.source.name,
             &prefix,
-            dst_ns,
+            &dst_ns,
             &req.destination.name,
         )
         .await
         .map_err(|e| match e {
-            StoreError::AlreadyExists(msg) => {
+            CatalogError::AlreadyExists(msg) => {
                 IcebergError::ViewAlreadyExistsException { message: msg }
             }
-            other => store_error_to_iceberg_view(other),
+            other => catalog_error_to_iceberg_view(other),
         })?;
 
     Ok(StatusCode::NO_CONTENT)

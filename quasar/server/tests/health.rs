@@ -1,167 +1,81 @@
+#![cfg(all(feature = "lance", feature = "iceberg", feature = "unified"))]
+//! Server — health / readiness / metrics endpoint integration tests.
+
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use deadpool_postgres::{Pool, Runtime};
-use http_body_util::BodyExt;
-use postgresql_embedded::PostgreSQL;
-use quasar_server::create_app;
-use quasar_storage::PgCatalogStore;
-use serde_json::Value;
+mod common;
+
+use axum::http::StatusCode;
+use common::*;
+use serial_test::serial;
 use tokio::sync::OnceCell;
-use tower::ServiceExt;
 
-static PG_INSTANCE: OnceCell<PgInstance> = OnceCell::const_new();
+static PG: OnceCell<(postgresql_embedded::PostgreSQL, String)> = OnceCell::const_new();
 
-struct PgInstance {
-    #[allow(dead_code)]
-    postgresql: PostgreSQL,
-    url: String,
+async fn db_url() -> &'static str {
+    &PG.get_or_init(|| async { start_pg("quasar_test_server_health").await })
+        .await
+        .1
 }
 
-impl PgInstance {
-    async fn get() -> &'static Self {
-        PG_INSTANCE
-            .get_or_init(|| async {
-                let mut postgresql = PostgreSQL::default();
-                postgresql.setup().await.expect("PostgreSQL setup failed");
-                postgresql.start().await.expect("PostgreSQL start failed");
-                postgresql
-                    .create_database("quasar_test")
-                    .await
-                    .expect("create database failed");
-                let url = postgresql.settings().url("quasar_test");
+#[tokio::test]
+#[serial]
+async fn healthz_always_ok() {
+    let pool = fresh_pool(db_url().await).await;
+    let app = test_app(pool);
 
-                let pool = test_pool(&url);
-                let store = PgCatalogStore::new(pool.clone());
-                store.initialize().await.expect("initialize failed");
+    let resp = get(&app, "/healthz").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["status"], "ok");
+}
 
-                let client = pool.get().await.expect("failed to get client");
-                client
-                    .execute("TRUNCATE tabular_asset_versions, asset_versions, tabular_assets, assets, namespaces, asset_permissions CASCADE", &[])
-                    .await
-                    .expect("failed to truncate tables");
+#[tokio::test]
+#[serial]
+async fn readyz_checks_database() {
+    let pool = fresh_pool(db_url().await).await;
+    let app = test_app(pool);
 
-                PgInstance { postgresql, url }
-            })
+    let resp = get(&app, "/readyz").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["status"], "ready");
+    assert_eq!(body["checks"]["database"], "ok");
+}
+
+#[tokio::test]
+#[serial]
+async fn metrics_endpoint_renders_prometheus_text() {
+    let pool = fresh_pool(db_url().await).await;
+    let app = test_app(pool);
+
+    // Generate some traffic, then read the metrics output.
+    get(&app, "/healthz").await;
+    let resp = get(&app, "/metrics").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let text = String::from_utf8(
+        http_body_util::BodyExt::collect(resp.into_body())
             .await
-    }
-}
-
-fn test_pool(url: &str) -> Pool {
-    let config = url
-        .parse::<tokio_postgres::Config>()
-        .expect("invalid database URL");
-    let mgr = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
-    Pool::builder(mgr)
-        .runtime(Runtime::Tokio1)
-        .build()
-        .expect("failed to create pool")
-}
-
-async fn setup() -> Pool {
-    let instance = PgInstance::get().await;
-    let pool = test_pool(&instance.url);
-
-    let client = pool.get().await.expect("failed to get client");
-    client
-        .execute("TRUNCATE tabular_asset_versions, asset_versions, tabular_assets, assets, namespaces, asset_permissions CASCADE", &[])
-        .await
-        .expect("failed to truncate tables");
-
-    pool
-}
-
-async fn body_json(response: axum::response::Response) -> Value {
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    serde_json::from_slice(&body).unwrap()
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(text.contains("http_requests"), "metrics text: {text}");
 }
 
 #[tokio::test]
-async fn test_healthz() {
-    let pool = setup().await;
-    let app = create_app(pool);
+#[serial]
+async fn protocol_routers_mounted() {
+    let pool = fresh_pool(db_url().await).await;
+    let app = test_app(pool);
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/healthz")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_json(response).await;
-    assert_eq!(json["status"], "ok");
-}
-
-#[tokio::test]
-async fn test_readyz() {
-    let pool = setup().await;
-    let app = create_app(pool);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/readyz")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_json(response).await;
-    assert_eq!(json["status"], "ready");
-    assert_eq!(json["checks"]["database"], "ok");
-}
-
-#[tokio::test]
-#[cfg(feature = "lance")]
-async fn test_lance_routes_still_work() {
-    let pool = setup().await;
-    let app = create_app(pool);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/lance/v1/namespace/default/list")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_json(response).await;
-    let namespaces = json["namespaces"].as_array().unwrap();
-    assert!(namespaces.is_empty());
-}
-
-#[tokio::test]
-#[cfg(feature = "iceberg")]
-async fn test_iceberg_routes_are_mounted() {
-    let pool = setup().await;
-    let app = create_app(pool);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/iceberg/v1/config")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_json(response).await;
-    assert!(json["defaults"].is_object());
-    assert!(json["overrides"].is_object());
+    // Iceberg config endpoint.
+    let resp = get(&app, "/iceberg/v1/config").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    // Lance namespace list (root).
+    let resp = get(&app, "/lance/v1/namespace/$/list").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    // Unified domain list.
+    let resp = get(&app, "/unified/v1/domains").await;
+    assert_eq!(resp.status(), StatusCode::OK);
 }

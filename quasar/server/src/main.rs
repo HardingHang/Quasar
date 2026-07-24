@@ -79,11 +79,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (None, None)
             };
 
+        // Derive the default warehouse name from the warehouse path (bucket
+        // for s3 URIs); fall back to "warehouse" when no path is configured.
+        let default_warehouse = cfg
+            .warehouse_path
+            .as_deref()
+            .map(parse_s3_bucket)
+            .unwrap_or_else(|| "warehouse".to_string());
+
         app_config.iceberg = quasar_adapter::iceberg::IcebergConfig {
-            warehouse_path: cfg.warehouse_path,
+            warehouse_path: cfg.warehouse_path.clone(),
             object_store,
             s3_bucket,
-            default_warehouse: cfg.warehouse,
+            default_warehouse,
         };
     }
 

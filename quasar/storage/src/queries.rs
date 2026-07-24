@@ -1,887 +1,626 @@
-//! Centralized SQL constants for V3 Data Core Model queries.
+//! SQL statements for the PostgreSQL storage implementation.
 //!
-//! These constants are defined in Phase 1 of the V3 implementation as the
-//! single place where SQL strings live. `PgCatalogStore` switches its inline
-//! V1 SQL to these constants in Phase 2 once the V3 schema is wired through
-//! `crate::schema`.
-//!
-//! Conventions:
-//! - constant names use `SCREAMING_SNAKE_CASE`;
-//! - multi-line SQL uses `r#"..."#` raw strings, SQL keywords are uppercase;
-//! - placeholders are positional `$1`, `$2`, ...;
-//! - lookups by `(domain, namespace, asset)` join through the registry tables
-//!   so callers do not have to thread UUIDs in handler code;
-//! - statements that mutate state always `RETURNING` the canonical column set
-//!   so callers can rebuild the model without an extra round-trip.
-//!
-//! Phase 2 C3 keeps the V2 trait surface, so the domain-, version-,
-//! and identity-level constants (Domain* CRUD, version::GET_LATEST,
-//! version::LIST_BY_ASSET, asset::LOOKUP_ID_BY_NAME) are not yet referenced.
-//! C4 lights them up when `DomainStore`, `VersionStore`, and the V3-shaped
-//! `AssetStore` methods land. The file-level `dead_code` allow keeps clippy
-//! quiet until then and is removed in C4.
-#![allow(dead_code)]
+//! Conventions (CODING_CONVENTION.md): keywords upper-case, every value
+//! parameterized (`$1`, `$2`, ...), no string-built SQL. Optional filters
+//! use the `($n::type IS NULL OR ...)` sentinel pattern; three-state patch
+//! fields use `CASE $action::int WHEN 1 THEN $value WHEN 2 THEN NULL ELSE col`
+//! (action: 0 = NoChange, 1 = Set, 2 = Unset; the cast pins the parameter
+//! type — PostgreSQL otherwise infers the CASE operand as text). Prefix matching uses
+//! `starts_with(path, $n || '/')` instead of LIKE so slug characters such
+//! as `_` are not treated as wildcards.
 
-/// Queries against the `domains` table (V3 §3.3.2, §5.3).
 pub mod domain {
-    /// Insert a new domain. Parameters: $1 name, $2 comment, $3 properties,
-    /// $4 storage_type, $5 storage_config, $6 warehouse, $7 owner.
     pub const CREATE: &str = r#"
-        INSERT INTO domains (name, comment, properties, storage_type, storage_config, warehouse, owner)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        RETURNING id, name, comment, properties, storage_type, storage_config, warehouse, owner, created_at, updated_at
+        INSERT INTO domains (name, comment, properties, storage_type, storage_config, warehouse)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING id, name, comment, properties, storage_type, storage_config, warehouse,
+                  created_at, updated_at
     "#;
 
-    /// List domains in name order. Parameters: $1 limit, $2 offset.
-    pub const LIST: &str = r#"
-        SELECT id, name, comment, properties, storage_type, storage_config, warehouse, owner, created_at, updated_at
-        FROM domains
-        ORDER BY name
-        LIMIT $1 OFFSET $2
-    "#;
-
-    /// Look up a domain by name. Parameter: $1 name.
     pub const GET_BY_NAME: &str = r#"
-        SELECT id, name, comment, properties, storage_type, storage_config, warehouse, owner, created_at, updated_at
+        SELECT id, name, comment, properties, storage_type, storage_config, warehouse,
+               created_at, updated_at
         FROM domains
         WHERE name = $1
     "#;
 
-    /// Check whether a domain exists by name. Parameter: $1 name.
-    pub const EXISTS: &str = r#"
-        SELECT EXISTS(SELECT 1 FROM domains WHERE name = $1)
+    pub const GET_ID_BY_NAME: &str = r#"
+        SELECT id FROM domains WHERE name = $1
     "#;
 
-    /// Delete an empty domain. Fails with FK RESTRICT if namespaces remain.
-    /// Parameter: $1 name.
+    pub const LIST: &str = r#"
+        SELECT id, name, comment, properties, storage_type, storage_config, warehouse,
+               created_at, updated_at
+        FROM domains
+        ORDER BY name
+        OFFSET $1 LIMIT $2
+    "#;
+
+    /// Three-state patch: per field `$action` (0/1/2) + `$value`.
+    pub const UPDATE: &str = r#"
+        UPDATE domains SET
+            comment        = CASE $2::int WHEN 1 THEN $3 WHEN 2 THEN NULL ELSE comment END,
+            properties     = CASE $4::int WHEN 1 THEN $5 WHEN 2 THEN NULL ELSE properties END,
+            storage_type   = CASE $6::int WHEN 1 THEN $7 WHEN 2 THEN NULL ELSE storage_type END,
+            storage_config = CASE $8::int WHEN 1 THEN $9 WHEN 2 THEN NULL ELSE storage_config END,
+            warehouse      = CASE $10::int WHEN 1 THEN $11 WHEN 2 THEN NULL ELSE warehouse END,
+            updated_at     = now()
+        WHERE name = $1
+        RETURNING id, name, comment, properties, storage_type, storage_config, warehouse,
+                  created_at, updated_at
+    "#;
+
     pub const DELETE: &str = r#"
         DELETE FROM domains WHERE name = $1
     "#;
-
-    /// Update mutable fields of a domain. Parameters: $1 comment,
-    /// $2 properties, $3 storage_type, $4 storage_config, $5 warehouse,
-    /// $6 owner, $7 name (target).
-    pub const UPDATE: &str = r#"
-        UPDATE domains
-        SET comment = $1,
-            properties = $2,
-            storage_type = $3,
-            storage_config = $4,
-            warehouse = $5,
-            owner = $6,
-            updated_at = NOW()
-        WHERE name = $7
-        RETURNING id, name, comment, properties, storage_type, storage_config, warehouse, owner, created_at, updated_at
-    "#;
 }
 
-/// Queries against the `namespaces` table (V3 §3.3.3, §5.3).
 pub mod namespace {
-    /// Insert a namespace under an existing domain (resolved by name). The
-    /// SELECT-source subquery returns zero rows when the domain does not
-    /// exist, so the INSERT inserts zero rows and the caller can detect that
-    /// case via `RETURNING`. Parameters: $1 domain_name, $2 name,
-    /// $3 comment, $4 properties.
-    pub const CREATE: &str = r#"
-        INSERT INTO namespaces (domain_id, name, comment, properties)
-        SELECT d.id, $2, $3, $4
-        FROM domains d
-        WHERE d.name = $1
-        RETURNING id, domain_id, name, comment, properties, created_at, updated_at
+    /// Implicit intermediate node insert (FR-N2); conflicts are ignored.
+    pub const CREATE_PREFIX: &str = r#"
+        INSERT INTO namespaces (domain_id, path, depth)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (domain_id, path) DO NOTHING
     "#;
 
-    /// List namespaces under a domain (resolved by domain name).
-    /// Parameters: $1 domain_name, $2 limit, $3 offset.
-    pub const LIST_BY_DOMAIN: &str = r#"
-        SELECT n.id, n.domain_id, n.name, n.comment, n.properties, n.created_at, n.updated_at
-        FROM namespaces n
-        JOIN domains d ON n.domain_id = d.id
-        WHERE d.name = $1
-        ORDER BY n.name
-        LIMIT $2 OFFSET $3
-    "#;
-
-    /// Look up a namespace by (domain_name, namespace_name).
-    /// Parameters: $1 domain_name, $2 namespace_name.
-    pub const GET_BY_NAME: &str = r#"
-        SELECT n.id, n.domain_id, n.name, n.comment, n.properties, n.created_at, n.updated_at
-        FROM namespaces n
-        JOIN domains d ON n.domain_id = d.id
-        WHERE d.name = $1 AND n.name = $2
-    "#;
-
-    /// Check whether a namespace exists. Parameters: $1 domain_name, $2 name.
-    pub const EXISTS: &str = r#"
-        SELECT EXISTS(
-            SELECT 1
-            FROM namespaces n
-            JOIN domains d ON n.domain_id = d.id
-            WHERE d.name = $1 AND n.name = $2
-        )
-    "#;
-
-    /// Delete an empty namespace. Fails with FK RESTRICT if assets remain.
-    /// Parameters: $1 domain_name, $2 namespace_name.
-    pub const DELETE: &str = r#"
-        DELETE FROM namespaces n
-        USING domains d
-        WHERE n.domain_id = d.id AND d.name = $1 AND n.name = $2
-    "#;
-
-    /// Update a namespace's comment and properties.
-    /// Parameters: $1 comment, $2 properties, $3 domain_name, $4 namespace_name.
-    pub const UPDATE: &str = r#"
-        UPDATE namespaces n
-        SET comment = $1,
-            properties = $2,
-            updated_at = NOW()
-        FROM domains d
-        WHERE n.domain_id = d.id AND d.name = $3 AND n.name = $4
-        RETURNING n.id, n.domain_id, n.name, n.comment, n.properties, n.created_at, n.updated_at
-    "#;
-}
-
-/// Queries against `assets` and `tabular_assets` (V3 §3.3.4-5, §5.3).
-pub mod asset {
-    /// Insert a generic asset under `(domain, namespace)` resolved by name.
-    /// The SELECT-source returns zero rows when the namespace does not exist,
-    /// so the INSERT inserts zero rows and the caller can detect that case via
-    /// `RETURNING`. Parameters: $1 domain_name, $2 namespace_name, $3 name,
-    /// $4 asset_type, $5 comment, $6 properties.
-    pub const CREATE: &str = r#"
-        INSERT INTO assets (namespace_id, name, asset_type, comment, properties)
-        SELECT ns.id, $3, $4, $5, $6
-        FROM namespaces ns
-        JOIN domains d ON ns.domain_id = d.id
-        WHERE d.name = $1 AND ns.name = $2
-        RETURNING id, namespace_id, name, asset_type, comment, properties, deleted_at,
-                  created_by, updated_by, created_at, updated_at
-    "#;
-
-    /// Look up an active asset by (domain_name, namespace_name, asset_name).
-    /// Active means `deleted_at IS NULL`. Parameters: $1 domain_name,
-    /// $2 namespace_name, $3 asset_name.
-    pub const GET_BY_NAME: &str = r#"
-        SELECT a.id, a.namespace_id, a.name, a.asset_type, a.comment, a.properties,
-               a.deleted_at, a.created_by, a.updated_by, a.created_at, a.updated_at
-        FROM assets a
-        JOIN namespaces ns ON a.namespace_id = ns.id
-        JOIN domains d ON ns.domain_id = d.id
-        WHERE d.name = $1 AND ns.name = $2 AND a.name = $3 AND a.deleted_at IS NULL
-    "#;
-
-    /// Join an active asset with its tabular extension filtered by format.
-    /// Parameters: $1 domain_name, $2 namespace_name, $3 asset_name, $4 format.
-    pub const GET_TABULAR_BY_NAME: &str = r#"
-        SELECT a.id, a.namespace_id, a.name, a.asset_type, a.comment, a.properties,
-               a.deleted_at, a.created_by, a.updated_by, a.created_at, a.updated_at,
-               ta.asset_id, ta.format, ta.location, ta.metadata_location, ta.schema_snapshot,
-               ta.created_at AS tabular_created_at, ta.updated_at AS tabular_updated_at
-        FROM assets a
-        JOIN tabular_assets ta ON a.id = ta.asset_id
-        JOIN namespaces ns ON a.namespace_id = ns.id
-        JOIN domains d ON ns.domain_id = d.id
-        WHERE d.name = $1 AND ns.name = $2 AND a.name = $3
-          AND a.deleted_at IS NULL AND a.asset_type = 'table' AND ta.format = $4
-    "#;
-
-    /// List active tabular assets in a namespace, optionally filtered by format.
-    /// Parameters: $1 domain_name, $2 namespace_name, $3 format filter
-    /// (TEXT, NULL = no filter), $4 limit, $5 offset.
-    pub const LIST_TABULAR_BY_NAMESPACE: &str = r#"
-        SELECT a.id, a.namespace_id, a.name, a.asset_type, a.comment, a.properties,
-               a.deleted_at, a.created_by, a.updated_by, a.created_at, a.updated_at,
-               ta.asset_id, ta.format, ta.location, ta.metadata_location, ta.schema_snapshot,
-               ta.created_at AS tabular_created_at, ta.updated_at AS tabular_updated_at
-        FROM assets a
-        JOIN tabular_assets ta ON a.id = ta.asset_id
-        JOIN namespaces ns ON a.namespace_id = ns.id
-        JOIN domains d ON ns.domain_id = d.id
-        WHERE d.name = $1 AND ns.name = $2
-          AND a.deleted_at IS NULL AND a.asset_type = 'table'
-          AND ($3::TEXT IS NULL OR ta.format = $3)
-        ORDER BY a.name
-        LIMIT $4 OFFSET $5
-    "#;
-
-    /// Insert a tabular asset extension row. Parameters: $1 asset_id, $2 format,
-    /// $3 location, $4 metadata_location, $5 schema_snapshot.
-    pub const CREATE_TABULAR: &str = r#"
-        INSERT INTO tabular_assets (asset_id, format, location, metadata_location, schema_snapshot)
+    /// Final node insert; no RETURNING row means the path already exists.
+    pub const CREATE_FINAL: &str = r#"
+        INSERT INTO namespaces (domain_id, path, depth, comment, properties)
         VALUES ($1, $2, $3, $4, $5)
-        RETURNING asset_id, format, location, metadata_location, schema_snapshot,
-                  created_at AS tabular_created_at, updated_at AS tabular_updated_at
+        ON CONFLICT (domain_id, path) DO NOTHING
+        RETURNING id, domain_id, path, depth, comment, properties, created_at, updated_at
     "#;
 
-    /// Update comment and properties on the active asset, returning the new row.
-    /// Parameters: $1 comment, $2 properties, $3 asset_id.
-    pub const UPDATE_PROPERTIES: &str = r#"
-        UPDATE assets
-        SET comment = $1,
-            properties = $2,
-            updated_at = NOW()
-        WHERE id = $3 AND deleted_at IS NULL
-        RETURNING id, namespace_id, name, asset_type, comment, properties, deleted_at,
-                  created_by, updated_by, created_at, updated_at
+    pub const GET_BY_PATH: &str = r#"
+        SELECT n.id, n.domain_id, n.path, n.depth, n.comment, n.properties,
+               n.created_at, n.updated_at
+        FROM namespaces n
+        JOIN domains d ON d.id = n.domain_id
+        WHERE d.name = $1 AND n.path = $2
     "#;
 
-    /// Rename an active asset within the same namespace.
-    /// Parameters: $1 domain_name, $2 namespace_name, $3 current_name,
-    /// $4 new_name.
-    pub const RENAME: &str = r#"
-        UPDATE assets a
-        SET name = $4,
-            updated_at = NOW()
-        FROM namespaces ns, domains d
-        WHERE ns.id = a.namespace_id
-          AND d.id = ns.domain_id
-          AND d.name = $1 AND ns.name = $2 AND a.name = $3
-          AND a.deleted_at IS NULL
+    pub const GET_ID_BY_PATH: &str = r#"
+        SELECT n.id
+        FROM namespaces n
+        JOIN domains d ON d.id = n.domain_id
+        WHERE d.name = $1 AND n.path = $2
     "#;
 
-    /// Rename an active asset and move it to a different namespace
-    /// within the same domain. Parameters: $1 domain_name, $2 src_namespace_name,
-    /// $3 current_name, $4 new_name, $5 new_namespace_id.
-    pub const RENAME_WITH_NAMESPACE: &str = r#"
-        UPDATE assets a
-        SET name = $4,
-            namespace_id = $5,
-            updated_at = NOW()
-        FROM namespaces ns, domains d
-        WHERE ns.id = a.namespace_id
-          AND d.id = ns.domain_id
-          AND d.name = $1 AND ns.name = $2 AND a.name = $3
-          AND a.deleted_at IS NULL
+    pub const LIST: &str = r#"
+        SELECT n.id, n.domain_id, n.path, n.depth, n.comment, n.properties,
+               n.created_at, n.updated_at
+        FROM namespaces n
+        JOIN domains d ON d.id = n.domain_id
+        WHERE d.name = $1
+          AND ($2::text IS NULL OR n.path = $2 OR starts_with(n.path, $2 || '/'))
+        ORDER BY n.path
+        OFFSET $3 LIMIT $4
     "#;
 
-    /// Hard delete an asset; cascades to extension and version rows via FK.
-    /// Parameters: $1 domain_name, $2 namespace_name, $3 asset_name.
-    pub const DELETE: &str = r#"
-        DELETE FROM assets a
-        USING namespaces ns, domains d
-        WHERE ns.id = a.namespace_id
-          AND d.id = ns.domain_id
-          AND d.name = $1 AND ns.name = $2 AND a.name = $3
-          AND a.deleted_at IS NULL
+    pub const UPDATE: &str = r#"
+        UPDATE namespaces n SET
+            comment    = CASE $3::int WHEN 1 THEN $4 WHEN 2 THEN NULL ELSE n.comment END,
+            properties = CASE $5::int WHEN 1 THEN $6 WHEN 2 THEN NULL ELSE n.properties END,
+            updated_at = now()
+        FROM domains d
+        WHERE n.domain_id = d.id AND d.name = $1 AND n.path = $2
+        RETURNING n.id, n.domain_id, n.path, n.depth, n.comment, n.properties,
+                  n.created_at, n.updated_at
     "#;
 
-    /// Check whether a tabular asset of a specific format exists with the
-    /// given (domain, namespace, name) tuple.
-    /// Parameters: $1 domain_name, $2 namespace_name, $3 asset_name, $4 format.
-    pub const EXISTS_TABULAR: &str = r#"
-        SELECT EXISTS(
-            SELECT 1
-            FROM assets a
-            JOIN tabular_assets ta ON a.id = ta.asset_id
-            JOIN namespaces ns ON a.namespace_id = ns.id
-            JOIN domains d ON ns.domain_id = d.id
-            WHERE d.name = $1 AND ns.name = $2 AND a.name = $3
-              AND a.deleted_at IS NULL AND a.asset_type = 'table' AND ta.format = $4
-        )
+    /// Child namespaces of the given path within the same domain.
+    pub const COUNT_CHILDREN: &str = r#"
+        SELECT COUNT(*)
+        FROM namespaces
+        WHERE domain_id = $1 AND starts_with(path, $2 || '/')
     "#;
 
-    /// Compare-and-swap update of a tabular asset's `metadata_location`. The
-    /// row is only updated when its current `metadata_location` equals the
-    /// caller-supplied expected value, giving Iceberg-style optimistic
-    /// concurrency. Callers detect mismatch by checking that the statement
-    /// returned a row (0 rows → `Conflict`).
-    ///
-    /// Parameters: $1 new_location, $2 new_schema_snapshot (JSONB, nullable),
-    /// $3 domain_name, $4 namespace_name, $5 asset_name, $6 format,
-    /// $7 expected_location.
-    pub const CAS_UPDATE_METADATA_LOCATION: &str = r#"
-        UPDATE tabular_assets ta
-        SET metadata_location = $1,
-            schema_snapshot = COALESCE($2, ta.schema_snapshot),
-            updated_at = NOW()
-        FROM assets a
-        JOIN namespaces ns ON a.namespace_id = ns.id
-        JOIN domains d ON ns.domain_id = d.id
-        WHERE ta.asset_id = a.id
-          AND d.name = $3 AND ns.name = $4 AND a.name = $5 AND ta.format = $6
-          AND a.deleted_at IS NULL AND a.asset_type = 'table'
-          AND ta.metadata_location IS NOT DISTINCT FROM $7
-        RETURNING ta.asset_id
+    pub const COUNT_ASSETS: &str = r#"
+        SELECT COUNT(*) FROM assets WHERE namespace_id = $1
     "#;
 
-    /// Update an active asset's properties in place. Used as the second
-    /// statement of a CAS commit transaction so the property delta lands
-    /// atomically with the metadata_location swap. Parameters: $1 properties
-    /// (JSONB), $2 asset_id.
-    pub const UPDATE_PROPERTIES_BY_ID: &str = r#"
-        UPDATE assets
-        SET properties = $1,
-            updated_at = NOW()
-        WHERE id = $2 AND deleted_at IS NULL
-    "#;
-
-    /// Transaction CAS update of a tabular asset's `metadata_location`.
-    /// Like [`CAS_UPDATE_METADATA_LOCATION`] but for multi-table transactions.
-    /// Also updates `schema_snapshot` so fallback reads are consistent.
-    /// Parameters: $1 new_location, $2 schema_snapshot (JSONB), $3 domain_name,
-    /// $4 namespace_name, $5 asset_name, $6 expected_location.
-    pub const TX_CAS_UPDATE_METADATA_LOCATION: &str = r#"
-        UPDATE tabular_assets ta
-        SET metadata_location = $1,
-            schema_snapshot = COALESCE($2, ta.schema_snapshot),
-            updated_at = NOW()
-        FROM assets a
-        JOIN namespaces ns ON a.namespace_id = ns.id
-        JOIN domains d ON ns.domain_id = d.id
-        WHERE ta.asset_id = a.id
-          AND d.name = $3 AND ns.name = $4 AND a.name = $5
-          AND ta.format = 'iceberg'
-          AND a.deleted_at IS NULL AND a.asset_type = 'table'
-          AND ta.metadata_location IS NOT DISTINCT FROM $6
-        RETURNING ta.asset_id
-    "#;
-
-    /// Unified list of active assets in a namespace. `LEFT JOIN tabular_assets`
-    /// lets future non-tabular asset types appear as `(Asset, None)`. Today
-    /// every row pairs with a tabular extension. Parameters: $1 domain_name,
-    /// $2 namespace_name, $3 format filter (TEXT, NULL = no filter),
-    /// $4 name filter (TEXT, NULL = no filter), $5 limit, $6 offset.
-    pub const LIST_UNIFIED: &str = r#"
-        SELECT a.id, a.namespace_id, a.name, a.asset_type, a.comment, a.properties,
-               a.deleted_at, a.created_by, a.updated_by, a.created_at, a.updated_at,
-               ta.asset_id, ta.format, ta.location, ta.metadata_location, ta.schema_snapshot,
-               ta.created_at AS tabular_created_at, ta.updated_at AS tabular_updated_at
-        FROM assets a
-        LEFT JOIN tabular_assets ta ON a.id = ta.asset_id
-        JOIN namespaces ns ON a.namespace_id = ns.id
-        JOIN domains d ON ns.domain_id = d.id
-        WHERE d.name = $1 AND ns.name = $2
-          AND a.deleted_at IS NULL
-          AND ($3::TEXT IS NULL OR ta.format = $3)
-          AND ($4::TEXT IS NULL OR a.name = $4)
-        ORDER BY a.name, ta.format NULLS LAST
-        LIMIT $5 OFFSET $6
-    "#;
-
-    /// Unified single-asset lookup. Returns the asset with its optional
-    /// tabular extension; non-tabular asset types map to a `None` extension.
-    /// Parameters: $1 domain_name, $2 namespace_name, $3 asset_name.
-    pub const GET_UNIFIED: &str = r#"
-        SELECT a.id, a.namespace_id, a.name, a.asset_type, a.comment, a.properties,
-               a.deleted_at, a.created_by, a.updated_by, a.created_at, a.updated_at,
-               ta.asset_id, ta.format, ta.location, ta.metadata_location, ta.schema_snapshot,
-               ta.created_at AS tabular_created_at, ta.updated_at AS tabular_updated_at
-        FROM assets a
-        LEFT JOIN tabular_assets ta ON a.id = ta.asset_id
-        JOIN namespaces ns ON a.namespace_id = ns.id
-        JOIN domains d ON ns.domain_id = d.id
-        WHERE d.name = $1 AND ns.name = $2 AND a.name = $3
-          AND a.deleted_at IS NULL
-    "#;
-
-    /// Resolve the active asset id for `(domain, namespace, name)`. Used by
-    /// version operations that need an `asset_id` before issuing the version
-    /// query. Parameters: $1 domain_name, $2 namespace_name, $3 asset_name.
-    pub const LOOKUP_ID_BY_NAME: &str = r#"
-        SELECT a.id
-        FROM assets a
-        JOIN namespaces ns ON a.namespace_id = ns.id
-        JOIN domains d ON ns.domain_id = d.id
-        WHERE d.name = $1 AND ns.name = $2 AND a.name = $3
-          AND a.deleted_at IS NULL
-    "#;
-
-    /// Check whether an active asset exists by (domain, namespace, name).
-    /// Parameters: $1 domain_name, $2 namespace_name, $3 asset_name.
-    pub const EXISTS: &str = r#"
-        SELECT EXISTS(
-            SELECT 1 FROM assets a
-            JOIN namespaces ns ON a.namespace_id = ns.id
-            JOIN domains d ON ns.domain_id = d.id
-            WHERE d.name = $1 AND ns.name = $2 AND a.name = $3
-              AND a.deleted_at IS NULL
-        )
+    pub const DELETE_BY_ID: &str = r#"
+        DELETE FROM namespaces WHERE id = $1
     "#;
 }
 
-/// Queries against `asset_versions` and `tabular_asset_versions` (V3 §3.3.6-7).
-pub mod version {
-    /// Insert a generic version row. Parameters: $1 asset_id, $2 version_key,
-    /// $3 version_order, $4 previous_version_id, $5 comment, $6 properties.
-    pub const CREATE: &str = r#"
-        INSERT INTO asset_versions (asset_id, version_key, version_order, previous_version_id, comment, properties)
+pub mod registry {
+    pub const CREATE_ASSET_TYPE: &str = r#"
+        INSERT INTO asset_types
+            (name, description, category, validation_schema, extension_strategy,
+             supports_native_protocol)
         VALUES ($1, $2, $3, $4, $5, $6)
-        RETURNING id, asset_id, version_key, version_order, previous_version_id, comment, properties, created_at
+        RETURNING name, description, category, validation_schema, extension_strategy,
+                  supports_native_protocol
     "#;
 
-    /// Insert the tabular extension for a version. Parameters: $1 version_id,
-    /// $2 metadata_location.
+    pub const GET_ASSET_TYPE: &str = r#"
+        SELECT name, description, category, validation_schema, extension_strategy,
+               supports_native_protocol
+        FROM asset_types
+        WHERE name = $1
+    "#;
+
+    pub const LIST_ASSET_TYPES: &str = r#"
+        SELECT name, description, category, validation_schema, extension_strategy,
+               supports_native_protocol
+        FROM asset_types
+        WHERE ($1::text IS NULL OR category = $1)
+        ORDER BY name
+        OFFSET $2 LIMIT $3
+    "#;
+
+    pub const CREATE_FORMAT: &str = r#"
+        INSERT INTO formats (name, description, mime_type, serialization_hint)
+        VALUES ($1, $2, $3, $4)
+        RETURNING name, description, mime_type, serialization_hint
+    "#;
+
+    pub const GET_FORMAT: &str = r#"
+        SELECT name, description, mime_type, serialization_hint
+        FROM formats
+        WHERE name = $1
+    "#;
+
+    pub const LIST_FORMATS: &str = r#"
+        SELECT name, description, mime_type, serialization_hint
+        FROM formats
+        ORDER BY name
+        OFFSET $1 LIMIT $2
+    "#;
+}
+
+pub mod asset {
+    pub const CREATE: &str = r#"
+        INSERT INTO assets (namespace_id, name, asset_type, format, comment, properties)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING id, namespace_id, name, asset_type, format, comment, properties,
+                  current_version_key, deleted_at, created_at, updated_at
+    "#;
+
+    pub const GET_BY_ID: &str = r#"
+        SELECT id, namespace_id, name, asset_type, format, comment, properties,
+               current_version_key, deleted_at, created_at, updated_at
+        FROM assets
+        WHERE id = $1
+    "#;
+
+    pub const GET_BY_NAME: &str = r#"
+        SELECT a.id, a.namespace_id, a.name, a.asset_type, a.format, a.comment, a.properties,
+               a.current_version_key, a.deleted_at, a.created_at, a.updated_at
+        FROM assets a
+        JOIN namespaces n ON n.id = a.namespace_id
+        JOIN domains d ON d.id = n.domain_id
+        WHERE d.name = $1 AND n.path = $2 AND a.name = $3 AND a.deleted_at IS NULL
+    "#;
+
+    /// Filtered listing. $5 include_deleted, $6 tags (NULL = no tag
+    /// filter; every listed tag must be present), $7 properties
+    /// exact-match object (`@>` containment).
+    pub const LIST: &str = r#"
+        SELECT a.id, a.namespace_id, a.name, a.asset_type, a.format, a.comment, a.properties,
+               a.current_version_key, a.deleted_at, a.created_at, a.updated_at
+        FROM assets a
+        JOIN namespaces n ON n.id = a.namespace_id
+        JOIN domains d ON d.id = n.domain_id
+        WHERE ($1::text IS NULL OR d.name = $1)
+          AND ($2::text IS NULL OR n.path = $2)
+          AND ($3::text IS NULL OR a.asset_type = $3)
+          AND ($4::text IS NULL OR a.format = $4)
+          AND ($5::bool OR a.deleted_at IS NULL)
+          AND ($6::text[] IS NULL OR (
+                  SELECT COUNT(DISTINCT t.tag) FROM asset_tags t
+                  WHERE t.asset_id = a.id AND t.tag = ANY($6)
+              ) = (SELECT COUNT(DISTINCT u) FROM unnest($6) AS u))
+          AND (COALESCE(a.properties, '{}'::jsonb) @> $7::jsonb)
+        ORDER BY a.created_at, a.id
+        OFFSET $8 LIMIT $9
+    "#;
+
+    pub const UPDATE: &str = r#"
+        UPDATE assets SET
+            comment    = CASE $2::int WHEN 1 THEN $3 WHEN 2 THEN NULL ELSE comment END,
+            properties = CASE $4::int WHEN 1 THEN $5 WHEN 2 THEN NULL ELSE properties END,
+            updated_at = now()
+        WHERE id = $1 AND deleted_at IS NULL
+        RETURNING id, namespace_id, name, asset_type, format, comment, properties,
+                  current_version_key, deleted_at, created_at, updated_at
+    "#;
+
+    pub const RENAME: &str = r#"
+        UPDATE assets SET name = $2, namespace_id = $3, updated_at = now()
+        WHERE id = $1 AND deleted_at IS NULL
+        RETURNING id, namespace_id, name, asset_type, format, comment, properties,
+                  current_version_key, deleted_at, created_at, updated_at
+    "#;
+
+    /// Resolve the destination namespace of a cross-namespace rename: the
+    /// path is looked up in the Domain that owns the asset, so a move can
+    /// never cross the Domain boundary.
+    pub const RESOLVE_RENAME_TARGET_NAMESPACE: &str = r#"
+        SELECT n.id
+        FROM namespaces n
+        JOIN namespaces src ON src.domain_id = n.domain_id
+        JOIN assets a ON a.namespace_id = src.id
+        WHERE a.id = $1 AND n.path = $2
+    "#;
+
+    pub const SOFT_DELETE: &str = r#"
+        UPDATE assets SET deleted_at = now(), updated_at = now()
+        WHERE id = $1 AND deleted_at IS NULL
+    "#;
+
+    /// Lock the asset row for restore validation.
+    pub const LOCK_BY_ID: &str = r#"
+        SELECT id, namespace_id, name, asset_type, format, comment, properties,
+               current_version_key, deleted_at, created_at, updated_at
+        FROM assets
+        WHERE id = $1
+        FOR UPDATE
+    "#;
+
+    pub const EXISTS_ACTIVE_NAME: &str = r#"
+        SELECT EXISTS(
+            SELECT 1 FROM assets
+            WHERE namespace_id = $1 AND name = $2 AND deleted_at IS NULL
+        )
+    "#;
+
+    pub const RESTORE: &str = r#"
+        UPDATE assets SET deleted_at = NULL, updated_at = now()
+        WHERE id = $1
+        RETURNING id, namespace_id, name, asset_type, format, comment, properties,
+                  current_version_key, deleted_at, created_at, updated_at
+    "#;
+
+    /// Delete the current "leaf" versions of an asset: versions no other
+    /// version of the same asset references as predecessor. The
+    /// self-referencing `previous_version_id ... ON DELETE RESTRICT`
+    /// rejects deleting a referenced version even when the referencing
+    /// row is deleted by the same statement, so hard deletes run this in a
+    /// loop (tip-to-root, one round per chain depth level) before the
+    /// assets row itself is removed.
+    pub const DELETE_VERSION_LEAVES: &str = r#"
+        DELETE FROM asset_versions v
+        WHERE v.asset_id = $1
+          AND NOT EXISTS (
+              SELECT 1 FROM asset_versions c
+              WHERE c.asset_id = $1 AND c.previous_version_id = v.id
+          )
+    "#;
+
+    pub const HARD_DELETE: &str = r#"
+        DELETE FROM assets WHERE id = $1
+    "#;
+
+    pub const SET_CURRENT_VERSION_KEY: &str = r#"
+        UPDATE assets SET current_version_key = $2, updated_at = now()
+        WHERE id = $1 AND deleted_at IS NULL
+    "#;
+
+    /// Insert the `tabular_assets` extension row for a table asset.
     pub const CREATE_TABULAR: &str = r#"
-        INSERT INTO tabular_asset_versions (version_id, metadata_location)
-        VALUES ($1, $2)
-        RETURNING version_id, metadata_location, created_at AS tabular_created_at
+        INSERT INTO tabular_assets (asset_id, location, metadata_location, schema_snapshot)
+        VALUES ($1, $2, $3, $4)
+        RETURNING asset_id, location, metadata_location, schema_snapshot
     "#;
 
-    /// Get the highest version_order for an asset. Returns NULL if the asset
-    /// has only versions without `version_order`. Parameter: $1 asset_id.
-    pub const GET_LATEST: &str = r#"
-        SELECT id, asset_id, version_key, version_order, previous_version_id, comment, properties, created_at
-        FROM asset_versions
-        WHERE asset_id = $1 AND version_order IS NOT NULL
-        ORDER BY version_order DESC
-        LIMIT 1
+    /// Read the `tabular_assets` extension row by asset id.
+    pub const GET_TABULAR: &str = r#"
+        SELECT asset_id, location, metadata_location, schema_snapshot
+        FROM tabular_assets
+        WHERE asset_id = $1
+    "#;
+}
+
+pub mod version {
+    pub const CREATE: &str = r#"
+        INSERT INTO asset_versions
+            (asset_id, version_key, version_properties, content_inline, content_pointer,
+             previous_version_id)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING id, asset_id, version_key, version_properties, content_inline,
+                  content_pointer, previous_version_id, created_at
     "#;
 
-    /// Get the highest version_order joined with its tabular extension.
-    /// Parameter: $1 asset_id.
-    pub const GET_LATEST_TABULAR: &str = r#"
-        SELECT av.id, av.asset_id, av.version_key, av.version_order, av.previous_version_id,
-               av.comment, av.properties, av.created_at,
-               tav.version_id, tav.metadata_location, tav.created_at AS tabular_created_at
-        FROM asset_versions av
-        JOIN tabular_asset_versions tav ON av.id = tav.version_id
-        WHERE av.asset_id = $1 AND av.version_order IS NOT NULL
-        ORDER BY av.version_order DESC
-        LIMIT 1
-    "#;
-
-    /// Look up a version by its native key. Parameters: $1 asset_id, $2 version_key.
     pub const GET_BY_KEY: &str = r#"
-        SELECT id, asset_id, version_key, version_order, previous_version_id, comment, properties, created_at
+        SELECT id, asset_id, version_key, version_properties, content_inline,
+               content_pointer, previous_version_id, created_at
         FROM asset_versions
         WHERE asset_id = $1 AND version_key = $2
     "#;
 
-    /// List all versions of an asset in ascending order (NULL orders last).
-    /// Parameter: $1 asset_id.
-    pub const LIST_BY_ASSET: &str = r#"
-        SELECT id, asset_id, version_key, version_order, previous_version_id, comment, properties, created_at
+    pub const LIST: &str = r#"
+        SELECT id, asset_id, version_key, version_properties, content_inline,
+               content_pointer, previous_version_id, created_at
         FROM asset_versions
         WHERE asset_id = $1
-        ORDER BY version_order ASC NULLS LAST
+        ORDER BY created_at DESC, id DESC
+        OFFSET $2 LIMIT $3
     "#;
 
-    /// Look up a tabular version by (asset_id, version_key) joined with its
-    /// tabular extension. Parameters: $1 asset_id, $2 version_key.
-    pub const GET_TABULAR_BY_KEY: &str = r#"
-        SELECT av.id, av.asset_id, av.version_key, av.version_order, av.previous_version_id,
-               av.comment, av.properties, av.created_at,
-               tav.version_id, tav.metadata_location,
-               tav.created_at AS tabular_created_at
-        FROM asset_versions av
-        JOIN tabular_asset_versions tav ON av.id = tav.version_id
-        WHERE av.asset_id = $1 AND av.version_key = $2
+    pub const GET_LATEST: &str = r#"
+        SELECT v.id, v.asset_id, v.version_key, v.version_properties, v.content_inline,
+               v.content_pointer, v.previous_version_id, v.created_at
+        FROM asset_versions v
+        JOIN assets a ON a.id = v.asset_id AND a.current_version_key = v.version_key
+        WHERE a.id = $1 AND a.deleted_at IS NULL
     "#;
 
-    /// List all tabular versions of an asset in ascending order (NULL orders last).
-    /// Parameter: $1 asset_id.
-    pub const LIST_TABULAR_BY_ASSET: &str = r#"
-        SELECT av.id, av.asset_id, av.version_key, av.version_order, av.previous_version_id,
-               av.comment, av.properties, av.created_at,
-               tav.version_id, tav.metadata_location,
-               tav.created_at AS tabular_created_at
-        FROM asset_versions av
-        JOIN tabular_asset_versions tav ON av.id = tav.version_id
-        WHERE av.asset_id = $1
-        ORDER BY av.version_order ASC NULLS LAST
-    "#;
-}
-
-/// Queries against `iceberg_staged_tables` (V4.0 C2).
-pub mod iceberg_staged {
-    /// Insert a staged table record. Parameters: $1 domain_name, $2 namespace_name,
-    /// $3 table_name, $4 table_uuid, $5 location, $6 metadata_location,
-    /// $7 metadata_json, $8 properties, $9 expires_at.
-    pub const CREATE: &str = r#"
-        INSERT INTO iceberg_staged_tables
-            (domain_name, namespace_name, table_name, table_uuid, location,
-             metadata_location, metadata_json, properties, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        RETURNING id
-    "#;
-
-    /// Look up a non-expired staged table. Parameters: $1 domain_name,
-    /// $2 namespace_name, $3 table_name.
-    pub const GET: &str = r#"
-        SELECT metadata_json
-        FROM iceberg_staged_tables
-        WHERE domain_name = $1 AND namespace_name = $2 AND table_name = $3
-          AND expires_at > NOW()
-    "#;
-
-    /// Delete a staged table record. Parameters: $1 domain_name,
-    /// $2 namespace_name, $3 table_name.
-    pub const DELETE: &str = r#"
-        DELETE FROM iceberg_staged_tables
-        WHERE domain_name = $1 AND namespace_name = $2 AND table_name = $3
-    "#;
-
-    /// Delete expired staged records for a given (domain, namespace, name).
-    /// Parameters: $1 domain_name, $2 namespace_name, $3 table_name.
-    pub const DELETE_EXPIRED: &str = r#"
-        DELETE FROM iceberg_staged_tables
-        WHERE domain_name = $1 AND namespace_name = $2 AND table_name = $3
-          AND expires_at <= NOW()
-    "#;
-
-    /// Commit staged table: delete staged record and return metadata needed
-    /// for catalog insertion. Parameters: $1 domain_name, $2 namespace_name,
-    /// $3 table_name.
-    pub const DELETE_FOR_COMMIT: &str = r#"
-        DELETE FROM iceberg_staged_tables
-        WHERE domain_name = $1 AND namespace_name = $2 AND table_name = $3
-          AND expires_at > NOW()
-        RETURNING table_uuid, location, metadata_location, metadata_json, properties
-    "#;
-}
-
-/// Queries against `iceberg_scan_metrics_reports` (V4.0 C2).
-pub mod iceberg_metrics {
-    /// Insert a scan metrics report. Parameters: $1 asset_id, $2 domain_name,
-    /// $3 namespace_name, $4 table_name, $5 report, $6 user_agent.
-    pub const CREATE: &str = r#"
-        INSERT INTO iceberg_scan_metrics_reports
-            (asset_id, domain_name, namespace_name, table_name, report, user_agent)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        RETURNING id
-    "#;
-}
-
-/// Queries against `view_assets` (V4.2).
-pub mod view {
-    /// Insert a view_assets extension row. Used after the `assets` row is already
-    /// inserted via `queries::asset::CREATE` within the same transaction.
-    /// Parameters: $1 asset_id, $2 view_uuid, $3 location, $4 current_version_id,
-    /// $5 metadata_location, $6 properties (JSONB).
-    pub const CREATE_VIEW_EXTENSION: &str = r#"
-        INSERT INTO view_assets (asset_id, view_uuid, location, current_version_id, metadata_location, properties)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        RETURNING asset_id, view_uuid, location, current_version_id, metadata_location,
-                  properties AS view_properties, created_at AS view_created_at, updated_at AS view_updated_at
-    "#;
-
-    /// Look up a view by (domain_name, namespace_name, view_name).
-    /// Parameters: $1 domain_name, $2 namespace_name, $3 view_name.
-    pub const GET_BY_NAME: &str = r#"
-        SELECT a.id, a.namespace_id, a.name, a.asset_type, a.comment, a.properties,
-               a.deleted_at, a.created_by, a.updated_by, a.created_at, a.updated_at,
-               va.asset_id, va.view_uuid, va.location, va.current_version_id,
-               va.metadata_location, va.properties AS view_properties,
-               va.created_at AS view_created_at, va.updated_at AS view_updated_at
-        FROM assets a
-        JOIN view_assets va ON a.id = va.asset_id
-        JOIN namespaces ns ON a.namespace_id = ns.id
-        JOIN domains d ON ns.domain_id = d.id
-        WHERE d.name = $1 AND ns.name = $2 AND a.name = $3
-          AND a.deleted_at IS NULL AND a.asset_type = 'view'
-    "#;
-
-    /// List views in a namespace.
-    /// Parameters: $1 domain_name, $2 namespace_name, $3 limit, $4 offset.
-    pub const LIST_BY_NAMESPACE: &str = r#"
-        SELECT a.name
-        FROM assets a
-        JOIN namespaces ns ON a.namespace_id = ns.id
-        JOIN domains d ON ns.domain_id = d.id
-        WHERE d.name = $1 AND ns.name = $2
-          AND a.deleted_at IS NULL AND a.asset_type = 'view'
-        ORDER BY a.name
-        LIMIT $3 OFFSET $4
-    "#;
-
-    /// Delete a view (assets row; view_assets cascades via FK).
-    /// Parameters: $1 domain_name, $2 namespace_name, $3 view_name.
-    pub const DELETE: &str = r#"
-        DELETE FROM assets a
-        USING namespaces ns, domains d
-        WHERE ns.id = a.namespace_id
-          AND d.id = ns.domain_id
-          AND d.name = $1 AND ns.name = $2 AND a.name = $3
-          AND a.deleted_at IS NULL AND a.asset_type = 'view'
-    "#;
-
-    /// Rename a view within the same namespace.
-    /// Parameters: $1 domain_name, $2 namespace_name, $3 current_name, $4 new_name.
-    pub const RENAME: &str = r#"
-        UPDATE assets a
-        SET name = $4,
-            updated_at = NOW()
-        FROM namespaces ns, domains d
-        WHERE ns.id = a.namespace_id
-          AND d.id = ns.domain_id
-          AND d.name = $1 AND ns.name = $2 AND a.name = $3
-          AND a.deleted_at IS NULL AND a.asset_type = 'view'
-    "#;
-
-    /// Rename a view and move it to a different namespace within the same domain.
-    /// Parameters: $1 domain_name, $2 src_namespace_name, $3 current_name,
-    /// $4 new_name, $5 new_namespace_id.
-    pub const RENAME_WITH_NAMESPACE: &str = r#"
-        UPDATE assets a
-        SET name = $4,
-            namespace_id = $5,
-            updated_at = NOW()
-        FROM namespaces ns, domains d
-        WHERE ns.id = a.namespace_id
-          AND d.id = ns.domain_id
-          AND d.name = $1 AND ns.name = $2 AND a.name = $3
-          AND a.deleted_at IS NULL AND a.asset_type = 'view'
-    "#;
-
-    /// Check whether a view exists.
-    /// Parameters: $1 domain_name, $2 namespace_name, $3 view_name.
-    pub const EXISTS: &str = r#"
+    pub const PREV_BELONGS_TO_ASSET: &str = r#"
         SELECT EXISTS(
-            SELECT 1
-            FROM assets a
-            JOIN namespaces ns ON a.namespace_id = ns.id
-            JOIN domains d ON ns.domain_id = d.id
-            WHERE d.name = $1 AND ns.name = $2 AND a.name = $3
-              AND a.deleted_at IS NULL AND a.asset_type = 'view'
+            SELECT 1 FROM asset_versions WHERE id = $1 AND asset_id = $2
         )
     "#;
 
-    /// CAS update of a view's metadata_location.
-    /// Parameters: $1 new_location, $2 domain_name, $3 namespace_name,
-    /// $4 view_name, $5 expected_location.
-    pub const CAS_UPDATE_METADATA_LOCATION: &str = r#"
-        UPDATE view_assets va
-        SET metadata_location = $1,
-            updated_at = NOW()
-        FROM assets a
-        JOIN namespaces ns ON a.namespace_id = ns.id
-        JOIN domains d ON ns.domain_id = d.id
-        WHERE va.asset_id = a.id
-          AND d.name = $2 AND ns.name = $3 AND a.name = $4
-          AND a.deleted_at IS NULL AND a.asset_type = 'view'
-          AND va.metadata_location IS NOT DISTINCT FROM $5
-        RETURNING va.asset_id
+    pub const ASSET_ACTIVE_EXISTS: &str = r#"
+        SELECT EXISTS(SELECT 1 FROM assets WHERE id = $1 AND deleted_at IS NULL)
     "#;
 }
 
-/// Queries against `iceberg_purge_operations` (V4.0 C2).
-pub mod iceberg_purge {
-    /// Insert a purge operation record. Parameters: $1 domain_name,
-    /// $2 namespace_name, $3 table_name, $4 table_location, $5 metadata_location,
-    /// $6 status.
-    pub const CREATE: &str = r#"
-        INSERT INTO iceberg_purge_operations
-            (domain_name, namespace_name, table_name, table_location,
-             metadata_location, status)
-        VALUES ($1, $2, $3, $4, $5, $6)
+pub mod cas {
+    /// S1: lock the asset row and read the current version key.
+    pub const LOCK_ASSET: &str = r#"
+        SELECT id, current_version_key
+        FROM assets
+        WHERE id = $1 AND deleted_at IS NULL
+        FOR UPDATE
+    "#;
+
+    /// S2: read the current pointer from the tabular hot-path cache (the
+    /// assets row lock is already held, so no extra lock is needed).
+    pub const READ_TABULAR_POINTER: &str = r#"
+        SELECT metadata_location FROM tabular_assets WHERE asset_id = $1
+    "#;
+
+    /// S4: insert the mirrored version, auto-linking the previous version
+    /// via the current version key captured in S1 (NULL key -> root).
+    pub const INSERT_MIRRORED_VERSION: &str = r#"
+        INSERT INTO asset_versions
+            (asset_id, version_key, version_properties, content_inline, content_pointer,
+             previous_version_id)
+        VALUES (
+            $1, $2, $3, $4, $5,
+            (SELECT id FROM asset_versions WHERE asset_id = $1 AND version_key = $6)
+        )
+        RETURNING id, asset_id, version_key, version_properties, content_inline,
+                  content_pointer, previous_version_id, created_at
+    "#;
+
+    /// S5: update the current version key (result of the CAS, not an anchor).
+    pub const UPDATE_CURRENT_VERSION_KEY: &str = r#"
+        UPDATE assets SET current_version_key = $2, updated_at = now() WHERE id = $1
+    "#;
+
+    /// S6: update the tabular hot-path cache. schema_snapshot is left
+    /// untouched: `CreateVersion` carries no schema, so there is nothing
+    /// to cache here.
+    pub const UPDATE_TABULAR_POINTER: &str = r#"
+        UPDATE tabular_assets SET metadata_location = $2 WHERE asset_id = $1
+    "#;
+}
+
+pub mod tag {
+    pub const ADD: &str = r#"
+        INSERT INTO asset_tags (asset_id, tag) VALUES ($1, $2)
+    "#;
+
+    pub const REMOVE: &str = r#"
+        DELETE FROM asset_tags WHERE asset_id = $1 AND tag = $2
+    "#;
+
+    pub const LIST: &str = r#"
+        SELECT tag FROM asset_tags WHERE asset_id = $1 ORDER BY tag
+    "#;
+
+    pub const LIST_ASSETS_BY_TAG: &str = r#"
+        SELECT a.id, a.namespace_id, a.name, a.asset_type, a.format, a.comment, a.properties,
+               a.current_version_key, a.deleted_at, a.created_at, a.updated_at
+        FROM assets a
+        JOIN asset_tags t ON t.asset_id = a.id
+        JOIN namespaces n ON n.id = a.namespace_id
+        JOIN domains d ON d.id = n.domain_id
+        WHERE d.name = $1 AND t.tag = $2 AND a.deleted_at IS NULL
+        ORDER BY a.created_at, a.id
+        OFFSET $3 LIMIT $4
+    "#;
+}
+
+pub mod unified {
+    /// Cross-namespace discovery query (UnifiedQueryStore). Domain is
+    /// mandatory; $2 is the namespace path prefix filter.
+    pub const QUERY_ASSETS: &str = r#"
+        SELECT a.id, a.namespace_id, a.name, a.asset_type, a.format, a.comment, a.properties,
+               a.current_version_key, a.deleted_at, a.created_at, a.updated_at
+        FROM assets a
+        JOIN namespaces n ON n.id = a.namespace_id
+        JOIN domains d ON d.id = n.domain_id
+        WHERE d.name = $1
+          AND ($2::text IS NULL OR n.path = $2 OR starts_with(n.path, $2 || '/'))
+          AND ($3::text IS NULL OR a.asset_type = $3)
+          AND ($4::text IS NULL OR a.format = $4)
+          AND ($5::bool OR a.deleted_at IS NULL)
+          AND ($6::text[] IS NULL OR (
+                  SELECT COUNT(DISTINCT t.tag) FROM asset_tags t
+                  WHERE t.asset_id = a.id AND t.tag = ANY($6)
+              ) = (SELECT COUNT(DISTINCT u) FROM unnest($6) AS u))
+          AND (COALESCE(a.properties, '{}'::jsonb) @> $7::jsonb)
+        ORDER BY a.created_at, a.id
+        OFFSET $8 LIMIT $9
+    "#;
+}
+
+pub mod iceberg {
+    /// Active asset (any type) with the same name blocks stage-create.
+    pub const ACTIVE_ASSET_EXISTS: &str = r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM assets a
+            JOIN namespaces n ON n.id = a.namespace_id
+            JOIN domains d ON d.id = n.domain_id
+            WHERE d.name = $1 AND n.path = $2 AND a.name = $3 AND a.deleted_at IS NULL
+        )
+    "#;
+
+    // ── Staged tables (24h TTL) ─────────────────────────────────────────
+
+    pub const DELETE_EXPIRED_STAGED: &str = r#"
+        DELETE FROM iceberg_staged_tables
+        WHERE domain_name = $1 AND namespace_path = $2 AND table_name = $3
+          AND expires_at <= now()
+    "#;
+
+    pub const CREATE_STAGED: &str = r#"
+        INSERT INTO iceberg_staged_tables
+            (domain_name, namespace_path, table_name, table_uuid, location,
+             metadata_location, metadata_json, properties, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now() + interval '24 hours')
+    "#;
+
+    pub const GET_STAGED: &str = r#"
+        SELECT metadata_json
+        FROM iceberg_staged_tables
+        WHERE domain_name = $1 AND namespace_path = $2 AND table_name = $3
+          AND expires_at > now()
+    "#;
+
+    pub const DELETE_STAGED: &str = r#"
+        DELETE FROM iceberg_staged_tables
+        WHERE domain_name = $1 AND namespace_path = $2 AND table_name = $3
+    "#;
+
+    /// Atomic "take" of a non-expired staged record during commit.
+    pub const DELETE_STAGED_FOR_COMMIT: &str = r#"
+        DELETE FROM iceberg_staged_tables
+        WHERE domain_name = $1 AND namespace_path = $2 AND table_name = $3
+          AND expires_at > now()
         RETURNING id
     "#;
 
-    /// Update purge operation status. Parameters: $1 status, $2 error_message,
-    /// $3 completed_at, $4 id.
-    pub const UPDATE_STATUS: &str = r#"
+    // ── Tabular / view extension rows ───────────────────────────────────
+
+    pub use super::asset::CREATE_TABULAR;
+
+    pub const CREATE_VIEW_ASSET: &str = r#"
+        INSERT INTO view_assets (asset_id, view_uuid, location, metadata_location)
+        VALUES ($1, $2, $3, $4)
+        RETURNING asset_id, view_uuid, location, metadata_location
+    "#;
+
+    // ── View queries ────────────────────────────────────────────────────
+
+    pub const GET_VIEW: &str = r#"
+        SELECT a.id, a.namespace_id, a.name, a.asset_type, a.format, a.comment, a.properties,
+               a.current_version_key, a.deleted_at, a.created_at, a.updated_at,
+               va.asset_id AS view_asset_id, va.view_uuid, va.location AS view_location,
+               va.metadata_location AS view_metadata_location
+        FROM assets a
+        JOIN view_assets va ON va.asset_id = a.id
+        JOIN namespaces n ON n.id = a.namespace_id
+        JOIN domains d ON d.id = n.domain_id
+        WHERE d.name = $1 AND n.path = $2 AND a.name = $3
+          AND a.asset_type = 'view' AND a.deleted_at IS NULL
+    "#;
+
+    pub const GET_VIEW_ID: &str = r#"
+        SELECT a.id
+        FROM assets a
+        JOIN namespaces n ON n.id = a.namespace_id
+        JOIN domains d ON d.id = n.domain_id
+        WHERE d.name = $1 AND n.path = $2 AND a.name = $3
+          AND a.asset_type = 'view' AND a.deleted_at IS NULL
+    "#;
+
+    pub const READ_VIEW_POINTER: &str = r#"
+        SELECT metadata_location FROM view_assets WHERE asset_id = $1
+    "#;
+
+    pub const UPDATE_VIEW_POINTER: &str = r#"
+        UPDATE view_assets SET metadata_location = $2 WHERE asset_id = $1
+    "#;
+
+    pub const LIST_VIEWS: &str = r#"
+        SELECT n.path, a.name
+        FROM assets a
+        JOIN namespaces n ON n.id = a.namespace_id
+        JOIN domains d ON d.id = n.domain_id
+        WHERE d.name = $1 AND n.path = $2
+          AND a.asset_type = 'view' AND a.deleted_at IS NULL
+        ORDER BY a.name
+        OFFSET $3 LIMIT $4
+    "#;
+
+    pub const MOVE_VIEW: &str = r#"
+        UPDATE assets SET name = $2, namespace_id = $3, updated_at = now()
+        WHERE id = $1 AND deleted_at IS NULL
+    "#;
+
+    pub const VIEW_EXISTS: &str = r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM assets a
+            JOIN namespaces n ON n.id = a.namespace_id
+            JOIN domains d ON d.id = n.domain_id
+            WHERE d.name = $1 AND n.path = $2 AND a.name = $3
+              AND a.asset_type = 'view' AND a.deleted_at IS NULL
+        )
+    "#;
+
+    // ── Multi-table transaction ─────────────────────────────────────────
+
+    /// Resolve a table's asset id by name (active tables only).
+    pub const RESOLVE_TABLE_ID: &str = r#"
+        SELECT a.id
+        FROM assets a
+        JOIN namespaces n ON n.id = a.namespace_id
+        JOIN domains d ON d.id = n.domain_id
+        WHERE d.name = $1 AND n.path = $2 AND a.name = $3
+          AND a.asset_type = 'table' AND a.deleted_at IS NULL
+    "#;
+
+    /// Pointer update inside a multi-table transaction. schema_snapshot is
+    /// only overwritten when the commit carries one.
+    pub const TX_UPDATE_TABULAR: &str = r#"
+        UPDATE tabular_assets
+        SET metadata_location = $2,
+            schema_snapshot = COALESCE($3, schema_snapshot)
+        WHERE asset_id = $1
+    "#;
+
+    // ── Metrics ─────────────────────────────────────────────────────────
+
+    pub const CREATE_METRICS_REPORT: &str = r#"
+        INSERT INTO iceberg_scan_metrics_reports
+            (asset_id, domain_name, namespace_path, table_name, report, user_agent)
+        VALUES ($1, $2, $3, $4, $5, $6)
+    "#;
+
+    // ── Purge ───────────────────────────────────────────────────────────
+
+    /// Read and lock the table row plus its tabular extension for purge.
+    pub const LOCK_TABLE_FOR_PURGE: &str = r#"
+        SELECT a.id, t.location, t.metadata_location
+        FROM assets a
+        JOIN tabular_assets t ON t.asset_id = a.id
+        JOIN namespaces n ON n.id = a.namespace_id
+        JOIN domains d ON d.id = n.domain_id
+        WHERE d.name = $1 AND n.path = $2 AND a.name = $3
+          AND a.asset_type = 'table' AND a.deleted_at IS NULL
+        FOR UPDATE OF a
+    "#;
+
+    pub const CREATE_PURGE_OPERATION: &str = r#"
+        INSERT INTO iceberg_purge_operations
+            (domain_name, namespace_path, table_name, table_location, metadata_location, status)
+        VALUES ($1, $2, $3, $4, $5, 'catalog_dropped')
+        RETURNING id
+    "#;
+
+    pub const UPDATE_PURGE_OPERATION: &str = r#"
         UPDATE iceberg_purge_operations
-        SET status = $1, error_message = $2, completed_at = $3
-        WHERE id = $4
+        SET status = $2,
+            error_message = $3,
+            completed_at = CASE WHEN $2 IN ('completed', 'failed') THEN now() ELSE completed_at END
+        WHERE id = $1
     "#;
-
-    /// Read table location and metadata_location for purge, joining through
-    /// catalog tables. Parameters: $1 domain_name, $2 namespace_name, $3 table_name.
-    pub const GET_TABLE_LOCATION: &str = r#"
-        SELECT ta.location, ta.metadata_location
-        FROM tabular_assets ta
-        JOIN assets a ON ta.asset_id = a.id
-        JOIN namespaces ns ON a.namespace_id = ns.id
-        JOIN domains d ON ns.domain_id = d.id
-        WHERE d.name = $1 AND ns.name = $2 AND a.name = $3
-          AND a.deleted_at IS NULL AND a.asset_type = 'table' AND ta.format = 'iceberg'
-    "#;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Every SQL constant must be non-empty and reference at least one
-    /// positional parameter; otherwise it is suspicious enough to fail the
-    /// build during refactors.
-    fn assert_constant(name: &str, sql: &str) {
-        assert!(!sql.trim().is_empty(), "{} must not be empty", name);
-        assert!(
-            sql.contains("$1"),
-            "{} should reference at least placeholder $1",
-            name
-        );
-    }
-
-    #[test]
-    fn domain_constants_are_well_formed() {
-        assert_constant("domain::CREATE", domain::CREATE);
-        assert_constant("domain::LIST", domain::LIST);
-        assert_constant("domain::GET_BY_NAME", domain::GET_BY_NAME);
-        assert_constant("domain::EXISTS", domain::EXISTS);
-        assert_constant("domain::DELETE", domain::DELETE);
-        assert_constant("domain::UPDATE", domain::UPDATE);
-    }
-
-    #[test]
-    fn namespace_constants_are_well_formed() {
-        assert_constant("namespace::CREATE", namespace::CREATE);
-        assert_constant("namespace::LIST_BY_DOMAIN", namespace::LIST_BY_DOMAIN);
-        assert_constant("namespace::GET_BY_NAME", namespace::GET_BY_NAME);
-        assert_constant("namespace::EXISTS", namespace::EXISTS);
-        assert_constant("namespace::DELETE", namespace::DELETE);
-        assert_constant("namespace::UPDATE", namespace::UPDATE);
-    }
-
-    #[test]
-    fn asset_constants_are_well_formed() {
-        assert_constant("asset::CREATE", asset::CREATE);
-        assert_constant("asset::GET_BY_NAME", asset::GET_BY_NAME);
-        assert_constant("asset::GET_TABULAR_BY_NAME", asset::GET_TABULAR_BY_NAME);
-        assert_constant(
-            "asset::LIST_TABULAR_BY_NAMESPACE",
-            asset::LIST_TABULAR_BY_NAMESPACE,
-        );
-        assert_constant("asset::CREATE_TABULAR", asset::CREATE_TABULAR);
-        assert_constant("asset::UPDATE_PROPERTIES", asset::UPDATE_PROPERTIES);
-        assert_constant("asset::RENAME", asset::RENAME);
-        assert_constant("asset::RENAME_WITH_NAMESPACE", asset::RENAME_WITH_NAMESPACE);
-        assert_constant("asset::DELETE", asset::DELETE);
-        assert_constant("asset::EXISTS_TABULAR", asset::EXISTS_TABULAR);
-        assert_constant(
-            "asset::CAS_UPDATE_METADATA_LOCATION",
-            asset::CAS_UPDATE_METADATA_LOCATION,
-        );
-        assert_constant(
-            "asset::UPDATE_PROPERTIES_BY_ID",
-            asset::UPDATE_PROPERTIES_BY_ID,
-        );
-        assert_constant("asset::LIST_UNIFIED", asset::LIST_UNIFIED);
-        assert_constant("asset::GET_UNIFIED", asset::GET_UNIFIED);
-        assert_constant("asset::LOOKUP_ID_BY_NAME", asset::LOOKUP_ID_BY_NAME);
-        assert_constant("asset::EXISTS", asset::EXISTS);
-    }
-
-    #[test]
-    fn version_constants_are_well_formed() {
-        assert_constant("version::CREATE", version::CREATE);
-        assert_constant("version::CREATE_TABULAR", version::CREATE_TABULAR);
-        assert_constant("version::GET_LATEST", version::GET_LATEST);
-        assert_constant("version::GET_LATEST_TABULAR", version::GET_LATEST_TABULAR);
-        assert_constant("version::GET_BY_KEY", version::GET_BY_KEY);
-        assert_constant("version::LIST_BY_ASSET", version::LIST_BY_ASSET);
-        assert_constant("version::GET_TABULAR_BY_KEY", version::GET_TABULAR_BY_KEY);
-        assert_constant(
-            "version::LIST_TABULAR_BY_ASSET",
-            version::LIST_TABULAR_BY_ASSET,
-        );
-    }
-
-    #[test]
-    fn asset_get_uses_active_filter() {
-        assert!(
-            asset::GET_BY_NAME.contains("deleted_at IS NULL"),
-            "asset GET_BY_NAME must restrict to active assets"
-        );
-        assert!(
-            asset::GET_TABULAR_BY_NAME.contains("deleted_at IS NULL"),
-            "asset GET_TABULAR_BY_NAME must restrict to active assets"
-        );
-    }
-
-    #[test]
-    fn version_latest_excludes_nulls() {
-        assert!(
-            version::GET_LATEST.contains("version_order IS NOT NULL"),
-            "latest version query must ignore rows without a numeric order"
-        );
-        assert!(
-            version::GET_LATEST_TABULAR.contains("version_order IS NOT NULL"),
-            "latest tabular version query must ignore rows without a numeric order"
-        );
-    }
-
-    #[test]
-    fn cas_update_uses_optimistic_predicate() {
-        assert!(
-            asset::CAS_UPDATE_METADATA_LOCATION.contains("IS NOT DISTINCT FROM"),
-            "CAS update must check the prior metadata_location with IS NOT DISTINCT FROM"
-        );
-        assert!(
-            asset::CAS_UPDATE_METADATA_LOCATION.contains("RETURNING"),
-            "CAS update must RETURN affected rows for the caller to detect Conflict"
-        );
-    }
-
-    #[test]
-    fn unified_queries_use_left_join() {
-        assert!(
-            asset::LIST_UNIFIED.contains("LEFT JOIN tabular_assets"),
-            "LIST_UNIFIED must LEFT JOIN tabular_assets so non-table assets surface as None"
-        );
-        assert!(
-            asset::GET_UNIFIED.contains("LEFT JOIN tabular_assets"),
-            "GET_UNIFIED must LEFT JOIN tabular_assets so non-table assets surface as None"
-        );
-    }
-
-    #[test]
-    fn view_constants_are_well_formed() {
-        assert_constant("view::CREATE_VIEW_EXTENSION", view::CREATE_VIEW_EXTENSION);
-        assert_constant("view::GET_BY_NAME", view::GET_BY_NAME);
-        assert_constant("view::LIST_BY_NAMESPACE", view::LIST_BY_NAMESPACE);
-        assert_constant("view::DELETE", view::DELETE);
-        assert_constant("view::RENAME", view::RENAME);
-        assert_constant("view::RENAME_WITH_NAMESPACE", view::RENAME_WITH_NAMESPACE);
-        assert_constant("view::EXISTS", view::EXISTS);
-        assert_constant(
-            "view::CAS_UPDATE_METADATA_LOCATION",
-            view::CAS_UPDATE_METADATA_LOCATION,
-        );
-    }
-
-    #[test]
-    fn view_queries_filter_by_view_type() {
-        assert!(
-            view::GET_BY_NAME.contains("asset_type = 'view'"),
-            "view GET_BY_NAME must filter by asset_type='view'"
-        );
-        assert!(
-            view::LIST_BY_NAMESPACE.contains("asset_type = 'view'"),
-            "view LIST_BY_NAMESPACE must filter by asset_type='view'"
-        );
-    }
-
-    #[test]
-    fn view_cas_uses_optimistic_predicate() {
-        assert!(
-            view::CAS_UPDATE_METADATA_LOCATION.contains("IS NOT DISTINCT FROM"),
-            "view CAS update must check prior metadata_location with IS NOT DISTINCT FROM"
-        );
-        assert!(
-            view::CAS_UPDATE_METADATA_LOCATION.contains("RETURNING"),
-            "view CAS update must RETURN affected rows for caller to detect Conflict"
-        );
-    }
-
-    #[test]
-    fn iceberg_staged_constants_are_well_formed() {
-        assert_constant("iceberg_staged::CREATE", iceberg_staged::CREATE);
-        assert_constant("iceberg_staged::GET", iceberg_staged::GET);
-        assert_constant("iceberg_staged::DELETE", iceberg_staged::DELETE);
-        assert_constant(
-            "iceberg_staged::DELETE_EXPIRED",
-            iceberg_staged::DELETE_EXPIRED,
-        );
-        assert_constant(
-            "iceberg_staged::DELETE_FOR_COMMIT",
-            iceberg_staged::DELETE_FOR_COMMIT,
-        );
-    }
-
-    #[test]
-    fn iceberg_metrics_constants_are_well_formed() {
-        assert_constant("iceberg_metrics::CREATE", iceberg_metrics::CREATE);
-    }
-
-    #[test]
-    fn iceberg_purge_constants_are_well_formed() {
-        assert_constant("iceberg_purge::CREATE", iceberg_purge::CREATE);
-        assert_constant("iceberg_purge::UPDATE_STATUS", iceberg_purge::UPDATE_STATUS);
-        assert_constant(
-            "iceberg_purge::GET_TABLE_LOCATION",
-            iceberg_purge::GET_TABLE_LOCATION,
-        );
-    }
 }

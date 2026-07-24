@@ -3,15 +3,16 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use quasar_core::{CatalogStore, StoreError};
+use quasar_core::{
+    validate_name, validate_namespace_path, Asset, CatalogError, CatalogStore, CreateAsset,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::error::{store_error_to_lance_table, LanceError, ProblemDetails};
-use super::id::parse_table_id;
-use super::LanceConfig;
-use quasar_core::validate_name;
+use super::error::{catalog_error_to_lance_table, LanceError, ProblemDetails};
+use super::id::{parse_table_id, LanceTableId};
+use super::{request_id_of, string_map_to_properties, LanceConfig};
 
 // ── Request DTOs ───────────────────────────────────────────
 
@@ -58,21 +59,65 @@ pub struct TableExistsResponse {
     pub exists: bool,
 }
 
+// ── Helpers ────────────────────────────────────────────────
+
+/// Resolve a Lance table by protocol id. Endpoint-level protocol
+/// isolation (DESIGN §5.2): a same-named asset without the `lance` format
+/// (e.g. an Iceberg table) is invisible through Lance endpoints and must
+/// surface as TableNotFound.
+pub(crate) async fn lance_table_by_name(
+    store: &Arc<dyn CatalogStore>,
+    parsed: &LanceTableId,
+    instance: &str,
+) -> Result<Asset, LanceError> {
+    let asset = store
+        .get_asset_by_name(&parsed.domain, &parsed.namespace, &parsed.table)
+        .await
+        .map_err(|e| catalog_error_to_lance_table(e, instance))?;
+    if asset.format.as_deref() != Some("lance") {
+        return Err(LanceError::TableNotFound {
+            name: parsed.table.clone(),
+            instance: instance.to_string(),
+        });
+    }
+    Ok(asset)
+}
+
+/// Parse a Lance native version key back into its numeric form; version
+/// keys written by this adapter are always numeric, so a parse failure is
+/// an internal inconsistency.
+pub(crate) fn parse_version_key(
+    version_key: &str,
+    asset: &Asset,
+    instance: &str,
+) -> Result<i64, LanceError> {
+    version_key.parse::<i64>().map_err(|_| {
+        tracing::error!(asset_id = %asset.id, %version_key,
+            "lance version key is not numeric");
+        LanceError::InternalError {
+            detail: "An internal error occurred".to_string(),
+            instance: instance.to_string(),
+        }
+    })
+}
+
 // ── Handlers ───────────────────────────────────────────────
 
 /// POST /lance/v1/table/{id}/declare
 pub async fn declare_table(
     State(store): State<Arc<dyn CatalogStore>>,
+    request_id: Option<Extension<String>>,
     Extension(config): Extension<LanceConfig>,
     Path(id): Path<String>,
     Json(req): Json<DeclareTableRequest>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
+    let request_id = request_id_of(request_id);
     let instance = format!("/lance/v1/table/{}/declare", id);
-    let parsed = parse_table_id(&id, &instance).map_err(LanceError::to_problem_details)?;
-    validate_name(&parsed.namespace)
-        .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+    let parsed = parse_table_id(&id, &instance).map_err(|e| e.to_problem_details(&request_id))?;
+    validate_namespace_path(&parsed.namespace)
+        .map_err(|e| catalog_error_to_lance_table(e, &instance).to_problem_details(&request_id))?;
     validate_name(&parsed.table)
-        .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+        .map_err(|e| catalog_error_to_lance_table(e, &instance).to_problem_details(&request_id))?;
 
     let location = if let Some(ref wp) = config.warehouse_path {
         format!(
@@ -91,24 +136,26 @@ pub async fn declare_table(
         properties.insert(format!("storage_{}", key), value.clone());
     }
 
-    let (asset, _tabular) = store
-        .create_tabular_asset(
-            &parsed.domain,
-            &parsed.namespace,
-            &parsed.table,
-            "lance",
-            &location,
-            None,
-            None,
-            properties,
-        )
+    let input = CreateAsset {
+        domain: parsed.domain,
+        namespace: parsed.namespace,
+        name: parsed.table,
+        asset_type: "table".to_string(),
+        format: Some("lance".to_string()),
+        comment: None,
+        properties: string_map_to_properties(properties),
+    };
+    // A declared table has no committed manifest yet: metadata_location
+    // stays None until the first mirrored version.
+    let created = store
+        .create_tabular_asset(input, &location, None)
         .await
-        .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+        .map_err(|e| catalog_error_to_lance_table(e, &instance).to_problem_details(&request_id))?;
 
     Ok((
         StatusCode::OK,
         Json(DeclareTableResponse {
-            name: asset.name,
+            name: created.asset.name,
             location,
             storage_options: config.storage_options.clone(),
         }),
@@ -118,28 +165,54 @@ pub async fn declare_table(
 /// POST /lance/v1/table/{id}/describe
 pub async fn describe_table(
     State(store): State<Arc<dyn CatalogStore>>,
+    request_id: Option<Extension<String>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
+    let request_id = request_id_of(request_id);
     let instance = format!("/lance/v1/table/{}/describe", id);
-    let parsed = parse_table_id(&id, &instance).map_err(LanceError::to_problem_details)?;
+    let parsed = parse_table_id(&id, &instance).map_err(|e| e.to_problem_details(&request_id))?;
 
-    // Use single query to get asset and current version
-    let (asset, tabular, current_version) = store
-        .get_tabular_asset_with_current_version(
-            &parsed.domain,
-            &parsed.namespace,
-            "lance",
-            &parsed.table,
-        )
+    let asset = lance_table_by_name(&store, &parsed, &instance)
         .await
-        .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+        .map_err(|e| e.to_problem_details(&request_id))?;
+
+    // The location lives on the tabular extension row; a Lance table
+    // without one is an internal inconsistency (the asset itself exists).
+    let tabular = store
+        .get_tabular_asset(asset.id)
+        .await
+        .map_err(|e| match e {
+            CatalogError::NotFound(_) => {
+                tracing::error!(asset_id = %asset.id,
+                    "lance table asset missing tabular extension row");
+                LanceError::InternalError {
+                    detail: "An internal error occurred".to_string(),
+                    instance: instance.clone(),
+                }
+            }
+            other => catalog_error_to_lance_table(other, &instance),
+        })
+        .map_err(|e| e.to_problem_details(&request_id))?;
+
+    // The current version is tracked via assets.current_version_key; a
+    // table without any mirrored version has no current version.
+    let current_version = match store.get_latest_version(asset.id).await {
+        Ok(version) => Some(
+            parse_version_key(&version.version_key, &asset, &instance)
+                .map_err(|e| e.to_problem_details(&request_id))?,
+        ),
+        Err(CatalogError::NotFound(_)) => None,
+        Err(e) => {
+            return Err(catalog_error_to_lance_table(e, &instance).to_problem_details(&request_id));
+        }
+    };
 
     Ok((
         StatusCode::OK,
         Json(DescribeTableResponse {
             name: asset.name,
             location: tabular.location,
-            current_version: current_version.and_then(|(v, _)| v.version_order),
+            current_version,
             created_at: asset.created_at.to_rfc3339(),
         }),
     ))
@@ -148,36 +221,38 @@ pub async fn describe_table(
 /// POST /lance/v1/table/{id}/register
 pub async fn register_table(
     State(store): State<Arc<dyn CatalogStore>>,
+    request_id: Option<Extension<String>>,
     Path(id): Path<String>,
     Json(req): Json<RegisterTableRequest>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
+    let request_id = request_id_of(request_id);
     let instance = format!("/lance/v1/table/{}/register", id);
-    let parsed = parse_table_id(&id, &instance).map_err(LanceError::to_problem_details)?;
-    validate_name(&parsed.namespace)
-        .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+    let parsed = parse_table_id(&id, &instance).map_err(|e| e.to_problem_details(&request_id))?;
+    validate_namespace_path(&parsed.namespace)
+        .map_err(|e| catalog_error_to_lance_table(e, &instance).to_problem_details(&request_id))?;
     validate_name(&parsed.table)
-        .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+        .map_err(|e| catalog_error_to_lance_table(e, &instance).to_problem_details(&request_id))?;
 
-    let properties = req.options;
-
-    let (asset, _tabular) = store
-        .create_tabular_asset(
-            &parsed.domain,
-            &parsed.namespace,
-            &parsed.table,
-            "lance",
-            &req.location,
-            None,
-            None,
-            properties,
-        )
+    let input = CreateAsset {
+        domain: parsed.domain,
+        namespace: parsed.namespace,
+        name: parsed.table,
+        asset_type: "table".to_string(),
+        format: Some("lance".to_string()),
+        comment: None,
+        properties: string_map_to_properties(req.options),
+    };
+    // A registered table already exists externally; its location also
+    // serves as the initial metadata_location pointer.
+    let created = store
+        .create_tabular_asset(input, &req.location, Some(&req.location))
         .await
-        .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+        .map_err(|e| catalog_error_to_lance_table(e, &instance).to_problem_details(&request_id))?;
 
     Ok((
         StatusCode::OK,
         Json(DeclareTableResponse {
-            name: asset.name,
+            name: created.asset.name,
             location: req.location,
             storage_options: HashMap::new(),
         }),
@@ -187,25 +262,21 @@ pub async fn register_table(
 /// POST /lance/v1/table/{id}/deregister
 pub async fn deregister_table(
     State(store): State<Arc<dyn CatalogStore>>,
+    request_id: Option<Extension<String>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
+    let request_id = request_id_of(request_id);
     let instance = format!("/lance/v1/table/{}/deregister", id);
-    let parsed = parse_table_id(&id, &instance).map_err(LanceError::to_problem_details)?;
+    let parsed = parse_table_id(&id, &instance).map_err(|e| e.to_problem_details(&request_id))?;
 
-    // V3 endpoint-level isolation: only Lance-format assets can be
-    // deregistered through this endpoint. Iceberg assets with the same
-    // name are not visible here and must return 404 — V3 active-name
-    // uniqueness already prevents same-name coexistence, so the gate
-    // exists for the "wrong-endpoint" case.
-    store
-        .get_tabular_asset(&parsed.domain, &parsed.namespace, "lance", &parsed.table)
+    let asset = lance_table_by_name(&store, &parsed, &instance)
         .await
-        .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+        .map_err(|e| e.to_problem_details(&request_id))?;
 
     store
-        .drop_asset(&parsed.domain, &parsed.namespace, &parsed.table)
+        .soft_delete_asset(asset.id)
         .await
-        .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+        .map_err(|e| catalog_error_to_lance_table(e, &instance).to_problem_details(&request_id))?;
 
     Ok(StatusCode::OK)
 }
@@ -213,21 +284,21 @@ pub async fn deregister_table(
 /// POST /lance/v1/table/{id}/drop
 pub async fn drop_table(
     State(store): State<Arc<dyn CatalogStore>>,
+    request_id: Option<Extension<String>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
+    let request_id = request_id_of(request_id);
     let instance = format!("/lance/v1/table/{}/drop", id);
-    let parsed = parse_table_id(&id, &instance).map_err(LanceError::to_problem_details)?;
+    let parsed = parse_table_id(&id, &instance).map_err(|e| e.to_problem_details(&request_id))?;
 
-    // V3 endpoint-level isolation: see deregister_table for the rationale.
-    store
-        .get_tabular_asset(&parsed.domain, &parsed.namespace, "lance", &parsed.table)
+    let asset = lance_table_by_name(&store, &parsed, &instance)
         .await
-        .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+        .map_err(|e| e.to_problem_details(&request_id))?;
 
     store
-        .drop_asset(&parsed.domain, &parsed.namespace, &parsed.table)
+        .soft_delete_asset(asset.id)
         .await
-        .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+        .map_err(|e| catalog_error_to_lance_table(e, &instance).to_problem_details(&request_id))?;
 
     Ok(StatusCode::OK)
 }
@@ -235,21 +306,24 @@ pub async fn drop_table(
 /// POST /lance/v1/table/{id}/exists
 pub async fn table_exists(
     State(store): State<Arc<dyn CatalogStore>>,
+    request_id: Option<Extension<String>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
+    let request_id = request_id_of(request_id);
     let instance = format!("/lance/v1/table/{}/exists", id);
-    let parsed = parse_table_id(&id, &instance).map_err(LanceError::to_problem_details)?;
+    let parsed = parse_table_id(&id, &instance).map_err(|e| e.to_problem_details(&request_id))?;
 
-    // V3 stores the format on `tabular_assets.format`; an Iceberg-format
-    // asset under the same name still satisfies `asset_exists`, so we
-    // ask the format-filtered lookup instead.
+    // Endpoint-level protocol isolation: a same-named asset with another
+    // format does not count as an existing Lance table.
     let exists = match store
-        .get_tabular_asset(&parsed.domain, &parsed.namespace, "lance", &parsed.table)
+        .get_asset_by_name(&parsed.domain, &parsed.namespace, &parsed.table)
         .await
     {
-        Ok(_) => true,
-        Err(StoreError::NotFound(_)) => false,
-        Err(e) => return Err(store_error_to_lance_table(e, &instance).to_problem_details()),
+        Ok(asset) => asset.format.as_deref() == Some("lance"),
+        Err(CatalogError::NotFound(_)) => false,
+        Err(e) => {
+            return Err(catalog_error_to_lance_table(e, &instance).to_problem_details(&request_id));
+        }
     };
 
     Ok((StatusCode::OK, Json(TableExistsResponse { exists })))
@@ -258,62 +332,65 @@ pub async fn table_exists(
 /// POST /lance/v1/table/{id}/rename
 pub async fn rename_table(
     State(store): State<Arc<dyn CatalogStore>>,
+    request_id: Option<Extension<String>>,
     Path(id): Path<String>,
     Json(req): Json<RenameTableRequest>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
+    let request_id = request_id_of(request_id);
     let instance = format!("/lance/v1/table/{}/rename", id);
-    let parsed = parse_table_id(&id, &instance).map_err(LanceError::to_problem_details)?;
-    validate_name(&parsed.namespace)
-        .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+    let parsed = parse_table_id(&id, &instance).map_err(|e| e.to_problem_details(&request_id))?;
+    validate_namespace_path(&parsed.namespace)
+        .map_err(|e| catalog_error_to_lance_table(e, &instance).to_problem_details(&request_id))?;
     validate_name(&parsed.table)
-        .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+        .map_err(|e| catalog_error_to_lance_table(e, &instance).to_problem_details(&request_id))?;
     validate_name(&req.new_table_name)
-        .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+        .map_err(|e| catalog_error_to_lance_table(e, &instance).to_problem_details(&request_id))?;
 
-    let new_namespace = if let Some(ref segments) = req.new_namespace_id {
-        if segments.len() != 2 {
+    // Rename is id-addressed in the baseline contract and cannot move a
+    // table across namespaces; a new_namespace_id is accepted only when it
+    // names the current namespace.
+    if let Some(ref segments) = req.new_namespace_id {
+        if segments.len() < 2 {
             return Err(LanceError::InvalidInput {
                 detail: format!(
-                    "new_namespace_id must be 2 segments (domain$namespace), got {}",
+                    "new_namespace_id must start with the domain followed by the \
+                     namespace path segments, got {} segment(s)",
                     segments.len()
                 ),
-                instance,
+                instance: instance.clone(),
             }
-            .to_problem_details());
+            .to_problem_details(&request_id));
         }
         if segments[0] != parsed.domain {
             return Err(LanceError::InvalidInput {
                 detail: "cross-domain rename not supported".to_string(),
-                instance,
+                instance: instance.clone(),
             }
-            .to_problem_details());
+            .to_problem_details(&request_id));
         }
-        validate_name(&segments[1])
-            .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
-        Some(segments[1].as_str())
-    } else {
-        None
-    };
+        let new_namespace = segments[1..].join("/");
+        validate_namespace_path(&new_namespace).map_err(|e| {
+            catalog_error_to_lance_table(e, &instance).to_problem_details(&request_id)
+        })?;
+        if new_namespace != parsed.namespace {
+            return Err(LanceError::InvalidInput {
+                detail: "cross-namespace rename not supported".to_string(),
+                instance: instance.clone(),
+            }
+            .to_problem_details(&request_id));
+        }
+    }
 
-    // V3 endpoint-level isolation: only Lance-format assets are visible
-    // through the Lance rename endpoint. An Iceberg asset with the same
-    // source name must surface as 404 (TableNotFound) rather than be
-    // renamed by the wrong protocol.
-    store
-        .get_tabular_asset(&parsed.domain, &parsed.namespace, "lance", &parsed.table)
+    // Endpoint-level protocol isolation: only Lance-format assets are
+    // visible through the Lance rename endpoint.
+    let asset = lance_table_by_name(&store, &parsed, &instance)
         .await
-        .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+        .map_err(|e| e.to_problem_details(&request_id))?;
 
     store
-        .rename_asset(
-            &parsed.domain,
-            &parsed.namespace,
-            &parsed.table,
-            &req.new_table_name,
-            new_namespace,
-        )
+        .rename_asset(asset.id, &req.new_table_name, None)
         .await
-        .map_err(|e| store_error_to_lance_table(e, &instance).to_problem_details())?;
+        .map_err(|e| catalog_error_to_lance_table(e, &instance).to_problem_details(&request_id))?;
 
     Ok(StatusCode::OK)
 }

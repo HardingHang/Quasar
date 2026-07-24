@@ -32,7 +32,7 @@ object_store = { workspace = true }
 
 [dev-dependencies]
 quasar-storage = { workspace = true }
-postgresql_embedded = { version = "0.20", default-features = false, features = ["tokio", "zonky"] }
+postgresql_embedded = { version = "0.20", default-features = false, features = ["tokio", "zonky", "rustls"] }
 tower = { workspace = true, features = ["util"] }
 serde_json = { workspace = true }
 deadpool-postgres = { workspace = true }

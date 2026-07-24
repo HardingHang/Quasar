@@ -138,18 +138,19 @@ pub fn apply_commit_for_staged(
     serde_json::to_value(&result.metadata).map_err(|e| format!("serialize: {e}"))
 }
 
-/// Wire name of an Iceberg official `TableUpdate` action that V4.0 explicitly
-/// does not implement. Returned by [`check_supported_updates`] so the handler
-/// can map it to a 501 `NotImplementedException`.
+/// Wire name of an Iceberg official `TableUpdate` action that the adapter
+/// explicitly does not implement. Returned by [`check_supported_updates`]
+/// so the handler can map it to a 501 `NotImplementedException`.
 #[derive(Debug)]
 pub struct UnsupportedUpdate(pub &'static str);
 
-/// Reject the 7 official `TableUpdate` variants V4.0 does not support.
+/// Reject the official `TableUpdate` variants the adapter does not support.
 ///
 /// The iceberg crate's `TableUpdate::apply()` will silently accept these (it
 /// dispatches to the corresponding builder method), so we must gate them
-/// explicitly at the adapter layer before any IO. See V4_DESIGN.md §6.2.
-/// Reject encryption key actions that are postponed to a future security release.
+/// explicitly at the adapter layer before any IO. Currently only the
+/// encryption key actions are rejected (postponed to a future security
+/// release).
 pub fn check_supported_updates(updates: &[iceberg::TableUpdate]) -> Result<(), UnsupportedUpdate> {
     for u in updates {
         let name = match u {
@@ -184,6 +185,26 @@ pub fn next_metadata_location(current: &str) -> Result<String, String> {
         }
     }
     Err(format!("unrecognized metadata location format: {current}"))
+}
+
+/// Extract the mirrored version key from a metadata file location using
+/// the same rule as the storage layer: `00002-<uuid>.metadata.json` →
+/// `00002`. Falls back to the full file stem when the name has no numeric
+/// prefix.
+pub fn version_key_from_location(location: &str) -> String {
+    let file = location.rsplit('/').next().unwrap_or(location);
+    let stem = file.strip_suffix(".metadata.json").unwrap_or(file);
+    let numeric: String = stem
+        .strip_prefix('v')
+        .unwrap_or(stem)
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if numeric.is_empty() {
+        stem.to_string()
+    } else {
+        numeric
+    }
 }
 
 #[cfg(test)]
@@ -361,6 +382,27 @@ mod tests {
     fn test_next_metadata_location_unrecognized() {
         let result = next_metadata_location("s3://bucket/unusual/location.json");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_version_key_from_location() {
+        assert_eq!(
+            version_key_from_location("s3://bucket/t/metadata/00002-abc.metadata.json"),
+            "00002"
+        );
+        assert_eq!(
+            version_key_from_location("s3://bucket/t/metadata/00001.metadata.json"),
+            "00001"
+        );
+        assert_eq!(
+            version_key_from_location("s3://bucket/t/metadata/v3-abc.metadata.json"),
+            "3"
+        );
+        // No numeric prefix: fall back to the file stem.
+        assert_eq!(
+            version_key_from_location("s3://bucket/t/metadata/snap.metadata.json"),
+            "snap"
+        );
     }
 
     #[test]

@@ -194,12 +194,6 @@ pub struct ListViewsResponse {
     pub next_page_token: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct ViewIdentifier {
-    pub namespace: Vec<String>,
-    pub name: String,
-}
-
 #[derive(Deserialize)]
 pub struct RenameViewRequest {
     pub source: ViewIdentifierInput,
@@ -210,74 +204,6 @@ pub struct RenameViewRequest {
 pub struct ViewIdentifierInput {
     pub namespace: Vec<String>,
     pub name: String,
-}
-
-// ── Scan Planning DTOs ─────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct SubmitPlanRequest {
-    #[serde(rename = "snapshot-id", skip_serializing_if = "Option::is_none")]
-    pub snapshot_id: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub filter: Option<serde_json::Value>,
-    #[serde(rename = "case-sensitive", default)]
-    pub case_sensitive: Option<bool>,
-    #[serde(rename = "split-size", skip_serializing_if = "Option::is_none")]
-    pub split_size: Option<i64>,
-    #[serde(rename = "num-splits", skip_serializing_if = "Option::is_none")]
-    pub num_splits: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub columns: Option<Vec<String>>,
-}
-
-#[derive(Serialize)]
-pub struct SubmitPlanResponse {
-    #[serde(rename = "plan-id")]
-    pub plan_id: String,
-    #[serde(rename = "plan-task")]
-    pub plan_task: String,
-}
-
-#[derive(Serialize)]
-pub struct FetchPlanResponse {
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none", rename = "plan-task")]
-    pub plan_task: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub struct FetchTasksRequest {
-    #[serde(rename = "plan-task")]
-    pub plan_task: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct DataFile {
-    #[serde(rename = "file-path")]
-    pub file_path: String,
-    #[serde(rename = "file-format")]
-    pub file_format: String,
-    pub partition: serde_json::Value,
-    #[serde(rename = "record-count")]
-    pub record_count: i64,
-    #[serde(rename = "file-size-in-bytes")]
-    pub file_size_in_bytes: i64,
-    #[serde(rename = "column-masks", skip_serializing_if = "Option::is_none")]
-    pub column_masks: Option<serde_json::Value>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct FileScanTask {
-    #[serde(rename = "data-file")]
-    pub data_file: DataFile,
-    #[serde(
-        rename = "delete-files",
-        skip_serializing_if = "Vec::is_empty",
-        default
-    )]
-    pub delete_files: Vec<DataFile>,
-    pub start: i64,
-    pub length: i64,
 }
 
 // ── Transaction DTOs ───────────────────────────────────────

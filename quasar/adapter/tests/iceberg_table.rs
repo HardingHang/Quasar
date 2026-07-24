@@ -1,1026 +1,196 @@
+//! Iceberg REST Catalog — table CRUD + rename integration tests.
+
 #![cfg(feature = "iceberg")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use deadpool_postgres::{Pool, Runtime};
-use http_body_util::BodyExt;
-use postgresql_embedded::PostgreSQL;
-use quasar_adapter::iceberg;
-use quasar_core::CatalogStore;
-use quasar_core::{NamespaceStore, TabularStore};
-use quasar_storage::PgCatalogStore;
-use serde_json::Value;
+mod common;
+
+use axum::http::StatusCode;
+use common::*;
+use serde_json::json;
 use serial_test::serial;
-use std::collections::HashMap;
-use std::sync::Arc;
 use tokio::sync::OnceCell;
-use tower::ServiceExt;
 
-static PG_INSTANCE: OnceCell<PgInstance> = OnceCell::const_new();
+static PG: OnceCell<(postgresql_embedded::PostgreSQL, String)> = OnceCell::const_new();
 
-struct PgInstance {
-    #[allow(dead_code)]
-    postgresql: PostgreSQL,
-    url: String,
-}
-
-impl PgInstance {
-    async fn get() -> &'static Self {
-        PG_INSTANCE
-            .get_or_init(|| async {
-                let mut postgresql = PostgreSQL::default();
-                postgresql.setup().await.expect("PostgreSQL setup failed");
-                postgresql.start().await.expect("PostgreSQL start failed");
-                postgresql
-                    .create_database("quasar_test")
-                    .await
-                    .expect("create database failed");
-                let url = postgresql.settings().url("quasar_test");
-                PgInstance { postgresql, url }
-            })
-            .await
-    }
-}
-
-fn test_pool(url: &str) -> Pool {
-    let config = url
-        .parse::<tokio_postgres::Config>()
-        .expect("invalid database URL");
-    let mgr = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
-    Pool::builder(mgr)
-        .runtime(Runtime::Tokio1)
-        .build()
-        .expect("failed to create pool")
-}
-
-async fn setup() -> PgCatalogStore {
-    let instance = PgInstance::get().await;
-    let pool = test_pool(&instance.url);
-    let store = PgCatalogStore::new(pool.clone());
-    store.initialize().await.expect("initialize failed");
-
-    let client = pool.get().await.expect("failed to get client");
-    client
-        .execute("TRUNCATE iceberg_staged_tables, iceberg_scan_metrics_reports, iceberg_purge_operations, tabular_asset_versions, asset_versions, tabular_assets, assets, namespaces, asset_permissions CASCADE", &[])
+async fn db_url() -> &'static str {
+    &PG.get_or_init(|| async { PgBootstrap::start("quasar_test_iceberg_table").await })
         .await
-        .expect("failed to truncate tables");
-
-    store
-}
-
-fn test_app(store: PgCatalogStore) -> axum::Router {
-    use axum::Extension;
-    let store: Arc<dyn CatalogStore> = Arc::new(store);
-    let config = iceberg::IcebergConfig {
-        default_warehouse: "default".to_string(),
-        ..Default::default()
-    };
-    iceberg::routes().layer(Extension(config)).with_state(store)
-}
-
-async fn body_json(response: axum::response::Response) -> Value {
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    serde_json::from_slice(&body).unwrap()
-}
-
-async fn create_namespace(store: &PgCatalogStore, name: &str) {
-    store
-        .create_namespace("default", name, None, HashMap::new())
-        .await
-        .unwrap();
+        .1
 }
 
 #[tokio::test]
 #[serial]
-async fn test_create_and_load_table() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-    let app = test_app(store);
+async fn table_crud_lifecycle() {
+    let store = fresh_store(db_url().await).await;
+    let (app, _mem) = test_app(&store);
+    create_namespace(&app, &["ns1"]).await;
 
-    let create = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/namespaces/prod/tables")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"name": "users", "location": "s3://bucket/warehouse/prod/users"}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    // Create.
+    let created = create_table(&app, "ns1", "events").await;
+    assert!(created["metadata-location"].as_str().is_some());
 
-    assert_eq!(create.status(), StatusCode::OK);
-    let json = body_json(create).await;
-    assert!(json["metadata-location"]
-        .as_str()
-        .unwrap()
-        .contains("00001-"));
-    assert!(json["metadata-location"]
-        .as_str()
-        .unwrap()
-        .ends_with(".metadata.json"));
-    assert_eq!(json["metadata"]["format-version"], 2);
+    // Load.
+    let resp = get(&app, &format!("{NS_PREFIX}/namespaces/ns1/tables/events")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let loaded = body_json(resp).await;
     assert_eq!(
-        json["metadata"]["location"],
-        "s3://bucket/warehouse/prod/users"
+        loaded["metadata-location"], created["metadata-location"],
+        "load should return the same metadata pointer"
     );
+    assert!(loaded["metadata"]["format-version"].as_i64().is_some());
 
-    let load = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    // HEAD exists.
+    let resp = head(&app, &format!("{NS_PREFIX}/namespaces/ns1/tables/events")).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
-    assert_eq!(load.status(), StatusCode::OK);
-    let json = body_json(load).await;
-    assert!(json["metadata-location"].is_string());
-    assert_eq!(json["metadata"]["format-version"], 2);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_create_duplicate_returns_409() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-    store
-        .create_tabular_asset(
-            "default",
-            "prod",
-            "users",
-            "iceberg",
-            "s3://bucket/warehouse/prod/users",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    let app = test_app(store);
-
-    let second = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/namespaces/prod/tables")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"name": "users"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(second.status(), StatusCode::CONFLICT);
-    let json = body_json(second).await;
-    assert_eq!(json["error"]["type"], "TableAlreadyExistsException");
-    assert_eq!(json["error"]["code"], 409);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_list_tables() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-    store
-        .create_tabular_asset(
-            "default",
-            "prod",
-            "users",
-            "iceberg",
-            "s3://bucket/warehouse/prod/users",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    store
-        .create_tabular_asset(
-            "default",
-            "prod",
-            "orders",
-            "iceberg",
-            "s3://bucket/warehouse/prod/orders",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    let app = test_app(store);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/iceberg/v1/default/namespaces/prod/tables")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_json(response).await;
-    let identifiers = json["identifiers"].as_array().unwrap();
-    assert_eq!(identifiers.len(), 2);
-    let names: Vec<&str> = identifiers
+    // List contains the table identifier.
+    let resp = get(&app, &format!("{NS_PREFIX}/namespaces/ns1/tables")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    let names: Vec<&str> = body["identifiers"]
+        .as_array()
+        .unwrap()
         .iter()
         .map(|i| i["name"].as_str().unwrap())
         .collect();
-    assert!(names.contains(&"users"));
-    assert!(names.contains(&"orders"));
+    assert_eq!(names, vec!["events"]);
+
+    // Duplicate create conflicts.
+    let resp = post(
+        &app,
+        &format!("{NS_PREFIX}/namespaces/ns1/tables"),
+        &json!({"name": "events", "schema": {"type": "struct", "schema-id": 0, "fields": []}, "properties": {}}).to_string(),
+    )
+    .await;
+    assert_iceberg_error(resp, StatusCode::CONFLICT, "TableAlreadyExistsException").await;
+
+    // Drop, then load 404.
+    let resp = delete(&app, &format!("{NS_PREFIX}/namespaces/ns1/tables/events")).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = get(&app, &format!("{NS_PREFIX}/namespaces/ns1/tables/events")).await;
+    assert_iceberg_error(resp, StatusCode::NOT_FOUND, "NoSuchTableException").await;
 }
 
 #[tokio::test]
 #[serial]
-async fn test_load_table_not_found() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-    let app = test_app(store);
+async fn table_rename_same_and_cross_namespace() {
+    let store = fresh_store(db_url().await).await;
+    let (app, _mem) = test_app(&store);
+    create_namespace(&app, &["src"]).await;
+    create_namespace(&app, &["dst"]).await;
+    create_table(&app, "src", "events").await;
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/iceberg/v1/default/namespaces/prod/tables/missing")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    // Rename within the same namespace.
+    let resp = post(
+        &app,
+        &format!("{NS_PREFIX}/tables/rename"),
+        &json!({
+            "source": {"namespace": ["src"], "name": "events"},
+            "destination": {"namespace": ["src"], "name": "events_v2"}
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = get(
+        &app,
+        &format!("{NS_PREFIX}/namespaces/src/tables/events_v2"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let json = body_json(response).await;
-    assert_eq!(json["error"]["type"], "NoSuchTableException");
-    assert_eq!(json["error"]["code"], 404);
+    // Move across namespaces within the same domain.
+    let resp = post(
+        &app,
+        &format!("{NS_PREFIX}/tables/rename"),
+        &json!({
+            "source": {"namespace": ["src"], "name": "events_v2"},
+            "destination": {"namespace": ["dst"], "name": "events_v2"}
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = get(
+        &app,
+        &format!("{NS_PREFIX}/namespaces/dst/tables/events_v2"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = get(
+        &app,
+        &format!("{NS_PREFIX}/namespaces/src/tables/events_v2"),
+    )
+    .await;
+    assert_iceberg_error(resp, StatusCode::NOT_FOUND, "NoSuchTableException").await;
+
+    // Destination namespace missing -> 404.
+    let resp = post(
+        &app,
+        &format!("{NS_PREFIX}/tables/rename"),
+        &json!({
+            "source": {"namespace": ["dst"], "name": "events_v2"},
+            "destination": {"namespace": ["ghost"], "name": "events_v2"}
+        })
+        .to_string(),
+    )
+    .await;
+    assert_iceberg_error(resp, StatusCode::NOT_FOUND, "NoSuchNamespaceException").await;
 }
 
 #[tokio::test]
 #[serial]
-async fn test_drop_table() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-    store
-        .create_tabular_asset(
-            "default",
-            "prod",
-            "users",
-            "iceberg",
-            "s3://bucket/warehouse/prod/users",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    let app = test_app(store);
-
-    let drop = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(drop.status(), StatusCode::NO_CONTENT);
-
-    let load = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(load.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_table_exists() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-    store
-        .create_tabular_asset(
-            "default",
-            "prod",
-            "users",
-            "iceberg",
-            "s3://bucket/warehouse/prod/users",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    let app = test_app(store);
-
-    let exists = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("HEAD")
-                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(exists.status(), StatusCode::OK);
-
-    let not_exists = app
-        .oneshot(
-            Request::builder()
-                .method("HEAD")
-                .uri("/iceberg/v1/default/namespaces/prod/tables/missing")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(not_exists.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_rename_table() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-    store
-        .create_tabular_asset(
-            "default",
-            "prod",
-            "users",
-            "iceberg",
-            "s3://bucket/warehouse/prod/users",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    let app = test_app(store);
-
-    let rename = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/tables/rename")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"source": {"namespace": ["prod"], "name": "users"}, "destination": {"namespace": ["prod"], "name": "customers"}}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(rename.status(), StatusCode::OK);
-
-    let old = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("HEAD")
-                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(old.status(), StatusCode::NOT_FOUND);
-
-    let new = app
-        .oneshot(
-            Request::builder()
-                .method("HEAD")
-                .uri("/iceberg/v1/default/namespaces/prod/tables/customers")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(new.status(), StatusCode::OK);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_rename_cross_namespace() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-    create_namespace(&store, "staging").await;
-    store
-        .create_tabular_asset(
-            "default",
-            "prod",
-            "users",
-            "iceberg",
-            "s3://bucket/warehouse/prod/users",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    let app = test_app(store);
-
-    let rename = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/tables/rename")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"source": {"namespace": ["prod"], "name": "users"}, "destination": {"namespace": ["staging"], "name": "users"}}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(rename.status(), StatusCode::OK);
-
-    let old = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("HEAD")
-                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(old.status(), StatusCode::NOT_FOUND);
-
-    let new = app
-        .oneshot(
-            Request::builder()
-                .method("HEAD")
-                .uri("/iceberg/v1/default/namespaces/staging/tables/users")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(new.status(), StatusCode::OK);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_create_table_namespace_not_found() {
-    let app = test_app(setup().await);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/namespaces/prod/tables")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"name": "users"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let json = body_json(response).await;
-    assert_eq!(json["error"]["type"], "NoSuchTableException");
-}
-
-#[tokio::test]
-#[serial]
-async fn test_rename_table_source_not_found() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-    let app = test_app(store);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/tables/rename")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"source": {"namespace": ["prod"], "name": "users"}, "destination": {"namespace": ["prod"], "name": "customers"}}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let json = body_json(response).await;
-    assert_eq!(json["error"]["type"], "NoSuchTableException");
-    assert_eq!(json["error"]["code"], 404);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_rename_table_destination_already_exists() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-    store
-        .create_tabular_asset(
-            "default",
-            "prod",
-            "users",
-            "iceberg",
-            "s3://bucket/warehouse/prod/users",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    store
-        .create_tabular_asset(
-            "default",
-            "prod",
-            "customers",
-            "iceberg",
-            "s3://bucket/warehouse/prod/customers",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    let app = test_app(store);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/tables/rename")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"source": {"namespace": ["prod"], "name": "users"}, "destination": {"namespace": ["prod"], "name": "customers"}}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let json = body_json(response).await;
-    assert_eq!(json["error"]["type"], "TableAlreadyExistsException");
-    assert_eq!(json["error"]["code"], 409);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_drop_table_not_found() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-    let app = test_app(store);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/iceberg/v1/default/namespaces/prod/tables/nonexistent")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let json = body_json(response).await;
-    assert_eq!(json["error"]["type"], "NoSuchTableException");
-    assert_eq!(json["error"]["code"], 404);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_list_tables_empty_namespace() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-    let app = test_app(store);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/iceberg/v1/default/namespaces/prod/tables")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let status = response.status();
-    let json = body_json(response).await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "unexpected status, body: {:?}",
-        json
-    );
-    let identifiers = json["identifiers"].as_array().unwrap();
-    assert!(identifiers.is_empty());
-    assert!(json["nextPageToken"].is_null());
-}
-
-#[tokio::test]
-#[serial]
-async fn test_list_tables_pagination() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-    // Create 5 tables
-    for i in 1..=5 {
-        store
-            .create_tabular_asset(
-                "default",
-                "prod",
-                &format!("table{}", i),
-                "iceberg",
-                &format!("s3://bucket/warehouse/prod/table{}", i),
-                None,
-                None,
-                HashMap::new(),
-            )
-            .await
-            .unwrap();
-    }
-    let app = test_app(store);
-
-    // Page 1: pageSize=2
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/iceberg/v1/default/namespaces/prod/tables?pageSize=2")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_json(response).await;
-    let identifiers = json["identifiers"].as_array().unwrap();
-    assert_eq!(identifiers.len(), 2);
-    assert!(json["nextPageToken"].is_string());
-
-    // Page 2: use pageToken
-    let token = json["nextPageToken"].as_str().unwrap();
-    let page2 = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!(
-                    "/iceberg/v1/default/namespaces/prod/tables?pageSize=2&pageToken={}",
-                    token
-                ))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(page2.status(), StatusCode::OK);
-    let json2 = body_json(page2).await;
-    let identifiers2 = json2["identifiers"].as_array().unwrap();
-    assert_eq!(identifiers2.len(), 2);
-    assert!(json2["nextPageToken"].is_string());
-
-    // Page 3: last page
-    let token2 = json2["nextPageToken"].as_str().unwrap();
-    let page3 = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!(
-                    "/iceberg/v1/default/namespaces/prod/tables?pageSize=2&pageToken={}",
-                    token2
-                ))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(page3.status(), StatusCode::OK);
-    let json3 = body_json(page3).await;
-    let identifiers3 = json3["identifiers"].as_array().unwrap();
-    assert_eq!(identifiers3.len(), 1);
-    assert!(json3["nextPageToken"].is_null());
-}
-
-#[tokio::test]
-#[serial]
-async fn test_create_table_with_schema() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-    let app = test_app(store);
-
-    let create = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/namespaces/prod/tables")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{
-                        "name": "users",
-                        "location": "s3://bucket/warehouse/prod/users",
-                        "schema": {
-                            "type": "struct",
-                            "schema-id": 0,
-                            "fields": [
-                                {"id": 1, "name": "id", "type": "int", "required": true},
-                                {"id": 2, "name": "name", "type": "string", "required": false}
-                            ]
-                        }
-                    }"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let status = create.status();
-    let json = body_json(create).await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "unexpected status, body: {:?}",
-        json
-    );
-    assert_eq!(
-        json["metadata"]["schemas"][0]["fields"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
-    assert_eq!(json["metadata"]["last-column-id"], 2);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_report_metrics_success() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-    let (_asset, _tabular) = store
-        .create_tabular_asset(
-            "default",
-            "prod",
-            "users",
-            "iceberg",
-            "s3://bucket/warehouse/prod/users",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    let app = test_app(store);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/namespaces/prod/tables/users/metrics")
-                .header("Content-Type", "application/json")
-                .header("user-agent", "test-agent/1.0")
-                .body(Body::from(r#"{"scan-metrics": {"rows-scanned": 42}}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_report_metrics_table_not_found() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-    let app = test_app(store);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/namespaces/prod/tables/nonexistent/metrics")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"scan-metrics": {}}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let json = body_json(response).await;
-    assert_eq!(json["error"]["type"], "NoSuchTableException");
-    assert_eq!(json["error"]["code"], 404);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_drop_table_without_purge_succeeds() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-    store
-        .create_tabular_asset(
-            "default",
-            "prod",
-            "users",
-            "iceberg",
-            "s3://bucket/warehouse/prod/users",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    let app = test_app(store);
-
-    // purgeRequested=false (or absent) should succeed normally
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/iceberg/v1/default/namespaces/prod/tables/users?purgeRequested=false")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_staged_create_success() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-    let app = test_app(store);
-
-    let create = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/namespaces/prod/tables")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"name": "users", "stage-create": true, "location": "s3://bucket/warehouse/prod/users"}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(create.status(), StatusCode::OK);
-    let json = body_json(create).await;
-    assert!(json["metadata-location"]
-        .as_str()
-        .unwrap()
-        .contains("00001-"));
-    assert_eq!(json["metadata"]["format-version"], 2);
-
-    // Staged table should NOT appear in list
-    let list = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/iceberg/v1/default/namespaces/prod/tables")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(list.status(), StatusCode::OK);
-    let list_json = body_json(list).await;
-    assert!(list_json["identifiers"].as_array().unwrap().is_empty());
-
-    // Staged table should NOT be loadable
-    let load = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(load.status(), StatusCode::NOT_FOUND);
-    let load_json = body_json(load).await;
-    assert_eq!(load_json["error"]["type"], "NoSuchTableException");
-}
-
-#[tokio::test]
-#[serial]
-async fn test_staged_create_already_exists_active_table() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-    store
-        .create_tabular_asset(
-            "default",
-            "prod",
-            "users",
-            "iceberg",
-            "s3://bucket/warehouse/prod/users",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    let app = test_app(store);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/namespaces/prod/tables")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"name": "users", "stage-create": true, "location": "s3://bucket/warehouse/prod/users"}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let json = body_json(response).await;
-    assert_eq!(json["error"]["type"], "TableAlreadyExistsException");
-    assert_eq!(json["error"]["code"], 409);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_staged_create_duplicate_staged() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-    let app = test_app(store);
-
-    // First staged create
-    let first = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/namespaces/prod/tables")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"name": "users", "stage-create": true, "location": "s3://bucket/warehouse/prod/users"}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(first.status(), StatusCode::OK);
-
-    // Duplicate staged create should fail with 409
-    let second = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/namespaces/prod/tables")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"name": "users", "stage-create": true, "location": "s3://bucket/warehouse/prod/users"}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(second.status(), StatusCode::CONFLICT);
-    let json = body_json(second).await;
-    assert_eq!(json["error"]["type"], "TableAlreadyExistsException");
-    assert_eq!(json["error"]["code"], 409);
+async fn table_register_external() {
+    let store = fresh_store(db_url().await).await;
+    let (app, mem) = test_app(&store);
+    create_namespace(&app, &["ext"]).await;
+
+    // Seed an external metadata document in the object store.
+    let meta = json!({
+        "format-version": 2,
+        "table-uuid": uuid::Uuid::new_v4().to_string(),
+        "location": "s3://bucket/ext/registered",
+        "last-sequence-number": 0,
+        "last-updated-ms": 0,
+        "last-column-id": 1,
+        "schemas": [{"type": "struct", "schema-id": 0, "fields": [{"id": 1, "name": "id", "type": "long", "required": true}]}],
+        "current-schema-id": 0,
+        "partition-specs": [{"spec-id": 0, "fields": []}],
+        "default-spec-id": 0,
+        "last-partition-id": 0,
+        "properties": {},
+        "current-snapshot-id": -1,
+        "snapshots": [],
+        "snapshot-log": [],
+        "metadata-log": [],
+        "sort-orders": [{"order-id": 0, "fields": []}],
+        "default-sort-order-id": 0,
+        "refs": {}
+    });
+    mem.put(
+        &object_store::path::Path::from("ext/registered/metadata/00001-abc.metadata.json"),
+        serde_json::to_vec(&meta).unwrap().into(),
+    )
+    .await
+    .unwrap();
+
+    let resp = post(
+        &app,
+        &format!("{NS_PREFIX}/namespaces/ext/register"),
+        &json!({
+            "name": "registered",
+            "metadata-location": "s3://bucket/ext/registered/metadata/00001-abc.metadata.json"
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = get(
+        &app,
+        &format!("{NS_PREFIX}/namespaces/ext/tables/registered"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
 }

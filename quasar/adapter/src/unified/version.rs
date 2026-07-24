@@ -1,149 +1,74 @@
-use crate::AssetFormat;
-use quasar_core::{AssetVersion, CatalogStore, TabularAssetVersion};
+//! Asset version read-only handlers
+//! (`/unified/v1/assets/{asset_id}/versions*`).
+//!
+//! Versions are mirrored into `asset_versions` by native protocol
+//! adapters on commit (FR-V2); the Unified API exposes list/get only —
+//! the baseline provides no version write endpoints (REQUIREMENTS §4.4).
 
-use super::dto::CurrentVersionResponse;
-use super::error::{map_asset_error, UnifiedError, UnifiedErrorCode};
+use axum::{
+    extract::{Extension, Path, Query, State},
+    response::IntoResponse,
+    Json,
+};
+use quasar_core::CatalogStore;
+use std::sync::Arc;
 
-use super::UnifiedConfig;
+use super::dto::{next_page_token, ListResponse, PaginationQuery, VersionResponse};
+use super::error::{map_catalog_error, UnifiedError, UnifiedErrorCode};
+use super::{asset, request_id_of};
 
-/// Get the current version for an asset, format-specific.
-#[allow(clippy::too_many_arguments)]
-pub async fn get_current_version(
-    store: &dyn CatalogStore,
-    config: &UnifiedConfig,
-    domain: &str,
-    namespace: &str,
-    name: &str,
-    format: AssetFormat,
-    metadata_location: Option<&str>,
-    instance: &str,
-    request_id: &str,
-) -> Result<Option<CurrentVersionResponse>, UnifiedError> {
-    match format {
-        AssetFormat::Lance => {
-            get_lance_current_version(store, domain, namespace, name, instance, request_id).await
-        }
-        AssetFormat::Iceberg => get_iceberg_current_version(config, metadata_location).await,
-    }
+fn versions_instance(asset_id: &str) -> String {
+    format!("/unified/v1/assets/{}/versions", asset_id)
 }
 
-// ── Lance ───────────────────────────────────────────────────────
+/// GET /unified/v1/assets/{asset_id}/versions
+pub async fn list_versions(
+    State(store): State<Arc<dyn CatalogStore>>,
+    request_id: Option<Extension<String>>,
+    Path(asset_id): Path<String>,
+    Query(query): Query<PaginationQuery>,
+) -> Result<impl IntoResponse, UnifiedError> {
+    let request_id = request_id_of(request_id);
+    let instance = versions_instance(&asset_id);
+    let id = asset::parse_asset_id(&asset_id, &instance, &request_id)?;
+    let (offset, limit) = query
+        .resolve()
+        .map_err(|e| map_catalog_error(e, &instance, &request_id))?;
 
-async fn get_lance_current_version(
-    store: &dyn CatalogStore,
-    domain: &str,
-    namespace: &str,
-    name: &str,
-    instance: &str,
-    request_id: &str,
-) -> Result<Option<CurrentVersionResponse>, UnifiedError> {
-    // Resolve asset id (lance format) and then ask the version store for
-    // the latest tabular version; V3 splits the lookup from the version
-    // operation.
-    let (asset, _) = store
-        .get_tabular_asset(domain, namespace, "lance", name)
+    let versions = store
+        .list_versions(id, offset, limit)
         .await
-        .map_err(|e| map_asset_error(e, instance, request_id))?;
+        .map_err(|e| map_catalog_error(e, &instance, &request_id))?;
+
+    let token = next_page_token(offset, &versions, limit);
+    Ok(Json(ListResponse::new(
+        versions.into_iter().map(VersionResponse::from).collect(),
+        token,
+    )))
+}
+
+/// GET /unified/v1/assets/{asset_id}/versions/{version_key}
+pub async fn get_version(
+    State(store): State<Arc<dyn CatalogStore>>,
+    request_id: Option<Extension<String>>,
+    Path((asset_id, version_key)): Path<(String, String)>,
+) -> Result<impl IntoResponse, UnifiedError> {
+    let request_id = request_id_of(request_id);
+    let instance = format!("{}/{}", versions_instance(&asset_id), version_key);
+    let id = asset::parse_asset_id(&asset_id, &instance, &request_id)?;
+    if version_key.is_empty() {
+        return Err(UnifiedError::new(
+            UnifiedErrorCode::ValidationFailed,
+            "version key must not be empty",
+            &instance,
+            &request_id,
+        ));
+    }
 
     let version = store
-        .get_latest_tabular_version(asset.id)
+        .get_version(id, &version_key)
         .await
-        .map_err(|e| map_asset_error(e, instance, request_id))?;
+        .map_err(|e| map_catalog_error(e, &instance, &request_id))?;
 
-    version
-        .map(|pair| lance_version_to_response(pair, instance, request_id))
-        .transpose()
-}
-
-fn lance_version_to_response(
-    pair: (AssetVersion, TabularAssetVersion),
-    instance: &str,
-    request_id: &str,
-) -> Result<CurrentVersionResponse, UnifiedError> {
-    let (version, tabular_version) = pair;
-    let version_id = version.version_order.ok_or_else(|| {
-        tracing::error!(version_id = %version.id, version_key = %version.version_key,
-            "lance current_version returned version without version_order");
-        UnifiedError::new(
-            UnifiedErrorCode::InternalError,
-            "An internal error occurred",
-            instance,
-            request_id,
-        )
-    })?;
-    Ok(CurrentVersionResponse::Lance {
-        version_id,
-        metadata_location: tabular_version.metadata_location,
-        // V3 model stores previous_version_id as Uuid on AssetVersion (not as
-        // i64 on tabular_version). The Lance protocol response expects an i64
-        // version number. Until the storage layer exposes a Uuid ->
-        // version_order resolver, expose None and rely on the explicit version
-        // chain that V3 will surface from queries.
-        previous_version_id: None,
-        timestamp: version.created_at.to_rfc3339(),
-    })
-}
-
-// ── Iceberg ─────────────────────────────────────────────────────
-
-async fn get_iceberg_current_version(
-    config: &UnifiedConfig,
-    metadata_location: Option<&str>,
-) -> Result<Option<CurrentVersionResponse>, UnifiedError> {
-    let Some(object_store) = config.object_store.as_ref() else {
-        return Ok(None);
-    };
-    let Some(bucket) = config.s3_bucket.as_deref() else {
-        return Ok(None);
-    };
-    let Some(loc) = metadata_location else {
-        return Ok(None);
-    };
-
-    let path = match crate::object_store_util::s3_url_to_path(loc, bucket) {
-        Some(p) => p,
-        None => {
-            tracing::warn!(
-                "failed to parse metadata_location '{}' with bucket '{}'",
-                loc,
-                bucket
-            );
-            return Ok(None);
-        }
-    };
-
-    let metadata = match crate::object_store_util::read_json(object_store.as_ref(), &path).await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!("failed to read metadata.json at {}: {}", loc, e);
-            return Ok(None);
-        }
-    };
-
-    let sequence_number = metadata
-        .get("last-sequence-number")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-
-    let current_snapshot_id = metadata.get("current-snapshot-id").and_then(|v| v.as_i64());
-
-    let timestamp_ms = if let Some(snapshot_id) = current_snapshot_id {
-        metadata
-            .get("snapshots")
-            .and_then(|s| s.as_array())
-            .and_then(|snapshots| {
-                snapshots
-                    .iter()
-                    .find(|s| s.get("snapshot-id").and_then(|id| id.as_i64()) == Some(snapshot_id))
-            })
-            .and_then(|s| s.get("timestamp-ms").and_then(|t| t.as_i64()))
-    } else {
-        None
-    };
-
-    Ok(Some(CurrentVersionResponse::Iceberg {
-        sequence_number,
-        snapshot_id: current_snapshot_id,
-        timestamp_ms,
-    }))
+    Ok(Json(VersionResponse::from(version)))
 }

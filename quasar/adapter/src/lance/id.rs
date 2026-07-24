@@ -1,8 +1,8 @@
 //! Lance namespace and table identifier parsing.
 //!
-//! V3 encodes the Quasar Domain as the first segment of the Lance `{id}`
-//! path parameter using `'$'` as delimiter. See `docs/v3/V3_DESIGN.md`
-//! §4.1.2 for the mapping:
+//! The baseline encodes the Quasar Domain as the first segment of the
+//! Lance `{id}` path parameter using `'$'` as the delimiter (DESIGN §5.2,
+//! see `docs/DESIGN.md`):
 //!
 //! | Quasar object                                  | Lance `{id}`                |
 //! | ---------------------------------------------- | --------------------------- |
@@ -10,6 +10,12 @@
 //! | Domain `prod`                                  | `"prod"`                    |
 //! | Domain `prod` + Namespace `analytics`          | `"prod$analytics"`          |
 //! | Domain + Namespace + Table `embeddings`        | `"prod$analytics$embeddings"` |
+//!
+//! The namespace segment carries the full hierarchical namespace path
+//! (e.g. `"prod$teams/finance$tbl"`): path segments never contain `'$'`
+//! (slug rule), so splitting on `'$'` is unambiguous. Clients URL-encode
+//! the `/` of a hierarchical path (`%2F`) because `{id}` is a single
+//! URL path segment.
 
 use super::error::LanceError;
 
@@ -21,14 +27,18 @@ pub(crate) enum LanceNamespaceId {
     /// `"$"` – service-discovery root. Only `list` returns the Domain list;
     /// every other handler must reject Root.
     Root,
-    /// One non-empty segment – addresses a Quasar Domain. V3 forbids Lance
-    /// clients from managing Domains; the handler must surface `InvalidInput`.
+    /// One non-empty segment – addresses a Quasar Domain. The baseline
+    /// forbids Lance clients from managing Domains; the handler must
+    /// surface `InvalidInput`.
     Domain(String),
-    /// Two non-empty segments – addresses a Quasar Namespace within a Domain.
+    /// Two non-empty segments – addresses a Quasar Namespace within a
+    /// Domain. `namespace` is the hierarchical namespace path (may
+    /// contain `/`-separated slug segments).
     Namespace { domain: String, namespace: String },
 }
 
-/// Parsed Lance table identifier. Always three non-empty segments.
+/// Parsed Lance table identifier. Always three non-empty segments;
+/// `namespace` is the hierarchical namespace path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LanceTableId {
     pub domain: String,
@@ -62,7 +72,8 @@ pub(crate) fn parse_namespace_id(id: &str, instance: &str) -> Result<LanceNamesp
 }
 
 /// Parse a Lance table `{id}` parameter. Must be exactly three non-empty
-/// segments: `domain$namespace$table`.
+/// segments: `domain$namespace$table`, where the namespace segment may be
+/// a hierarchical path (`domain$teams/finance$tbl`).
 pub(crate) fn parse_table_id(id: &str, instance: &str) -> Result<LanceTableId, LanceError> {
     let segments: Vec<&str> = id.split(DELIMITER).collect();
     if segments.len() != 3 || segments.iter().any(|s| s.is_empty()) {
@@ -158,6 +169,31 @@ mod tests {
                 domain: "prod".to_string(),
                 namespace: "analytics".to_string(),
                 table: "events".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_namespace_id_hierarchical_path_accepted() {
+        let parsed = parse_namespace_id("prod$teams/finance", INSTANCE).ok();
+        assert_eq!(
+            parsed,
+            Some(LanceNamespaceId::Namespace {
+                domain: "prod".to_string(),
+                namespace: "teams/finance".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_table_id_hierarchical_namespace_accepted() {
+        let parsed = parse_table_id("prod$teams/finance$tbl", INSTANCE).ok();
+        assert_eq!(
+            parsed,
+            Some(LanceTableId {
+                domain: "prod".to_string(),
+                namespace: "teams/finance".to_string(),
+                table: "tbl".to_string(),
             })
         );
     }

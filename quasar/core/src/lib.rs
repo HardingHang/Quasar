@@ -1,25 +1,25 @@
 //! Quasar core domain models and trait definitions.
 //!
 //! This crate contains the protocol-agnostic data structures and the
-//! `CatalogStore` trait that separates the domain layer from the
-//! persistence layer.
+//! store traits that separate the domain layer from the persistence
+//! layer. It depends on no framework or storage implementation.
 
 pub mod error;
-pub mod metrics;
 pub mod models;
 pub mod store;
 pub mod validation;
 
-pub use error::StoreError;
-pub use metrics::{Counter, MetricsRegistry, MetricsState};
+pub use error::CatalogError;
 pub use models::{
-    Asset, AssetVersion, AssetVersionWithTabular, AssetWithTabular, Domain, Namespace, PatchField,
-    TabularAsset, TabularAssetVersion, View, ViewAsset, ViewIdentifier,
+    Asset, AssetType, AssetVersion, AssetWithTabular, Domain, Format, Namespace, PatchField,
+    TabularAsset, View, ViewAsset, ViewIdentifier,
 };
 pub use store::{
-    AssetStore, CasCommitStore, CatalogStore, DomainPatch, DomainStore, IcebergCatalogStore,
-    IcebergMetricsStore, IcebergPurgeStore, IcebergRegisterStore, IcebergStagingStore,
-    IcebergTransactionStore, IcebergViewStore, NamespaceStore, TabularStore, TabularVersionStore,
+    AssetFilter, AssetPatch, AssetQuery, AssetStore, AssetTypeStore, CasCommitStore, CatalogStore,
+    CreateAsset, CreateDomain, CreateNamespace, CreateVersion, DomainPatch, DomainStore,
+    IcebergCatalogStore, IcebergMetricsStore, IcebergPurgeStore, IcebergRegisterStore,
+    IcebergStagingStore, IcebergTableCommit, IcebergTransactionStore, IcebergViewStore,
+    NamespacePatch, NamespaceStore, RegisterAssetType, RegisterFormat, TabularStore, TagStore,
     UnifiedQueryStore, VersionStore,
 };
-pub use validation::validate_name;
+pub use validation::{validate_name, validate_namespace_path};

@@ -15,11 +15,10 @@ chrono = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
-strum = { workspace = true }
 
 [dev-dependencies]
 serial_test = "3"
-postgresql_embedded = { version = "0.20", default-features = false, features = ["tokio", "zonky"] }
+postgresql_embedded = { version = "0.20", default-features = false, features = ["tokio", "zonky", "rustls"] }
 
 [lints]
 workspace = true

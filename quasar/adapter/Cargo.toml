@@ -7,7 +7,7 @@ edition.workspace = true
 default = ["lance", "iceberg", "unified"]
 lance = []
 iceberg = []
-unified = ["lance", "iceberg"]
+unified = []
 
 [dependencies]
 quasar-core = { workspace = true }
@@ -27,7 +27,7 @@ base64 = { version = "0.22", features = ["alloc"] }
 
 [dev-dependencies]
 quasar-storage = { workspace = true }
-postgresql_embedded = { version = "0.20", default-features = false, features = ["tokio", "zonky"] }
+postgresql_embedded = { version = "0.20", default-features = false, features = ["tokio", "zonky", "rustls"] }
 serial_test = "3"
 tower = { workspace = true, features = ["util"] }
 serde_json = { workspace = true }

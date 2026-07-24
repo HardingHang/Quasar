@@ -1,11 +1,19 @@
+//! RFC-7807 Problem Details error responses for the Unified API
+//! (DESIGN §5.5 / §7.6), extended with `code` and `request_id`.
+//!
+//! `code` is a closed set of six machine-readable codes mapped from
+//! `CatalogError` variants per DESIGN §7.5. Error details are sanitized
+//! per DESIGN §7.3: `Transient` and `Internal` contexts are logged, never
+//! returned to the client.
+
 use axum::{
     http::{header, StatusCode},
     response::{IntoResponse, Response},
 };
-use quasar_core::StoreError;
+use quasar_core::CatalogError;
 use serde::Serialize;
 
-/// RFC 7807 Problem Details response body for Unified API.
+/// RFC-7807 Problem Details body, extended with `code` and `request_id`.
 #[derive(Debug, Serialize)]
 pub struct ProblemDetails {
     #[serde(rename = "type")]
@@ -18,97 +26,68 @@ pub struct ProblemDetails {
     pub request_id: String,
 }
 
-/// Machine-readable error codes for the Unified API.
+/// Machine-readable error codes for the Unified API; the complete closed
+/// set (DESIGN §7.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnifiedErrorCode {
-    DomainNotFound,
-    DomainAlreadyExists,
-    DomainNotEmpty,
-    NamespaceNotFound,
-    NamespaceAlreadyExists,
-    NamespaceNotEmpty,
-    AssetNotFound,
-    AssetAlreadyExists,
-    InvalidInput,
-    InvalidFormat,
-    InvalidPageToken,
-    PageSizeTooLarge,
-    MethodNotAllowed,
+    NotFound,
+    AlreadyExists,
     Conflict,
-    ServiceUnavailable,
-    Timeout,
+    ValidationFailed,
+    TransientError,
     InternalError,
 }
 
 impl UnifiedErrorCode {
+    /// Machine-readable code string, e.g. `NOT_FOUND`.
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::DomainNotFound => "DomainNotFound",
-            Self::DomainAlreadyExists => "DomainAlreadyExists",
-            Self::DomainNotEmpty => "DomainNotEmpty",
-            Self::NamespaceNotFound => "NamespaceNotFound",
-            Self::NamespaceAlreadyExists => "NamespaceAlreadyExists",
-            Self::NamespaceNotEmpty => "NamespaceNotEmpty",
-            Self::AssetNotFound => "AssetNotFound",
-            Self::AssetAlreadyExists => "AssetAlreadyExists",
-            Self::InvalidInput => "InvalidInput",
-            Self::InvalidFormat => "InvalidFormat",
-            Self::InvalidPageToken => "InvalidPageToken",
-            Self::PageSizeTooLarge => "PageSizeTooLarge",
-            Self::MethodNotAllowed => "MethodNotAllowed",
-            Self::Conflict => "Conflict",
-            Self::ServiceUnavailable => "ServiceUnavailable",
-            Self::Timeout => "Timeout",
-            Self::InternalError => "InternalError",
+            Self::NotFound => "NOT_FOUND",
+            Self::AlreadyExists => "ALREADY_EXISTS",
+            Self::Conflict => "CONFLICT",
+            Self::ValidationFailed => "VALIDATION_FAILED",
+            Self::TransientError => "TRANSIENT_ERROR",
+            Self::InternalError => "INTERNAL_ERROR",
         }
     }
 
+    /// HTTP status code mapping (DESIGN §7.5).
     pub fn status_code(&self) -> StatusCode {
         match self {
-            Self::DomainNotFound | Self::NamespaceNotFound | Self::AssetNotFound => {
-                StatusCode::NOT_FOUND
-            }
-            Self::DomainAlreadyExists
-            | Self::DomainNotEmpty
-            | Self::NamespaceAlreadyExists
-            | Self::AssetAlreadyExists
-            | Self::NamespaceNotEmpty
-            | Self::Conflict => StatusCode::CONFLICT,
-            Self::InvalidInput
-            | Self::InvalidFormat
-            | Self::InvalidPageToken
-            | Self::PageSizeTooLarge => StatusCode::BAD_REQUEST,
-            Self::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
-            Self::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Timeout => StatusCode::GATEWAY_TIMEOUT,
+            Self::NotFound => StatusCode::NOT_FOUND,
+            Self::AlreadyExists | Self::Conflict => StatusCode::CONFLICT,
+            Self::ValidationFailed => StatusCode::BAD_REQUEST,
+            Self::TransientError => StatusCode::SERVICE_UNAVAILABLE,
             Self::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
-    pub fn problem_slug(&self) -> &'static str {
+    /// Human-readable title for the problem type.
+    pub fn title(&self) -> &'static str {
         match self {
-            Self::DomainNotFound => "domain-not-found",
-            Self::DomainAlreadyExists => "domain-already-exists",
-            Self::DomainNotEmpty => "domain-not-empty",
-            Self::NamespaceNotFound => "namespace-not-found",
-            Self::NamespaceAlreadyExists => "namespace-already-exists",
-            Self::NamespaceNotEmpty => "namespace-not-empty",
-            Self::AssetNotFound => "asset-not-found",
-            Self::AssetAlreadyExists => "asset-already-exists",
-            Self::InvalidInput => "invalid-input",
-            Self::InvalidFormat => "invalid-format",
-            Self::InvalidPageToken => "invalid-page-token",
-            Self::PageSizeTooLarge => "page-size-too-large",
-            Self::MethodNotAllowed => "method-not-allowed",
+            Self::NotFound => "Not Found",
+            Self::AlreadyExists => "Already Exists",
+            Self::Conflict => "Conflict",
+            Self::ValidationFailed => "Validation Failed",
+            Self::TransientError => "Transient Error",
+            Self::InternalError => "Internal Error",
+        }
+    }
+
+    /// Slug used in the stable `type` URI: `https://quasar.io/errors/<slug>`.
+    pub fn slug(&self) -> &'static str {
+        match self {
+            Self::NotFound => "not-found",
+            Self::AlreadyExists => "already-exists",
             Self::Conflict => "conflict",
-            Self::ServiceUnavailable => "service-unavailable",
-            Self::Timeout => "timeout",
+            Self::ValidationFailed => "validation-failed",
+            Self::TransientError => "transient-error",
             Self::InternalError => "internal-error",
         }
     }
 }
 
-/// Unified API-specific error type.
+/// Unified API error rendered as `application/problem+json`.
 pub struct UnifiedError {
     pub code: UnifiedErrorCode,
     pub detail: String,
@@ -136,8 +115,8 @@ impl IntoResponse for UnifiedError {
     fn into_response(self) -> Response {
         let status = self.code.status_code();
         let problem = ProblemDetails {
-            problem_type: format!("https://quasar.dev/problems/{}", self.code.problem_slug()),
-            title: self.code.as_str().to_string(),
+            problem_type: format!("https://quasar.io/errors/{}", self.code.slug()),
+            title: self.code.title().to_string(),
             status: status.as_u16(),
             detail: self.detail,
             instance: self.instance,
@@ -146,7 +125,7 @@ impl IntoResponse for UnifiedError {
         };
 
         let body = serde_json::to_string(&problem).unwrap_or_else(|_| {
-            r#"{"type":"https://quasar.dev/problems/internal-error","title":"InternalError","status":500,"detail":"failed to serialize error response","instance":"","code":"InternalError","request_id":""}"#.to_string()
+            r#"{"type":"https://quasar.io/errors/internal-error","title":"Internal Error","status":500,"detail":"failed to serialize error response","instance":"","code":"INTERNAL_ERROR","request_id":""}"#.to_string()
         });
 
         (
@@ -158,164 +137,42 @@ impl IntoResponse for UnifiedError {
     }
 }
 
-/// Map StoreError to UnifiedError for domain operations.
-pub fn map_domain_error(err: StoreError, instance: &str, request_id: &str) -> UnifiedError {
+/// Map a `CatalogError` to a `UnifiedError` per DESIGN §7.5.
+///
+/// `Transient` and `Internal` contexts are sanitized (DESIGN §7.3): they
+/// may carry connection strings or other internals, so they are logged
+/// and replaced with a generic detail message.
+pub fn map_catalog_error(err: CatalogError, instance: &str, request_id: &str) -> UnifiedError {
     match err {
-        StoreError::NotFound(msg) => {
-            UnifiedError::new(UnifiedErrorCode::DomainNotFound, msg, instance, request_id)
+        CatalogError::NotFound(msg) => {
+            UnifiedError::new(UnifiedErrorCode::NotFound, msg, instance, request_id)
         }
-        StoreError::AlreadyExists(msg) => UnifiedError::new(
-            UnifiedErrorCode::DomainAlreadyExists,
+        CatalogError::AlreadyExists(msg) => {
+            UnifiedError::new(UnifiedErrorCode::AlreadyExists, msg, instance, request_id)
+        }
+        CatalogError::Conflict(msg) => {
+            UnifiedError::new(UnifiedErrorCode::Conflict, msg, instance, request_id)
+        }
+        CatalogError::Validation(msg) => UnifiedError::new(
+            UnifiedErrorCode::ValidationFailed,
             msg,
             instance,
             request_id,
         ),
-        StoreError::DomainNotEmpty { domain } => UnifiedError::new(
-            UnifiedErrorCode::DomainNotEmpty,
-            format!("domain '{}' is not empty", domain),
-            instance,
-            request_id,
-        ),
-        StoreError::NamespaceNotEmpty { namespace } => UnifiedError::new(
-            UnifiedErrorCode::NamespaceNotEmpty,
-            format!("namespace '{}' is not empty", namespace),
-            instance,
-            request_id,
-        ),
-        StoreError::Conflict { msg } => {
-            UnifiedError::new(UnifiedErrorCode::Conflict, msg, instance, request_id)
-        }
-        StoreError::InvalidInput(msg) => {
-            UnifiedError::new(UnifiedErrorCode::InvalidInput, msg, instance, request_id)
-        }
-        StoreError::DatabaseUnavailable { .. } => UnifiedError::new(
-            UnifiedErrorCode::ServiceUnavailable,
-            "service temporarily unavailable",
-            instance,
-            request_id,
-        ),
-        StoreError::Timeout { operation } => UnifiedError::new(
-            UnifiedErrorCode::Timeout,
-            format!("operation '{}' timed out", operation),
-            instance,
-            request_id,
-        ),
-        StoreError::Internal { msg, source } => {
-            tracing::error!(error = ?source, %msg, "internal store error");
+        CatalogError::Transient(msg) => {
+            tracing::warn!(error = %msg, "transient store error");
             UnifiedError::new(
-                UnifiedErrorCode::InternalError,
-                "An internal error occurred",
+                UnifiedErrorCode::TransientError,
+                "service temporarily unavailable, please retry",
                 instance,
                 request_id,
             )
         }
-    }
-}
-
-/// Map StoreError to UnifiedError for namespace operations.
-pub fn map_namespace_error(err: StoreError, instance: &str, request_id: &str) -> UnifiedError {
-    match err {
-        StoreError::NotFound(msg) => UnifiedError::new(
-            UnifiedErrorCode::NamespaceNotFound,
-            msg,
-            instance,
-            request_id,
-        ),
-        StoreError::AlreadyExists(msg) => UnifiedError::new(
-            UnifiedErrorCode::NamespaceAlreadyExists,
-            msg,
-            instance,
-            request_id,
-        ),
-        StoreError::NamespaceNotEmpty { namespace } => UnifiedError::new(
-            UnifiedErrorCode::NamespaceNotEmpty,
-            format!("namespace '{}' is not empty", namespace),
-            instance,
-            request_id,
-        ),
-        StoreError::DomainNotEmpty { domain } => UnifiedError::new(
-            UnifiedErrorCode::DomainNotEmpty,
-            format!("domain '{}' is not empty", domain),
-            instance,
-            request_id,
-        ),
-        StoreError::Conflict { msg } => {
-            UnifiedError::new(UnifiedErrorCode::Conflict, msg, instance, request_id)
-        }
-        StoreError::InvalidInput(msg) => {
-            UnifiedError::new(UnifiedErrorCode::InvalidInput, msg, instance, request_id)
-        }
-        StoreError::DatabaseUnavailable { .. } => UnifiedError::new(
-            UnifiedErrorCode::ServiceUnavailable,
-            "service temporarily unavailable",
-            instance,
-            request_id,
-        ),
-        StoreError::Timeout { operation } => UnifiedError::new(
-            UnifiedErrorCode::Timeout,
-            format!("operation '{}' timed out", operation),
-            instance,
-            request_id,
-        ),
-        StoreError::Internal { msg, source } => {
-            tracing::error!(error = ?source, %msg, "internal store error");
+        CatalogError::Internal(msg) => {
+            tracing::error!(error = %msg, "internal store error");
             UnifiedError::new(
                 UnifiedErrorCode::InternalError,
-                "An internal error occurred",
-                instance,
-                request_id,
-            )
-        }
-    }
-}
-
-/// Map StoreError to UnifiedError for asset operations.
-pub fn map_asset_error(err: StoreError, instance: &str, request_id: &str) -> UnifiedError {
-    match err {
-        StoreError::NotFound(msg) => {
-            UnifiedError::new(UnifiedErrorCode::AssetNotFound, msg, instance, request_id)
-        }
-        StoreError::AlreadyExists(msg) => UnifiedError::new(
-            UnifiedErrorCode::AssetAlreadyExists,
-            msg,
-            instance,
-            request_id,
-        ),
-        StoreError::NamespaceNotEmpty { namespace } => UnifiedError::new(
-            UnifiedErrorCode::NamespaceNotEmpty,
-            format!("namespace '{}' is not empty", namespace),
-            instance,
-            request_id,
-        ),
-        StoreError::DomainNotEmpty { domain } => UnifiedError::new(
-            UnifiedErrorCode::DomainNotEmpty,
-            format!("domain '{}' is not empty", domain),
-            instance,
-            request_id,
-        ),
-        StoreError::Conflict { msg } => {
-            UnifiedError::new(UnifiedErrorCode::Conflict, msg, instance, request_id)
-        }
-        StoreError::InvalidInput(msg) => {
-            UnifiedError::new(UnifiedErrorCode::InvalidInput, msg, instance, request_id)
-        }
-        StoreError::DatabaseUnavailable { .. } => UnifiedError::new(
-            UnifiedErrorCode::ServiceUnavailable,
-            "service temporarily unavailable",
-            instance,
-            request_id,
-        ),
-        StoreError::Timeout { operation } => UnifiedError::new(
-            UnifiedErrorCode::Timeout,
-            format!("operation '{}' timed out", operation),
-            instance,
-            request_id,
-        ),
-        StoreError::Internal { msg, source } => {
-            tracing::error!(error = ?source, %msg, "internal store error");
-            UnifiedError::new(
-                UnifiedErrorCode::InternalError,
-                "An internal error occurred",
+                "an internal error occurred",
                 instance,
                 request_id,
             )
@@ -328,76 +185,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn internal_error_redacts_msg() {
-        let err = map_namespace_error(
-            StoreError::Internal {
-                msg: "stack-trace with secret key".into(),
-                source: None,
-            },
+    fn status_mapping_matches_design() {
+        assert_eq!(
+            UnifiedErrorCode::NotFound.status_code(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            UnifiedErrorCode::AlreadyExists.status_code(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            UnifiedErrorCode::Conflict.status_code(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            UnifiedErrorCode::ValidationFailed.status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            UnifiedErrorCode::TransientError.status_code(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            UnifiedErrorCode::InternalError.status_code(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn internal_and_transient_details_are_sanitized() {
+        let err = map_catalog_error(
+            CatalogError::Internal("db password is hunter2".to_string()),
             "/test",
             "rid",
         );
         assert_eq!(err.code, UnifiedErrorCode::InternalError);
-        assert_eq!(err.detail, "An internal error occurred");
+        assert!(!err.detail.contains("hunter2"));
+
+        let err = map_catalog_error(
+            CatalogError::Transient("pool at postgres://secret".to_string()),
+            "/test",
+            "rid",
+        );
+        assert_eq!(err.code, UnifiedErrorCode::TransientError);
         assert!(!err.detail.contains("secret"));
-
-        let err = map_asset_error(
-            StoreError::Internal {
-                msg: "another leak".into(),
-                source: None,
-            },
-            "/test",
-            "rid",
-        );
-        assert_eq!(err.detail, "An internal error occurred");
     }
 
     #[test]
-    fn domain_not_empty_maps_to_domain_not_empty() {
-        let err = map_namespace_error(
-            StoreError::DomainNotEmpty {
-                domain: "prod".into(),
-            },
+    fn not_found_maps_to_404_code() {
+        let err = map_catalog_error(
+            CatalogError::NotFound("asset x".to_string()),
             "/test",
             "rid",
         );
-        assert_eq!(err.code, UnifiedErrorCode::DomainNotEmpty);
-        assert!(err.detail.contains("prod"));
-
-        let err = map_domain_error(
-            StoreError::DomainNotEmpty {
-                domain: "prod".into(),
-            },
-            "/test",
-            "rid",
-        );
-        assert_eq!(err.code, UnifiedErrorCode::DomainNotEmpty);
-        assert!(err.detail.contains("prod"));
-    }
-
-    #[test]
-    fn transient_store_errors_use_service_status_codes() {
-        let unavailable = map_asset_error(
-            StoreError::DatabaseUnavailable { source: None },
-            "/test",
-            "rid",
-        );
-        assert_eq!(unavailable.code, UnifiedErrorCode::ServiceUnavailable);
-        assert_eq!(
-            unavailable.code.status_code(),
-            StatusCode::SERVICE_UNAVAILABLE
-        );
-        assert_eq!(unavailable.detail, "service temporarily unavailable");
-
-        let timeout = map_asset_error(
-            StoreError::Timeout {
-                operation: "get_asset".into(),
-            },
-            "/test",
-            "rid",
-        );
-        assert_eq!(timeout.code, UnifiedErrorCode::Timeout);
-        assert_eq!(timeout.code.status_code(), StatusCode::GATEWAY_TIMEOUT);
-        assert!(timeout.detail.contains("get_asset"));
+        assert_eq!(err.code, UnifiedErrorCode::NotFound);
+        assert_eq!(err.code.as_str(), "NOT_FOUND");
     }
 }

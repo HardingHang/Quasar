@@ -1,10 +1,11 @@
 //! Quasar PostgreSQL storage implementation.
 //!
 //! Provides `PgCatalogStore`, a PostgreSQL-backed implementation of the
-//! `CatalogStore` trait defined in `quasar-core`.
+//! store traits defined in `quasar-core`, plus a lightweight embedded
+//! migration runner (`migrations/`, DESIGN §8.4).
 
+pub(crate) mod migrate;
 pub(crate) mod queries;
-pub mod schema;
 pub mod store;
 
 pub use quasar_core::*;

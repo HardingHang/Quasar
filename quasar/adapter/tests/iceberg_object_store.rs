@@ -1,871 +1,151 @@
+//! Iceberg REST Catalog — object store interaction integration tests:
+//! metadata.json write/read, and purge semantics on drop.
+
 #![cfg(feature = "iceberg")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use deadpool_postgres::{Pool, Runtime};
-use http_body_util::BodyExt;
-use object_store::memory::InMemory;
-use postgresql_embedded::PostgreSQL;
-use quasar_adapter::iceberg;
-use quasar_core::CatalogStore;
-use quasar_core::NamespaceStore;
-use quasar_core::TabularStore;
-use quasar_storage::PgCatalogStore;
-use serde_json::Value;
+mod common;
+
+use axum::http::StatusCode;
+use common::*;
+use object_store::path::Path;
+use serde_json::json;
 use serial_test::serial;
-use std::sync::Arc;
 use tokio::sync::OnceCell;
-use tower::ServiceExt;
 
-static PG_INSTANCE: OnceCell<PgInstance> = OnceCell::const_new();
+static PG: OnceCell<(postgresql_embedded::PostgreSQL, String)> = OnceCell::const_new();
 
-struct PgInstance {
-    #[allow(dead_code)]
-    postgresql: PostgreSQL,
-    url: String,
-}
-
-impl PgInstance {
-    async fn get() -> &'static Self {
-        PG_INSTANCE
-            .get_or_init(|| async {
-                let mut postgresql = PostgreSQL::default();
-                postgresql.setup().await.expect("PostgreSQL setup failed");
-                postgresql.start().await.expect("PostgreSQL start failed");
-                postgresql
-                    .create_database("quasar_test")
-                    .await
-                    .expect("create database failed");
-                let url = postgresql.settings().url("quasar_test");
-                PgInstance { postgresql, url }
-            })
-            .await
-    }
-}
-
-fn test_pool(url: &str) -> Pool {
-    let config = url
-        .parse::<tokio_postgres::Config>()
-        .expect("invalid database URL");
-    let mgr = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
-    Pool::builder(mgr)
-        .runtime(Runtime::Tokio1)
-        .build()
-        .expect("failed to create pool")
-}
-
-async fn setup() -> PgCatalogStore {
-    let instance = PgInstance::get().await;
-    let pool = test_pool(&instance.url);
-    let store = PgCatalogStore::new(pool.clone());
-    store.initialize().await.expect("initialize failed");
-
-    let client = pool.get().await.expect("failed to get client");
-    client
-        .execute("TRUNCATE iceberg_scan_metrics_reports, iceberg_purge_operations, tabular_asset_versions, asset_versions, tabular_assets, assets, namespaces, asset_permissions CASCADE", &[])
+async fn db_url() -> &'static str {
+    &PG.get_or_init(|| async { PgBootstrap::start("quasar_test_iceberg_objstore").await })
         .await
-        .expect("failed to truncate tables");
-
-    store
+        .1
 }
 
-async fn setup_with_pool() -> (PgCatalogStore, Pool) {
-    let instance = PgInstance::get().await;
-    let pool = test_pool(&instance.url);
-    let store = PgCatalogStore::new(pool.clone());
-    store.initialize().await.expect("initialize failed");
-
-    let client = pool.get().await.expect("failed to get client");
-    client
-        .execute("TRUNCATE iceberg_scan_metrics_reports, iceberg_purge_operations, tabular_asset_versions, asset_versions, tabular_assets, assets, namespaces, asset_permissions CASCADE", &[])
-        .await
-        .expect("failed to truncate tables");
-
-    (store, pool)
+async fn object_exists(mem: &Arc<dyn object_store::ObjectStore>, location: &str) -> bool {
+    let path = Path::from(location.trim_start_matches("s3://bucket/"));
+    mem.head(&path).await.is_ok()
 }
 
-fn test_app_with_store(
-    store: PgCatalogStore,
-    object_store: Arc<dyn object_store::ObjectStore>,
-) -> axum::Router {
-    use axum::Extension;
-    let store: Arc<dyn CatalogStore> = Arc::new(store);
-    let config = iceberg::IcebergConfig {
-        warehouse_path: Some("s3://warehouse/".to_string()),
-        object_store: Some(object_store),
-        s3_bucket: Some("warehouse".to_string()),
-        default_warehouse: "default".to_string(),
-    };
-    iceberg::routes().layer(Extension(config)).with_state(store)
-}
-
-async fn body_json(response: axum::response::Response) -> Value {
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    serde_json::from_slice(&body).unwrap()
-}
-
-async fn create_namespace(store: &PgCatalogStore, name: &str) {
-    store
-        .create_namespace("default", name, None, std::collections::HashMap::new())
-        .await
-        .unwrap();
-}
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
-
-/// Convert an S3 URL to a relative path for InMemory store.
-fn s3_to_relative(location: &str) -> String {
-    location
-        .strip_prefix("s3://warehouse/")
-        .unwrap_or(location)
-        .to_string()
-}
+use std::sync::Arc;
 
 #[tokio::test]
 #[serial]
-async fn test_create_table_writes_metadata_to_object_store() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-
-    let mem_store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
-    let app = test_app_with_store(store, mem_store.clone());
-
-    // Create table
-    let create = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/namespaces/prod/tables")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"name": "users"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(create.status(), StatusCode::OK);
-
-    let create_json = body_json(create).await;
-    let metadata_location = create_json["metadata-location"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    // Verify metadata.json was written to object store
-    let path = object_store::path::Path::from(s3_to_relative(&metadata_location));
-    let result = mem_store.get(&path).await.unwrap();
-    let bytes = result.bytes().await.unwrap();
-    let metadata: Value = serde_json::from_slice(&bytes).unwrap();
-
-    assert_eq!(metadata["format-version"], 2);
-    assert_eq!(
-        metadata["table-uuid"],
-        create_json["metadata"]["table-uuid"]
-    );
-    assert_eq!(metadata["location"], "s3://warehouse/prod/users");
-}
-
-#[tokio::test]
-#[serial]
-async fn test_commit_table_writes_new_metadata_to_object_store() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-
-    let mem_store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
-    let app = test_app_with_store(store, mem_store.clone());
-
-    // Create table
-    let create = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/namespaces/prod/tables")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"name": "users"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(create.status(), StatusCode::OK);
-    let create_json = body_json(create).await;
-    let original_location = create_json["metadata-location"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    // Commit an update
-    let commit = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{
-                        "requirements": [
-                            {"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": null}
-                        ],
-                        "updates": [
-                            {"action": "add-snapshot", "snapshot": {
-                                "snapshot-id": 1,
-                                "sequence-number": 1,
-                                "timestamp-ms": __TS__,
-                                "manifest-list": "s3://bucket/manifest1.avro",
-                                "summary": {"operation": "append"},
-                                "schema-id": 0
-                            }},
-                            {"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 1, "type": "branch"}
-                        ]
-                    }"#.replace("__TS__", &now_ms().to_string())
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(commit.status(), StatusCode::OK);
-    let commit_json = body_json(commit).await;
-    let new_location = commit_json["metadata-location"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    assert_ne!(new_location, original_location);
-    assert!(new_location.contains("00002-"));
-
-    // Verify old metadata still exists in object store
-    let old_path = object_store::path::Path::from(s3_to_relative(&original_location));
-    let old_result = mem_store.get(&old_path).await.unwrap();
-    let old_bytes = old_result.bytes().await.unwrap();
-    let old_metadata: Value = serde_json::from_slice(&old_bytes).unwrap();
-    assert_eq!(old_metadata["format-version"], 2);
-
-    // Verify new metadata was written to object store
-    let new_path = object_store::path::Path::from(s3_to_relative(&new_location));
-    let new_result = mem_store.get(&new_path).await.unwrap();
-    let new_bytes = new_result.bytes().await.unwrap();
-    let new_metadata: Value = serde_json::from_slice(&new_bytes).unwrap();
-
-    assert_eq!(new_metadata["current-snapshot-id"], 1);
-    assert_eq!(new_metadata["snapshots"][0]["snapshot-id"], 1);
-    assert_eq!(new_metadata["refs"]["main"]["snapshot-id"], 1);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_load_table_reads_from_object_store() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-
-    let mem_store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
-    let app = test_app_with_store(store, mem_store.clone());
-
-    // Create table
-    let create = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/namespaces/prod/tables")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"name": "users"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(create.status(), StatusCode::OK);
-    let create_json = body_json(create).await;
-    let metadata_location = create_json["metadata-location"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    // Overwrite metadata in object store with a modified version
-    let modified_metadata = serde_json::json!({
-        "format-version": 2,
-        "table-uuid": create_json["metadata"]["table-uuid"],
-        "location": "s3://warehouse/prod/users",
-        "last-sequence-number": 42,
-        "last-updated-ms": 9999999999_i64,
-        "last-column-id": 0,
-        "schemas": [],
-        "current-schema-id": 0,
-        "partition-specs": [{"spec-id": 0, "fields": []}],
-        "default-spec-id": 0,
-        "last-partition-id": 999,
-        "properties": {},
-        "snapshots": [],
-        "snapshot-log": [],
-        "metadata-log": [],
-        "sort-orders": [{"order-id": 0, "fields": []}],
-        "default-sort-order-id": 0,
-        "refs": {}
-    });
-    let path = object_store::path::Path::from(s3_to_relative(&metadata_location));
-    mem_store
-        .put(
-            &path,
-            object_store::PutPayload::from(modified_metadata.to_string()),
-        )
-        .await
-        .unwrap();
-
-    // Load table should read the modified metadata from object store
-    let load = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(load.status(), StatusCode::OK);
-    let load_json = body_json(load).await;
-    assert_eq!(load_json["metadata"]["last-sequence-number"], 42);
-    assert_eq!(load_json["metadata"]["last-updated-ms"], 9999999999_i64);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_load_table_metadata_not_found() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-
-    let mem_store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
-    let app = test_app_with_store(store, mem_store.clone());
-
-    // Create table - this writes metadata.json
-    let create = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/namespaces/prod/tables")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"name": "users"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(create.status(), StatusCode::OK);
-    let create_json = body_json(create).await;
-    let metadata_location = create_json["metadata-location"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    // Delete the metadata.json from object store
-    let path = object_store::path::Path::from(s3_to_relative(&metadata_location));
-    mem_store.delete(&path).await.unwrap();
-
-    // Load table should return 404 MetadataNotFoundException
-    let load = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(load.status(), StatusCode::NOT_FOUND);
-    let json = body_json(load).await;
-    assert_eq!(json["error"]["type"], "MetadataNotFoundException");
-    assert_eq!(json["error"]["code"], 404);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_commit_table_metadata_not_found() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-
-    let mem_store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
-    let app = test_app_with_store(store, mem_store.clone());
-
-    // Create table - this writes metadata.json
-    let create = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/namespaces/prod/tables")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"name": "users"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(create.status(), StatusCode::OK);
-    let create_json = body_json(create).await;
-    let metadata_location = create_json["metadata-location"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    // Delete the metadata.json from object store
-    let path = object_store::path::Path::from(s3_to_relative(&metadata_location));
-    mem_store.delete(&path).await.unwrap();
-
-    // Commit should return 409 CommitFailedException
-    let commit = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{
-                        "requirements": [
-                            {"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": null}
-                        ],
-                        "updates": [
-                            {"action": "add-snapshot", "snapshot": {
-                                "snapshot-id": 1,
-                                "sequence-number": 1,
-                                "timestamp-ms": __TS__,
-                                "manifest-list": "s3://bucket/manifest1.avro",
-                                "summary": {"operation": "append"},
-                                "schema-id": 0
-                            }},
-                            {"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 1, "type": "branch"}
-                        ]
-                    }"#.replace("__TS__", &now_ms().to_string()),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(commit.status(), StatusCode::CONFLICT);
-    let json = body_json(commit).await;
-    assert_eq!(json["error"]["type"], "CommitFailedException");
-    assert_eq!(json["error"]["code"], 409);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_register_table_success() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-
-    let mem_store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
-    let app = test_app_with_store(store, mem_store.clone());
-
-    // Pre-populate a metadata file in object store
-    let metadata_location = "s3://warehouse/prod/users/metadata/00001-uuid.metadata.json";
-    let metadata = serde_json::json!({
-        "format-version": 2,
-        "table-uuid": "550e8400-e29b-41d4-a716-446655440000",
-        "location": "s3://warehouse/prod/users",
-        "last-sequence-number": 0,
-        "last-updated-ms": 1000,
-        "last-column-id": 0,
-        "schemas": [{"type": "struct", "schema-id": 0, "fields": []}],
-        "current-schema-id": 0,
-        "partition-specs": [{"spec-id": 0, "fields": []}],
-        "default-spec-id": 0,
-        "last-partition-id": 999,
-        "properties": {},
-        "snapshots": [],
-        "snapshot-log": [],
-        "metadata-log": [],
-        "sort-orders": [{"order-id": 0, "fields": []}],
-        "default-sort-order-id": 0,
-        "refs": {}
-    });
-    let path = object_store::path::Path::from(s3_to_relative(metadata_location));
-    mem_store
-        .put(&path, object_store::PutPayload::from(metadata.to_string()))
-        .await
-        .unwrap();
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/namespaces/prod/register")
-                .header("Content-Type", "application/json")
-                .body(Body::from(format!(
-                    r#"{{"name": "users", "metadata-location": "{}"}}"#,
-                    metadata_location
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_json(response).await;
-    assert_eq!(json["metadata-location"], metadata_location);
-    assert_eq!(json["metadata"]["format-version"], 2);
-    assert_eq!(json["metadata"]["location"], "s3://warehouse/prod/users");
-
-    // Registered table should be visible in list
-    let list = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/iceberg/v1/default/namespaces/prod/tables")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(list.status(), StatusCode::OK);
-    let list_json = body_json(list).await;
-    let identifiers = list_json["identifiers"].as_array().unwrap();
-    assert_eq!(identifiers.len(), 1);
-    assert_eq!(identifiers[0]["name"], "users");
-}
-
-#[tokio::test]
-#[serial]
-async fn test_register_table_metadata_not_found() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-
-    let mem_store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
-    let app = test_app_with_store(store, mem_store.clone());
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/namespaces/prod/register")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"name": "users", "metadata-location": "s3://warehouse/prod/users/metadata/00001-uuid.metadata.json"}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let json = body_json(response).await;
-    assert_eq!(json["error"]["type"], "MetadataNotFoundException");
-    assert_eq!(json["error"]["code"], 404);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_register_table_invalid_metadata() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-
-    let mem_store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
-    let app = test_app_with_store(store, mem_store.clone());
-
-    // Write invalid JSON to object store
-    let metadata_location = "s3://warehouse/prod/users/metadata/00001-uuid.metadata.json";
-    let path = object_store::path::Path::from(s3_to_relative(metadata_location));
-    mem_store
-        .put(
-            &path,
-            object_store::PutPayload::from(r#"{"invalid": true}"#.to_string()),
-        )
-        .await
-        .unwrap();
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/namespaces/prod/register")
-                .header("Content-Type", "application/json")
-                .body(Body::from(format!(
-                    r#"{{"name": "users", "metadata-location": "{}"}}"#,
-                    metadata_location
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let json = body_json(response).await;
-    assert_eq!(json["error"]["type"], "BadRequestException");
-    assert_eq!(json["error"]["code"], 400);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_register_table_already_exists() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-
-    let mem_store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
-    let app = test_app_with_store(store, mem_store.clone());
-
-    // Pre-populate metadata file
-    let metadata_location = "s3://warehouse/prod/users/metadata/00001-uuid.metadata.json";
-    let metadata = serde_json::json!({
-        "format-version": 2,
-        "table-uuid": "550e8400-e29b-41d4-a716-446655440000",
-        "location": "s3://warehouse/prod/users",
-        "last-sequence-number": 0,
-        "last-updated-ms": 1000,
-        "last-column-id": 0,
-        "schemas": [{"type": "struct", "schema-id": 0, "fields": []}],
-        "current-schema-id": 0,
-        "partition-specs": [{"spec-id": 0, "fields": []}],
-        "default-spec-id": 0,
-        "last-partition-id": 999,
-        "properties": {},
-        "snapshots": [],
-        "snapshot-log": [],
-        "metadata-log": [],
-        "sort-orders": [{"order-id": 0, "fields": []}],
-        "default-sort-order-id": 0,
-        "refs": {}
-    });
-    let path = object_store::path::Path::from(s3_to_relative(metadata_location));
-    mem_store
-        .put(&path, object_store::PutPayload::from(metadata.to_string()))
-        .await
-        .unwrap();
-
-    // First register succeeds
-    let first = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/namespaces/prod/register")
-                .header("Content-Type", "application/json")
-                .body(Body::from(format!(
-                    r#"{{"name": "users", "metadata-location": "{}"}}"#,
-                    metadata_location
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(first.status(), StatusCode::OK);
-
-    // Duplicate register should fail with 409
-    let second = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/namespaces/prod/register")
-                .header("Content-Type", "application/json")
-                .body(Body::from(format!(
-                    r#"{{"name": "users", "metadata-location": "{}"}}"#,
-                    metadata_location
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(second.status(), StatusCode::CONFLICT);
-    let json = body_json(second).await;
-    assert_eq!(json["error"]["type"], "TableAlreadyExistsException");
-    assert_eq!(json["error"]["code"], 409);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_purge_true_deletes_objects() {
-    let (store, pool) = setup_with_pool().await;
-    create_namespace(&store, "prod").await;
-
-    let mem_store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
-    let app = test_app_with_store(store, mem_store.clone());
-
-    // Create table (writes metadata.json to object store)
-    let create = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/namespaces/prod/tables")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"name": "users"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(create.status(), StatusCode::OK);
-    let create_json = body_json(create).await;
-    let _table_location = create_json["metadata"]["location"].as_str().unwrap();
-
-    // Write additional data files to object store
-    let data_path = object_store::path::Path::from("prod/users/data/file1.parquet");
-    mem_store
-        .put(&data_path, object_store::PutPayload::from("dummy data"))
-        .await
-        .unwrap();
-
-    // Purge the table
-    let purge = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/iceberg/v1/default/namespaces/prod/tables/users?purgeRequested=true")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(purge.status(), StatusCode::NO_CONTENT);
-
-    // Table should no longer exist in catalog
-    let head = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("HEAD")
-                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(head.status(), StatusCode::NOT_FOUND);
-
-    // Object store prefix should be empty
-    let prefix = object_store::path::Path::from("prod/users");
-    let mut stream = mem_store.list(Some(&prefix));
-    let mut count = 0;
-    while let Some(meta) = futures_util::stream::StreamExt::next(&mut stream).await {
-        let meta = meta.unwrap();
-        if meta.location != prefix {
-            count += 1;
-        }
-    }
-    assert_eq!(
-        count, 0,
-        "expected no objects under table prefix after purge"
-    );
-
-    // Verify purge operation record is completed
-    let client = pool.get().await.unwrap();
-    let row = client
-        .query_one(
-            "SELECT status FROM iceberg_purge_operations WHERE table_name = 'users' ORDER BY requested_at DESC LIMIT 1",
-            &[],
-        )
-        .await
-        .unwrap();
-    let status: String = row.get(0);
-    assert_eq!(status, "completed");
-}
-
-#[tokio::test]
-#[serial]
-async fn test_purge_false_only_drops_catalog() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
-
-    let mem_store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
-    let app = test_app_with_store(store, mem_store.clone());
-
-    // Create table
-    let create = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/iceberg/v1/default/namespaces/prod/tables")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"name": "users"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(create.status(), StatusCode::OK);
-    let create_json = body_json(create).await;
-    let metadata_location = create_json["metadata-location"].as_str().unwrap();
-
-    // Drop without purge
-    let drop = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/iceberg/v1/default/namespaces/prod/tables/users?purgeRequested=false")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(drop.status(), StatusCode::NO_CONTENT);
-
-    // Table should no longer exist in catalog
-    let head = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("HEAD")
-                .uri("/iceberg/v1/default/namespaces/prod/tables/users")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(head.status(), StatusCode::NOT_FOUND);
-
-    // Metadata file should still exist in object store
-    let path = object_store::path::Path::from(s3_to_relative(metadata_location));
-    let result = mem_store.get(&path).await;
+async fn create_and_commit_write_metadata_to_store() {
+    let store = fresh_store(db_url().await).await;
+    let (app, mem) = test_app(&store);
+    create_namespace(&app, &["os1"]).await;
+
+    let created = create_table(&app, "os1", "events").await;
+    let loc1 = created["metadata-location"].as_str().unwrap().to_string();
     assert!(
-        result.is_ok(),
-        "metadata file should still exist after non-purge drop"
+        object_exists(&mem, &loc1).await,
+        "create should write initial metadata.json"
+    );
+
+    let resp = post(
+        &app,
+        &format!("{NS_PREFIX}/namespaces/os1/tables/events"),
+        &json!({"requirements": [], "updates": [{"action": "set-properties", "updates": {"a": "b"}}]})
+            .to_string(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let loc2 = body_json(resp).await["metadata-location"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        object_exists(&mem, &loc2).await,
+        "commit should write new metadata"
+    );
+    assert!(
+        object_exists(&mem, &loc1).await,
+        "old metadata stays (immutable)"
     );
 }
 
 #[tokio::test]
 #[serial]
-async fn test_purge_invalid_location_returns_400() {
-    let store = setup().await;
-    create_namespace(&store, "prod").await;
+async fn drop_with_and_without_purge() {
+    let store = fresh_store(db_url().await).await;
+    let (app, mem) = test_app(&store);
+    create_namespace(&app, &["os2"]).await;
 
-    // Create a table with location outside warehouse prefix
-    store
-        .create_tabular_asset(
-            "default",
-            "prod",
-            "users",
-            "iceberg",
-            "s3://other-bucket/outside/path",
-            None,
-            None,
-            std::collections::HashMap::new(),
-        )
-        .await
-        .unwrap();
+    // purgeRequested=false (default): catalog row gone, objects kept.
+    let created = create_table(&app, "os2", "keep").await;
+    let loc = created["metadata-location"].as_str().unwrap().to_string();
+    let resp = delete(&app, &format!("{NS_PREFIX}/namespaces/os2/tables/keep")).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(object_exists(&mem, &loc).await, "no purge: objects kept");
 
-    let mem_store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
-    let app = test_app_with_store(store, mem_store);
+    // purgeRequested=true: objects removed.
+    let created = create_table(&app, "os2", "purge_me").await;
+    let loc = created["metadata-location"].as_str().unwrap().to_string();
+    let resp = delete(
+        &app,
+        &format!("{NS_PREFIX}/namespaces/os2/tables/purge_me?purgeRequested=true"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(
+        !object_exists(&mem, &loc).await,
+        "purge should delete table objects"
+    );
+}
 
-    // Purge should fail with 400 because location is not in configured bucket
-    let purge = app
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/iceberg/v1/default/namespaces/prod/tables/users?purgeRequested=true")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+#[tokio::test]
+#[serial]
+async fn purge_rejects_location_outside_warehouse() {
+    let store = fresh_store(db_url().await).await;
+    let (app, mem) = test_app(&store);
+    create_namespace(&app, &["os3"]).await;
 
-    assert_eq!(purge.status(), StatusCode::BAD_REQUEST);
-    let json = body_json(purge).await;
-    assert_eq!(json["error"]["type"], "BadRequestException");
-    assert_eq!(json["error"]["code"], 400);
+    // Register a table whose location escapes the configured warehouse.
+    let meta = json!({
+        "format-version": 2,
+        "table-uuid": uuid::Uuid::new_v4().to_string(),
+        "location": "s3://evil/escape/tbl",
+        "last-sequence-number": 0,
+        "last-updated-ms": 0,
+        "last-column-id": 1,
+        "schemas": [{"type": "struct", "schema-id": 0, "fields": [{"id": 1, "name": "id", "type": "long", "required": true}]}],
+        "current-schema-id": 0,
+        "partition-specs": [{"spec-id": 0, "fields": []}],
+        "default-spec-id": 0,
+        "last-partition-id": 0,
+        "properties": {},
+        "current-snapshot-id": -1,
+        "snapshots": [],
+        "snapshot-log": [],
+        "metadata-log": [],
+        "sort-orders": [{"order-id": 0, "fields": []}],
+        "default-sort-order-id": 0,
+        "refs": {}
+    });
+    mem.put(
+        &Path::from("ext/escape.metadata.json"),
+        serde_json::to_vec(&meta).unwrap().into(),
+    )
+    .await
+    .unwrap();
+    let resp = post(
+        &app,
+        &format!("{NS_PREFIX}/namespaces/os3/register"),
+        &json!({"name": "escape", "metadata-location": "s3://bucket/ext/escape.metadata.json"})
+            .to_string(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Purge must refuse to delete outside the warehouse boundary.
+    let resp = delete(
+        &app,
+        &format!("{NS_PREFIX}/namespaces/os3/tables/escape?purgeRequested=true"),
+    )
+    .await;
+    let status = resp.status();
+    assert!(
+        status == StatusCode::BAD_REQUEST || status == StatusCode::CONFLICT,
+        "purge outside warehouse should be rejected, got {status}"
+    );
 }

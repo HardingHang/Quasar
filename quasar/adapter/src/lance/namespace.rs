@@ -1,17 +1,17 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
 };
-use quasar_core::CatalogStore;
+use quasar_core::{validate_namespace_path, AssetFilter, CatalogStore, CreateNamespace};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::error::{store_error_to_lance, LanceError, ProblemDetails};
+use super::error::{catalog_error_to_lance, LanceError, ProblemDetails};
 use super::id::{parse_namespace_id, LanceNamespaceId};
-use quasar_core::validate_name;
+use super::{properties_to_string_map, request_id_of, string_map_to_properties};
 
 // ── Request DTOs ───────────────────────────────────────────
 
@@ -19,12 +19,6 @@ use quasar_core::validate_name;
 pub struct CreateNamespaceRequest {
     #[serde(default)]
     pub properties: HashMap<String, String>,
-}
-
-#[derive(Deserialize)]
-pub struct DescribeNamespaceRequest {
-    #[serde(default)]
-    pub properties: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -54,8 +48,9 @@ impl From<quasar_core::Namespace> for NamespaceResponse {
     fn from(ns: quasar_core::Namespace) -> Self {
         Self {
             id: ns.id.to_string(),
-            name: ns.name,
-            properties: ns.properties,
+            // Hierarchical namespaces are identified by their full path.
+            name: ns.path,
+            properties: properties_to_string_map(ns.properties),
             created_at: ns.created_at.to_rfc3339(),
         }
     }
@@ -66,7 +61,7 @@ impl From<quasar_core::Domain> for NamespaceResponse {
         Self {
             id: domain.id.to_string(),
             name: domain.name,
-            properties: domain.properties,
+            properties: properties_to_string_map(domain.properties),
             created_at: domain.created_at.to_rfc3339(),
         }
     }
@@ -98,15 +93,9 @@ impl From<quasar_core::Asset> for TableResponse {
         Self {
             id: asset.id.to_string(),
             name: asset.name,
-            properties: asset.properties,
+            properties: properties_to_string_map(asset.properties),
             created_at: asset.created_at.to_rfc3339(),
         }
-    }
-}
-
-impl From<(quasar_core::Asset, quasar_core::TabularAsset)> for TableResponse {
-    fn from(pair: (quasar_core::Asset, quasar_core::TabularAsset)) -> Self {
-        Self::from(pair.0)
     }
 }
 
@@ -121,7 +110,12 @@ pub struct ListTablesResponse {
 
 /// Build a `LanceError::InvalidInput` problem when an endpoint requires a
 /// Namespace-shaped id but received Root or a single-segment Domain id.
-fn require_namespace_id_error(id: &str, op: &str, instance: &str) -> ProblemDetails {
+fn require_namespace_id_error(
+    id: &str,
+    op: &str,
+    instance: &str,
+    request_id: &str,
+) -> ProblemDetails {
     LanceError::InvalidInput {
         detail: format!(
             "operation '{op}' on namespace id '{id}' requires a \
@@ -129,7 +123,23 @@ fn require_namespace_id_error(id: &str, op: &str, instance: &str) -> ProblemDeta
         ),
         instance: instance.to_string(),
     }
-    .to_problem_details()
+    .to_problem_details(request_id)
+}
+
+/// Resolve `(offset, limit)` from the Lance list query parameters.
+fn pagination(query_limit: Option<i32>, page_token: Option<&String>) -> (u64, u64) {
+    let limit = query_limit.unwrap_or(100).clamp(1, 1000) as u64;
+    let offset = page_token.and_then(|t| t.parse::<u64>().ok()).unwrap_or(0);
+    (offset, limit)
+}
+
+/// Next page token: produced only when the page is full (DESIGN §5.4).
+fn next_page_token<T>(offset: u64, page: &[T], limit: u64) -> Option<String> {
+    if page.len() as u64 >= limit {
+        Some((offset + page.len() as u64).to_string())
+    } else {
+        None
+    }
 }
 
 // ── Handlers ───────────────────────────────────────────────
@@ -137,25 +147,38 @@ fn require_namespace_id_error(id: &str, op: &str, instance: &str) -> ProblemDeta
 /// POST /lance/v1/namespace/{id}/create
 pub async fn create_namespace(
     State(store): State<Arc<dyn CatalogStore>>,
+    request_id: Option<Extension<String>>,
     Path(id): Path<String>,
     Json(req): Json<CreateNamespaceRequest>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
+    let request_id = request_id_of(request_id);
     let instance = format!("/lance/v1/namespace/{}/create", id);
-    let parsed = parse_namespace_id(&id, &instance).map_err(LanceError::to_problem_details)?;
+    let parsed =
+        parse_namespace_id(&id, &instance).map_err(|e| e.to_problem_details(&request_id))?;
 
-    let (domain, namespace) = match parsed {
+    let (domain, path) = match parsed {
         LanceNamespaceId::Namespace { domain, namespace } => (domain, namespace),
         LanceNamespaceId::Root | LanceNamespaceId::Domain(_) => {
-            return Err(require_namespace_id_error(&id, "create", &instance));
+            return Err(require_namespace_id_error(
+                &id,
+                "create",
+                &instance,
+                &request_id,
+            ));
         }
     };
 
-    validate_name(&namespace)
-        .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
+    validate_namespace_path(&path)
+        .map_err(|e| catalog_error_to_lance(e, &instance).to_problem_details(&request_id))?;
+    // Missing intermediate nodes are created implicitly by the store.
+    let input = CreateNamespace {
+        comment: None,
+        properties: string_map_to_properties(req.properties),
+    };
     let ns = store
-        .create_namespace(&domain, &namespace, None, req.properties)
+        .create_namespace(&domain, &path, input)
         .await
-        .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
+        .map_err(|e| catalog_error_to_lance(e, &instance).to_problem_details(&request_id))?;
 
     Ok((StatusCode::OK, Json(NamespaceResponse::from(ns))))
 }
@@ -163,45 +186,38 @@ pub async fn create_namespace(
 /// GET /lance/v1/namespace/{id}/list
 pub async fn list_namespaces(
     State(store): State<Arc<dyn CatalogStore>>,
+    request_id: Option<Extension<String>>,
     Path(id): Path<String>,
     Query(query): Query<ListNamespacesQuery>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
+    let request_id = request_id_of(request_id);
     let instance = format!("/lance/v1/namespace/{}/list", id);
-    let parsed = parse_namespace_id(&id, &instance).map_err(LanceError::to_problem_details)?;
-    let limit = query.limit.unwrap_or(100).clamp(1, 1000);
-    let offset = query
-        .page_token
-        .as_ref()
-        .and_then(|t| t.parse::<i64>().ok())
-        .unwrap_or(0);
+    let parsed =
+        parse_namespace_id(&id, &instance).map_err(|e| e.to_problem_details(&request_id))?;
+    let (offset, limit) = pagination(query.limit, query.page_token.as_ref());
 
     let namespaces: Vec<NamespaceResponse> = match parsed {
         LanceNamespaceId::Root => store
             .list_domains(offset, limit)
             .await
-            .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?
+            .map_err(|e| catalog_error_to_lance(e, &instance).to_problem_details(&request_id))?
             .into_iter()
             .map(NamespaceResponse::from)
             .collect(),
         LanceNamespaceId::Domain(domain) => store
-            .list_namespaces(&domain, offset, limit)
+            .list_namespaces(&domain, None, offset, limit)
             .await
-            .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?
+            .map_err(|e| catalog_error_to_lance(e, &instance).to_problem_details(&request_id))?
             .into_iter()
             .map(NamespaceResponse::from)
             .collect(),
         LanceNamespaceId::Namespace { .. } => Vec::new(),
     };
 
-    let next_page_token = if namespaces.len() as i32 >= limit {
-        Some((offset + namespaces.len() as i64).to_string())
-    } else {
-        None
-    };
-
+    let token = next_page_token(offset, &namespaces, limit);
     let response = ListNamespacesResponse {
         namespaces,
-        next_page_token,
+        next_page_token: token,
     };
 
     Ok((StatusCode::OK, Json(response)))
@@ -210,21 +226,29 @@ pub async fn list_namespaces(
 /// POST /lance/v1/namespace/{id}/describe
 pub async fn describe_namespace(
     State(store): State<Arc<dyn CatalogStore>>,
+    request_id: Option<Extension<String>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
+    let request_id = request_id_of(request_id);
     let instance = format!("/lance/v1/namespace/{}/describe", id);
-    let parsed = parse_namespace_id(&id, &instance).map_err(LanceError::to_problem_details)?;
-    let (domain, namespace) = match parsed {
+    let parsed =
+        parse_namespace_id(&id, &instance).map_err(|e| e.to_problem_details(&request_id))?;
+    let (domain, path) = match parsed {
         LanceNamespaceId::Namespace { domain, namespace } => (domain, namespace),
         LanceNamespaceId::Root | LanceNamespaceId::Domain(_) => {
-            return Err(require_namespace_id_error(&id, "describe", &instance));
+            return Err(require_namespace_id_error(
+                &id,
+                "describe",
+                &instance,
+                &request_id,
+            ));
         }
     };
 
     let ns = store
-        .get_namespace(&domain, &namespace)
+        .get_namespace(&domain, &path)
         .await
-        .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
+        .map_err(|e| catalog_error_to_lance(e, &instance).to_problem_details(&request_id))?;
 
     Ok((StatusCode::OK, Json(NamespaceResponse::from(ns))))
 }
@@ -232,21 +256,29 @@ pub async fn describe_namespace(
 /// POST /lance/v1/namespace/{id}/drop
 pub async fn drop_namespace(
     State(store): State<Arc<dyn CatalogStore>>,
+    request_id: Option<Extension<String>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
+    let request_id = request_id_of(request_id);
     let instance = format!("/lance/v1/namespace/{}/drop", id);
-    let parsed = parse_namespace_id(&id, &instance).map_err(LanceError::to_problem_details)?;
-    let (domain, namespace) = match parsed {
+    let parsed =
+        parse_namespace_id(&id, &instance).map_err(|e| e.to_problem_details(&request_id))?;
+    let (domain, path) = match parsed {
         LanceNamespaceId::Namespace { domain, namespace } => (domain, namespace),
         LanceNamespaceId::Root | LanceNamespaceId::Domain(_) => {
-            return Err(require_namespace_id_error(&id, "drop", &instance));
+            return Err(require_namespace_id_error(
+                &id,
+                "drop",
+                &instance,
+                &request_id,
+            ));
         }
     };
 
     store
-        .drop_namespace(&domain, &namespace)
+        .delete_namespace(&domain, &path)
         .await
-        .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
+        .map_err(|e| catalog_error_to_lance(e, &instance).to_problem_details(&request_id))?;
 
     Ok(StatusCode::OK)
 }
@@ -254,38 +286,45 @@ pub async fn drop_namespace(
 /// GET /lance/v1/namespace/{id}/table/list
 pub async fn list_tables(
     State(store): State<Arc<dyn CatalogStore>>,
+    request_id: Option<Extension<String>>,
     Path(id): Path<String>,
     Query(query): Query<ListTablesQuery>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
+    let request_id = request_id_of(request_id);
     let instance = format!("/lance/v1/namespace/{}/table/list", id);
-    let parsed = parse_namespace_id(&id, &instance).map_err(LanceError::to_problem_details)?;
-    let (domain, namespace) = match parsed {
+    let parsed =
+        parse_namespace_id(&id, &instance).map_err(|e| e.to_problem_details(&request_id))?;
+    let (domain, path) = match parsed {
         LanceNamespaceId::Namespace { domain, namespace } => (domain, namespace),
         LanceNamespaceId::Root | LanceNamespaceId::Domain(_) => {
-            return Err(require_namespace_id_error(&id, "list_tables", &instance));
+            return Err(require_namespace_id_error(
+                &id,
+                "list_tables",
+                &instance,
+                &request_id,
+            ));
         }
     };
-    let limit = query.limit.unwrap_or(100).clamp(1, 1000);
-    let offset = query
-        .page_token
-        .as_ref()
-        .and_then(|t| t.parse::<i64>().ok())
-        .unwrap_or(0);
+    let (offset, limit) = pagination(query.limit, query.page_token.as_ref());
 
-    let assets = store
-        .list_tabular_assets(&domain, &namespace, Some("lance"), offset, limit)
-        .await
-        .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
-
-    let next_page_token = if assets.len() as i32 >= limit {
-        Some((offset + assets.len() as i64).to_string())
-    } else {
-        None
+    // Endpoint-level protocol isolation: only `lance`-format tables are
+    // visible through the Lance API.
+    let filter = AssetFilter {
+        domain: Some(domain),
+        namespace: Some(path),
+        asset_type: Some("table".to_string()),
+        format: Some("lance".to_string()),
+        ..AssetFilter::default()
     };
+    let assets = store
+        .list_assets(filter, offset, limit)
+        .await
+        .map_err(|e| catalog_error_to_lance(e, &instance).to_problem_details(&request_id))?;
 
+    let token = next_page_token(offset, &assets, limit);
     let response = ListTablesResponse {
         tables: assets.into_iter().map(TableResponse::from).collect(),
-        next_page_token,
+        next_page_token: token,
     };
 
     Ok((StatusCode::OK, Json(response)))
@@ -294,21 +333,32 @@ pub async fn list_tables(
 /// POST /lance/v1/namespace/{id}/exists
 pub async fn namespace_exists(
     State(store): State<Arc<dyn CatalogStore>>,
+    request_id: Option<Extension<String>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
+    let request_id = request_id_of(request_id);
     let instance = format!("/lance/v1/namespace/{}/exists", id);
-    let parsed = parse_namespace_id(&id, &instance).map_err(LanceError::to_problem_details)?;
-    let (domain, namespace) = match parsed {
+    let parsed =
+        parse_namespace_id(&id, &instance).map_err(|e| e.to_problem_details(&request_id))?;
+    let (domain, path) = match parsed {
         LanceNamespaceId::Namespace { domain, namespace } => (domain, namespace),
         LanceNamespaceId::Root | LanceNamespaceId::Domain(_) => {
-            return Err(require_namespace_id_error(&id, "exists", &instance));
+            return Err(require_namespace_id_error(
+                &id,
+                "exists",
+                &instance,
+                &request_id,
+            ));
         }
     };
 
-    let exists = store
-        .namespace_exists(&domain, &namespace)
-        .await
-        .map_err(|e| store_error_to_lance(e, &instance).to_problem_details())?;
+    let exists = match store.get_namespace(&domain, &path).await {
+        Ok(_) => true,
+        Err(quasar_core::CatalogError::NotFound(_)) => false,
+        Err(e) => {
+            return Err(catalog_error_to_lance(e, &instance).to_problem_details(&request_id));
+        }
+    };
 
     Ok((StatusCode::OK, Json(ExistsResponse { exists })))
 }

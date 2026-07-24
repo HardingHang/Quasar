@@ -5,12 +5,52 @@ pub mod table;
 pub mod version;
 
 use axum::{
+    extract::Extension,
     routing::{get, post},
     Router,
 };
 use quasar_core::CatalogStore;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Extract the request id injected by the server middleware as
+/// `Extension<String>`; generate a fresh UUID when the extension is
+/// absent (e.g. in tests).
+pub(crate) fn request_id_of(extension: Option<Extension<String>>) -> String {
+    match extension {
+        Some(Extension(id)) => id,
+        None => uuid::Uuid::new_v4().to_string(),
+    }
+}
+
+/// Convert core JSON properties into the Lance string-map shape. The Lance
+/// write path only accepts string values, so non-string values cannot
+/// appear through this API and are dropped defensively.
+pub(crate) fn properties_to_string_map(
+    properties: Option<serde_json::Value>,
+) -> HashMap<String, String> {
+    match properties {
+        Some(serde_json::Value::Object(map)) => map
+            .into_iter()
+            .filter_map(|(key, value)| value.as_str().map(|s| (key, s.to_string())))
+            .collect(),
+        _ => HashMap::new(),
+    }
+}
+
+/// Convert a Lance string-map into core JSON properties; an empty map is
+/// stored as `None` (no properties).
+pub(crate) fn string_map_to_properties(map: HashMap<String, String>) -> Option<serde_json::Value> {
+    if map.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (key, serde_json::Value::String(value)))
+                .collect(),
+        ))
+    }
+}
 
 /// Configuration for Lance REST Namespace endpoints.
 #[derive(Clone, Default)]

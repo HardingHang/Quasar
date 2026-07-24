@@ -35,8 +35,15 @@ pub fn create_app(pool: Pool) -> Router {
 
 pub fn create_app_with_config(pool: Pool, #[allow(unused_variables)] config: AppConfig) -> Router {
     let store = Arc::new(PgCatalogStore::new(pool.clone()));
-    let metrics_state = quasar_core::MetricsState::default();
-    metrics::init_app_metrics();
+    let metrics_state = metrics::MetricsState::default();
+
+    // Coerce the concrete store into the two trait-object shapes required by
+    // the adapters: lance/unified operate on `CatalogStore`, iceberg on the
+    // narrower `IcebergCatalogStore`.
+    #[cfg(any(feature = "lance", feature = "unified"))]
+    let catalog: Arc<dyn quasar_core::CatalogStore> = store.clone();
+    #[cfg(feature = "iceberg")]
+    let iceberg: Arc<dyn quasar_core::IcebergCatalogStore> = store.clone();
 
     #[allow(unused_mut)]
     let mut router = Router::new()
@@ -46,21 +53,32 @@ pub fn create_app_with_config(pool: Pool, #[allow(unused_variables)] config: App
     #[cfg(feature = "lance")]
     {
         router = router
-            .merge(quasar_adapter::lance::routes())
+            .merge(quasar_adapter::lance::routes().with_state(catalog.clone()))
             .layer(Extension(config.lance));
     }
 
     #[cfg(feature = "iceberg")]
     {
+        // Adapt the server-side registry into the adapter-owned sink so the
+        // adapter never depends on the server crate (layering rule).
+        let commit_metrics = {
+            let on_success = metrics_state.registry.clone();
+            let on_conflict = metrics_state.registry.clone();
+            quasar_adapter::iceberg::CommitMetrics::new(
+                move || on_success.record_iceberg_commit_success(),
+                move || on_conflict.record_iceberg_commit_conflict(),
+            )
+        };
         router = router
-            .merge(quasar_adapter::iceberg::routes())
+            .merge(quasar_adapter::iceberg::routes().with_state(iceberg))
+            .layer(Extension(commit_metrics))
             .layer(Extension(config.iceberg));
     }
 
     #[cfg(feature = "unified")]
     {
         router = router
-            .merge(quasar_adapter::unified::routes())
+            .merge(quasar_adapter::unified::routes().with_state(catalog))
             .layer(Extension(config.unified));
     }
 
@@ -69,5 +87,4 @@ pub fn create_app_with_config(pool: Pool, #[allow(unused_variables)] config: App
         .layer(middleware::from_fn(metrics::track_requests))
         .layer(TraceLayer::new_for_http())
         .layer(Extension(metrics_state))
-        .with_state(store)
 }

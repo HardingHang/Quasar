@@ -1,12 +1,8 @@
-//! V3 Unified Domain management handlers (`/unified/v1/domains*`).
+//! Domain management handlers (`/unified/v1/domains*`).
 //!
-//! Domain management is Quasar-specific: protocol adapters such as
-//! Iceberg and Lance cannot create or modify Domains. Only the Unified
-//! API exposes Domain CRUD per `docs/v3/V3_DESIGN.md` §4.1.3 and §8.3.
-//!
-//! Responses redact `storage_config` at the structural level (see
-//! `DomainResponse`): the field is never serialized because it may
-//! contain credentials or secret references (§3.1 invariant 8).
+//! Domains have no native protocol; the Unified API owns their full
+//! lifecycle (REQUIREMENTS §4.1). Responses structurally redact
+//! `storage_config` (see `DomainResponse`).
 
 use axum::{
     extract::{Extension, Path, Query, State},
@@ -14,177 +10,160 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use quasar_core::{CatalogStore, DomainPatch};
+use quasar_core::{validate_name, CatalogStore, CreateDomain, DomainPatch, PatchField};
 use std::sync::Arc;
 
 use super::dto::{
-    CreateDomainRequest, DomainResponse, ListDomainsResponse, PageSizeError, PaginationQuery,
+    next_page_token, CreateDomainRequest, DomainResponse, ListResponse, PaginationQuery,
     UpdateDomainRequest,
 };
-use super::error::{map_domain_error, UnifiedError, UnifiedErrorCode};
-use quasar_core::validate_name;
+use super::error::{map_catalog_error, UnifiedError, UnifiedErrorCode};
+use super::request_id_of;
 
 const BASE_INSTANCE: &str = "/unified/v1/domains";
 
-fn domain_to_response(domain: quasar_core::Domain) -> DomainResponse {
-    DomainResponse {
-        id: domain.id.to_string(),
-        name: domain.name,
-        comment: domain.comment,
-        properties: domain.properties,
-        storage_type: domain.storage_type,
-        warehouse: domain.warehouse,
-        owner: domain.owner,
-        created_at: domain.created_at.to_rfc3339(),
-        updated_at: domain.updated_at.to_rfc3339(),
-    }
-}
+/// Allowed `storage_type` values (DESIGN §3.2 `domains` CHECK constraint).
+const VALID_STORAGE_TYPES: [&str; 4] = ["s3", "minio", "hdfs", "local"];
 
 fn instance_for(name: &str) -> String {
     format!("{}/{}", BASE_INSTANCE, name)
 }
 
-fn map_page_size_error(err: PageSizeError, instance: &str, request_id: &str) -> UnifiedError {
-    match err {
-        PageSizeError::Invalid => UnifiedError::new(
-            UnifiedErrorCode::InvalidInput,
-            "pageSize must be greater than 0",
-            instance,
-            request_id,
-        ),
-        PageSizeError::TooLarge => UnifiedError::new(
-            UnifiedErrorCode::PageSizeTooLarge,
+fn validate_storage_type(
+    storage_type: &str,
+    instance: &str,
+    request_id: &str,
+) -> Result<(), UnifiedError> {
+    if VALID_STORAGE_TYPES.contains(&storage_type) {
+        Ok(())
+    } else {
+        Err(UnifiedError::new(
+            UnifiedErrorCode::ValidationFailed,
             format!(
-                "pageSize must not exceed {}",
-                PaginationQuery::MAX_PAGE_SIZE
+                "invalid storage_type '{}', expected one of: {}",
+                storage_type,
+                VALID_STORAGE_TYPES.join(", ")
             ),
             instance,
             request_id,
-        ),
+        ))
     }
 }
 
 /// GET /unified/v1/domains
 pub async fn list_domains(
     State(store): State<Arc<dyn CatalogStore>>,
-    Extension(request_id): Extension<String>,
+    request_id: Option<Extension<String>>,
     Query(query): Query<PaginationQuery>,
 ) -> Result<impl IntoResponse, UnifiedError> {
-    let page_size = query
-        .resolved_page_size()
-        .map_err(|e| map_page_size_error(e, BASE_INSTANCE, request_id.as_str()))?;
-
-    let offset = query.resolved_offset().map_err(|_| {
-        UnifiedError::new(
-            UnifiedErrorCode::InvalidPageToken,
-            "invalid page token",
-            BASE_INSTANCE,
-            request_id.clone(),
-        )
-    })?;
+    let request_id = request_id_of(request_id);
+    let (offset, limit) = query
+        .resolve()
+        .map_err(|e| map_catalog_error(e, BASE_INSTANCE, &request_id))?;
 
     let domains = store
-        .list_domains(offset, page_size)
+        .list_domains(offset, limit)
         .await
-        .map_err(|e| map_domain_error(e, BASE_INSTANCE, &request_id))?;
+        .map_err(|e| map_catalog_error(e, BASE_INSTANCE, &request_id))?;
 
-    let next_page_token = if domains.len() as i32 >= page_size {
-        Some(PaginationQuery::encode_token(offset + domains.len() as i64))
-    } else {
-        None
-    };
-
-    Ok((
-        StatusCode::OK,
-        Json(ListDomainsResponse {
-            domains: domains.into_iter().map(domain_to_response).collect(),
-            next_page_token,
-        }),
-    ))
+    let token = next_page_token(offset, &domains, limit);
+    Ok(Json(ListResponse::new(
+        domains.into_iter().map(DomainResponse::from).collect(),
+        token,
+    )))
 }
 
 /// POST /unified/v1/domains
 pub async fn create_domain(
     State(store): State<Arc<dyn CatalogStore>>,
-    Extension(request_id): Extension<String>,
+    request_id: Option<Extension<String>>,
     Json(req): Json<CreateDomainRequest>,
 ) -> Result<impl IntoResponse, UnifiedError> {
-    validate_name(&req.name).map_err(|e| map_domain_error(e, BASE_INSTANCE, &request_id))?;
+    let request_id = request_id_of(request_id);
+    validate_name(&req.name).map_err(|e| map_catalog_error(e, BASE_INSTANCE, &request_id))?;
+    if let Some(ref storage_type) = req.storage_type {
+        validate_storage_type(storage_type, BASE_INSTANCE, &request_id)?;
+    }
+
+    let input = CreateDomain {
+        name: req.name,
+        comment: req.comment,
+        properties: req.properties,
+        storage_type: req.storage_type,
+        storage_config: req.storage_config,
+        warehouse: req.warehouse,
+    };
 
     let domain = store
-        .create_domain(
-            &req.name,
-            req.comment,
-            req.properties,
-            req.storage_type,
-            req.storage_config.unwrap_or(serde_json::Value::Null),
-            req.warehouse,
-            req.owner,
-        )
+        .create_domain(input)
         .await
-        .map_err(|e| map_domain_error(e, BASE_INSTANCE, &request_id))?;
+        .map_err(|e| map_catalog_error(e, BASE_INSTANCE, &request_id))?;
 
-    Ok((StatusCode::CREATED, Json(domain_to_response(domain))))
+    Ok((StatusCode::CREATED, Json(DomainResponse::from(domain))))
 }
 
 /// GET /unified/v1/domains/{domain}
 pub async fn get_domain(
     State(store): State<Arc<dyn CatalogStore>>,
-    Extension(request_id): Extension<String>,
+    request_id: Option<Extension<String>>,
     Path(domain): Path<String>,
 ) -> Result<impl IntoResponse, UnifiedError> {
+    let request_id = request_id_of(request_id);
     let instance = instance_for(&domain);
-    validate_name(&domain).map_err(|e| map_domain_error(e, &instance, &request_id))?;
+    validate_name(&domain).map_err(|e| map_catalog_error(e, &instance, &request_id))?;
 
-    let result = store
+    let domain = store
         .get_domain(&domain)
         .await
-        .map_err(|e| map_domain_error(e, &instance, &request_id))?;
+        .map_err(|e| map_catalog_error(e, &instance, &request_id))?;
 
-    Ok((StatusCode::OK, Json(domain_to_response(result))))
-}
-
-/// DELETE /unified/v1/domains/{domain}
-pub async fn drop_domain(
-    State(store): State<Arc<dyn CatalogStore>>,
-    Extension(request_id): Extension<String>,
-    Path(domain): Path<String>,
-) -> Result<impl IntoResponse, UnifiedError> {
-    let instance = instance_for(&domain);
-    validate_name(&domain).map_err(|e| map_domain_error(e, &instance, &request_id))?;
-
-    store
-        .drop_domain(&domain)
-        .await
-        .map_err(|e| map_domain_error(e, &instance, &request_id))?;
-
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(DomainResponse::from(domain)))
 }
 
 /// PATCH /unified/v1/domains/{domain}
 pub async fn update_domain(
     State(store): State<Arc<dyn CatalogStore>>,
-    Extension(request_id): Extension<String>,
+    request_id: Option<Extension<String>>,
     Path(domain): Path<String>,
     Json(req): Json<UpdateDomainRequest>,
 ) -> Result<impl IntoResponse, UnifiedError> {
+    let request_id = request_id_of(request_id);
     let instance = instance_for(&domain);
-    validate_name(&domain).map_err(|e| map_domain_error(e, &instance, &request_id))?;
+    validate_name(&domain).map_err(|e| map_catalog_error(e, &instance, &request_id))?;
+    if let PatchField::Set(ref storage_type) = req.storage_type {
+        validate_storage_type(storage_type, &instance, &request_id)?;
+    }
 
     let patch = DomainPatch {
         comment: req.comment,
-        property_removals: req.removals,
-        property_updates: req.updates,
+        properties: req.properties,
         storage_type: req.storage_type,
         storage_config: req.storage_config,
         warehouse: req.warehouse,
-        owner: req.owner,
     };
 
     let updated = store
         .update_domain(&domain, patch)
         .await
-        .map_err(|e| map_domain_error(e, &instance, &request_id))?;
+        .map_err(|e| map_catalog_error(e, &instance, &request_id))?;
 
-    Ok((StatusCode::OK, Json(domain_to_response(updated))))
+    Ok(Json(DomainResponse::from(updated)))
+}
+
+/// DELETE /unified/v1/domains/{domain}
+pub async fn delete_domain(
+    State(store): State<Arc<dyn CatalogStore>>,
+    request_id: Option<Extension<String>>,
+    Path(domain): Path<String>,
+) -> Result<impl IntoResponse, UnifiedError> {
+    let request_id = request_id_of(request_id);
+    let instance = instance_for(&domain);
+    validate_name(&domain).map_err(|e| map_catalog_error(e, &instance, &request_id))?;
+
+    store
+        .delete_domain(&domain)
+        .await
+        .map_err(|e| map_catalog_error(e, &instance, &request_id))?;
+
+    Ok(StatusCode::NO_CONTENT)
 }

@@ -1,15 +1,20 @@
 use axum::{
-    extract::{Json, Path, State},
+    extract::{Extension, Json, Path, State},
     http::StatusCode,
     response::IntoResponse,
 };
-use quasar_core::CatalogStore;
+use quasar_core::{CatalogError, CatalogStore, CreateVersion};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::error::{store_error_to_lance_version, LanceError, ProblemDetails};
+use super::error::{catalog_error_to_lance_table, LanceError, ProblemDetails};
 use super::id::parse_table_id;
+use super::request_id_of;
+use super::table::{lance_table_by_name, parse_version_key};
+
+/// Upper bound for the unpaginated version list; fits the storage layer's
+/// `u64 -> i64` limit conversion.
+const VERSION_LIST_LIMIT: u64 = i64::MAX as u64;
 
 // ── Request DTOs ───────────────────────────────────────────
 
@@ -17,8 +22,6 @@ use super::id::parse_table_id;
 pub struct CreateVersionRequest {
     pub version: i64,
     pub manifest_path: String,
-    #[serde(default)]
-    pub naming_scheme: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -44,47 +47,50 @@ pub struct ListVersionsResponse {
 /// POST /lance/v1/table/{id}/version/create
 pub async fn create_version(
     State(store): State<Arc<dyn CatalogStore>>,
+    request_id: Option<Extension<String>>,
     Path(id): Path<String>,
     Json(req): Json<CreateVersionRequest>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
+    let request_id = request_id_of(request_id);
     let instance = format!("/lance/v1/table/{}/version/create", id);
-    let parsed = parse_table_id(&id, &instance).map_err(LanceError::to_problem_details)?;
+    let parsed = parse_table_id(&id, &instance).map_err(|e| e.to_problem_details(&request_id))?;
 
-    // Resolve asset id first; V3 version operations are keyed on asset_id.
-    let (asset, _) = store
-        .get_tabular_asset(&parsed.domain, &parsed.namespace, "lance", &parsed.table)
+    // Version mirroring is keyed on asset_id; resolve the Lance table first.
+    let asset = lance_table_by_name(&store, &parsed, &instance)
         .await
-        .map_err(|e| store_error_to_lance_version(e, &instance).to_problem_details())?;
+        .map_err(|e| e.to_problem_details(&request_id))?;
 
-    let version_key = req.version.to_string();
-    let (version, tabular_version) = store
-        .create_tabular_version(
-            asset.id,
-            &version_key,
-            Some(req.version),
-            None,
-            &req.manifest_path,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .map_err(|e| store_error_to_lance_version(e, &instance).to_problem_details())?;
-
-    let version_id = version.version_order.ok_or_else(|| {
-        tracing::error!(asset_id = %asset.id, version_key = %version.version_key,
-            "lance create_version returned version without version_order");
-        LanceError::InternalError {
-            detail: "An internal error occurred".to_string(),
-            instance: instance.clone(),
+    // Lance does not go through CAS (DESIGN §6.4): the store inserts the
+    // mirrored version and updates assets.current_version_key in one
+    // transaction; a duplicate native version number violates
+    // UNIQUE(asset_id, version_key) and surfaces as 409. Link the version
+    // chain to the current version so the single-root constraint holds.
+    let previous_version_id = match store.get_latest_version(asset.id).await {
+        Ok(current) => Some(current.id),
+        Err(CatalogError::NotFound(_)) => None,
+        Err(e) => {
+            return Err(catalog_error_to_lance_table(e, &instance).to_problem_details(&request_id));
         }
-        .to_problem_details()
-    })?;
+    };
+
+    let input = CreateVersion {
+        asset_id: asset.id,
+        version_key: req.version.to_string(),
+        version_properties: None,
+        content_inline: None,
+        content_pointer: Some(req.manifest_path.clone()),
+        previous_version_id,
+    };
+    store
+        .create_version(input)
+        .await
+        .map_err(|e| catalog_error_to_lance_table(e, &instance).to_problem_details(&request_id))?;
 
     Ok((
         StatusCode::OK,
         Json(VersionResponse {
-            version: version_id,
-            manifest_path: tabular_version.metadata_location,
+            version: req.version,
+            manifest_path: req.manifest_path,
         }),
     ))
 }
@@ -92,35 +98,30 @@ pub async fn create_version(
 /// GET /lance/v1/table/{id}/version/list
 pub async fn list_versions(
     State(store): State<Arc<dyn CatalogStore>>,
+    request_id: Option<Extension<String>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
+    let request_id = request_id_of(request_id);
     let instance = format!("/lance/v1/table/{}/version/list", id);
-    let parsed = parse_table_id(&id, &instance).map_err(LanceError::to_problem_details)?;
+    let parsed = parse_table_id(&id, &instance).map_err(|e| e.to_problem_details(&request_id))?;
 
-    let (asset, _) = store
-        .get_tabular_asset(&parsed.domain, &parsed.namespace, "lance", &parsed.table)
+    let asset = lance_table_by_name(&store, &parsed, &instance)
         .await
-        .map_err(|e| store_error_to_lance_version(e, &instance).to_problem_details())?;
+        .map_err(|e| e.to_problem_details(&request_id))?;
 
+    // The endpoint predates token pagination; fetch the full history and
+    // order by the native version number (storage orders by created_at).
     let versions = store
-        .list_tabular_versions(asset.id)
+        .list_versions(asset.id, 0, VERSION_LIST_LIMIT)
         .await
-        .map_err(|e| store_error_to_lance_version(e, &instance).to_problem_details())?;
+        .map_err(|e| catalog_error_to_lance_table(e, &instance).to_problem_details(&request_id))?;
 
-    let version_ids = versions
-        .into_iter()
-        .map(|(v, _)| {
-            v.version_order.ok_or_else(|| {
-                tracing::error!(asset_id = %asset.id, version_key = %v.version_key,
-                    "lance list_versions encountered version without version_order");
-                LanceError::InternalError {
-                    detail: "An internal error occurred".to_string(),
-                    instance: instance.clone(),
-                }
-                .to_problem_details()
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut version_ids = versions
+        .iter()
+        .map(|v| parse_version_key(&v.version_key, &asset, &instance))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_problem_details(&request_id))?;
+    version_ids.sort_unstable();
 
     Ok((
         StatusCode::OK,
@@ -133,38 +134,40 @@ pub async fn list_versions(
 /// POST /lance/v1/table/{id}/version/describe
 pub async fn describe_version(
     State(store): State<Arc<dyn CatalogStore>>,
+    request_id: Option<Extension<String>>,
     Path(id): Path<String>,
     Json(req): Json<DescribeVersionRequest>,
 ) -> Result<impl IntoResponse, ProblemDetails> {
+    let request_id = request_id_of(request_id);
     let instance = format!("/lance/v1/table/{}/version/describe", id);
-    let parsed = parse_table_id(&id, &instance).map_err(LanceError::to_problem_details)?;
+    let parsed = parse_table_id(&id, &instance).map_err(|e| e.to_problem_details(&request_id))?;
 
-    let (asset, _) = store
-        .get_tabular_asset(&parsed.domain, &parsed.namespace, "lance", &parsed.table)
+    let asset = lance_table_by_name(&store, &parsed, &instance)
         .await
-        .map_err(|e| store_error_to_lance_version(e, &instance).to_problem_details())?;
+        .map_err(|e| e.to_problem_details(&request_id))?;
 
-    let version_key = req.version.to_string();
-    let (version, tabular_version) = store
-        .get_tabular_version(asset.id, &version_key)
+    let version = store
+        .get_version(asset.id, &req.version.to_string())
         .await
-        .map_err(|e| store_error_to_lance_version(e, &instance).to_problem_details())?;
+        .map_err(|e| catalog_error_to_lance_table(e, &instance).to_problem_details(&request_id))?;
 
-    let version_id = version.version_order.ok_or_else(|| {
+    // The manifest path is mirrored as content_pointer; Lance versions
+    // always carry one.
+    let manifest_path = version.content_pointer.ok_or_else(|| {
         tracing::error!(asset_id = %asset.id, version_key = %version.version_key,
-            "lance describe_version returned version without version_order");
+            "lance version missing content_pointer");
         LanceError::InternalError {
             detail: "An internal error occurred".to_string(),
             instance: instance.clone(),
         }
-        .to_problem_details()
+        .to_problem_details(&request_id)
     })?;
 
     Ok((
         StatusCode::OK,
         Json(VersionResponse {
-            version: version_id,
-            manifest_path: tabular_version.metadata_location,
+            version: req.version,
+            manifest_path,
         }),
     ))
 }

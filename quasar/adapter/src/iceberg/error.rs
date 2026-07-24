@@ -2,7 +2,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use quasar_core::StoreError;
+use quasar_core::CatalogError;
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -30,6 +30,7 @@ impl IntoResponse for ErrorResponse {
 pub enum IcebergError {
     NoSuchNamespaceException { message: String },
     NamespaceAlreadyExistsException { message: String },
+    NamespaceNotEmptyException { message: String },
     NoSuchTableException { message: String },
     TableAlreadyExistsException { message: String },
     BadRequestException { message: String },
@@ -40,11 +41,9 @@ pub enum IcebergError {
     MetadataNotFoundException { message: String },
     NotImplementedException { message: String },
     NoSuchWarehouseException { message: String },
-    // V4.2 additions
     NoSuchViewException { message: String },
     ViewAlreadyExistsException { message: String },
     AlreadyExistsException { message: String },
-    NoSuchSnapshotException { message: String },
 }
 
 impl IcebergError {
@@ -56,6 +55,11 @@ impl IcebergError {
             IcebergError::NamespaceAlreadyExistsException { message } => (
                 message.clone(),
                 "NamespaceAlreadyExistsException".to_string(),
+                409,
+            ),
+            IcebergError::NamespaceNotEmptyException { message } => (
+                message.clone(),
+                "NamespaceNotEmptyException".to_string(),
                 409,
             ),
             IcebergError::NoSuchTableException { message } => {
@@ -105,9 +109,6 @@ impl IcebergError {
             IcebergError::AlreadyExistsException { message } => {
                 (message.clone(), "AlreadyExistsException".to_string(), 409)
             }
-            IcebergError::NoSuchSnapshotException { message } => {
-                (message.clone(), "NoSuchSnapshotException".to_string(), 404)
-            }
         };
 
         ErrorResponse {
@@ -126,90 +127,69 @@ impl IntoResponse for IcebergError {
     }
 }
 
-pub fn store_error_to_iceberg_namespace(err: StoreError) -> IcebergError {
+/// Shared tail of the CatalogError mapping: variants whose mapping does
+/// not depend on the endpoint context. `Transient` and `Internal` contexts
+/// are logged and sanitized before reaching the client (DESIGN §7.3).
+fn map_common(err: CatalogError) -> Option<IcebergError> {
     match err {
-        StoreError::NotFound(msg) => IcebergError::NoSuchNamespaceException { message: msg },
-        StoreError::AlreadyExists(msg) => {
-            IcebergError::NamespaceAlreadyExistsException { message: msg }
+        CatalogError::Validation(msg) => Some(IcebergError::BadRequestException { message: msg }),
+        CatalogError::Transient(msg) => {
+            tracing::warn!(error = %msg, "transient store error");
+            Some(IcebergError::ServiceUnavailableException {
+                message: "service temporarily unavailable".to_string(),
+            })
         }
-        StoreError::NamespaceNotEmpty { namespace } => IcebergError::CommitFailedException {
-            message: format!("namespace '{}' is not empty", namespace),
-        },
-        StoreError::DomainNotEmpty { domain } => IcebergError::CommitFailedException {
-            message: format!("domain '{}' is not empty", domain),
-        },
-        StoreError::Conflict { msg } => {
-            IcebergError::NamespaceAlreadyExistsException { message: msg }
-        }
-        StoreError::InvalidInput(msg) => IcebergError::BadRequestException { message: msg },
-        StoreError::DatabaseUnavailable { .. } => IcebergError::ServiceUnavailableException {
-            message: "service temporarily unavailable".to_string(),
-        },
-        StoreError::Timeout { operation } => IcebergError::TimeoutException {
-            message: format!("operation '{}' timed out", operation),
-        },
-        StoreError::Internal { msg, source } => {
-            tracing::error!(error = ?source, %msg, "internal store error");
-            IcebergError::InternalServerError {
+        CatalogError::Internal(msg) => {
+            tracing::error!(error = %msg, "internal store error");
+            Some(IcebergError::InternalServerError {
                 message: "An internal error occurred".to_string(),
-            }
+            })
         }
+        _ => None,
     }
 }
 
-pub fn store_error_to_iceberg_table(err: StoreError) -> IcebergError {
+/// Map a `CatalogError` to an `IcebergError` in the Namespace endpoint
+/// context (DESIGN §7.5).
+pub fn catalog_error_to_iceberg_namespace(err: CatalogError) -> IcebergError {
     match err {
-        StoreError::NotFound(msg) => IcebergError::NoSuchTableException { message: msg },
-        StoreError::AlreadyExists(msg) => {
+        CatalogError::NotFound(msg) => IcebergError::NoSuchNamespaceException { message: msg },
+        CatalogError::AlreadyExists(msg) | CatalogError::Conflict(msg) => {
+            IcebergError::NamespaceAlreadyExistsException { message: msg }
+        }
+        other => map_common(other).unwrap_or(IcebergError::InternalServerError {
+            message: "An internal error occurred".to_string(),
+        }),
+    }
+}
+
+/// Map a `CatalogError` to an `IcebergError` in the Table endpoint context:
+/// a Conflict (CAS failure) reads as CommitFailedException.
+pub fn catalog_error_to_iceberg_table(err: CatalogError) -> IcebergError {
+    match err {
+        CatalogError::NotFound(msg) => IcebergError::NoSuchTableException { message: msg },
+        CatalogError::AlreadyExists(msg) => {
             IcebergError::TableAlreadyExistsException { message: msg }
         }
-        StoreError::NamespaceNotEmpty { namespace } => IcebergError::CommitFailedException {
-            message: format!("namespace '{}' is not empty", namespace),
-        },
-        StoreError::DomainNotEmpty { domain } => IcebergError::CommitFailedException {
-            message: format!("domain '{}' is not empty", domain),
-        },
-        StoreError::Conflict { msg } => IcebergError::CommitFailedException { message: msg },
-        StoreError::InvalidInput(msg) => IcebergError::BadRequestException { message: msg },
-        StoreError::DatabaseUnavailable { .. } => IcebergError::ServiceUnavailableException {
-            message: "service temporarily unavailable".to_string(),
-        },
-        StoreError::Timeout { operation } => IcebergError::TimeoutException {
-            message: format!("operation '{}' timed out", operation),
-        },
-        StoreError::Internal { msg, source } => {
-            tracing::error!(error = ?source, %msg, "internal store error");
-            IcebergError::InternalServerError {
-                message: "An internal error occurred".to_string(),
-            }
-        }
+        CatalogError::Conflict(msg) => IcebergError::CommitFailedException { message: msg },
+        other => map_common(other).unwrap_or(IcebergError::InternalServerError {
+            message: "An internal error occurred".to_string(),
+        }),
     }
 }
 
-pub fn store_error_to_iceberg_view(err: StoreError) -> IcebergError {
+/// Map a `CatalogError` to an `IcebergError` in the View endpoint context:
+/// a Conflict (CAS failure) reads as CommitFailedException.
+pub fn catalog_error_to_iceberg_view(err: CatalogError) -> IcebergError {
     match err {
-        StoreError::NotFound(msg) => IcebergError::NoSuchViewException { message: msg },
-        StoreError::AlreadyExists(msg) => IcebergError::ViewAlreadyExistsException { message: msg },
-        StoreError::NamespaceNotEmpty { namespace } => IcebergError::CommitFailedException {
-            message: format!("namespace '{}' is not empty", namespace),
-        },
-        StoreError::DomainNotEmpty { domain } => IcebergError::CommitFailedException {
-            message: format!("domain '{}' is not empty", domain),
-        },
-        StoreError::Conflict { msg } => IcebergError::CommitFailedException { message: msg },
-        StoreError::InvalidInput(msg) => IcebergError::BadRequestException { message: msg },
-        StoreError::DatabaseUnavailable { .. } => IcebergError::ServiceUnavailableException {
-            message: "service temporarily unavailable".to_string(),
-        },
-        StoreError::Timeout { operation } => IcebergError::TimeoutException {
-            message: format!("operation '{}' timed out", operation),
-        },
-        StoreError::Internal { msg, source } => {
-            tracing::error!(error = ?source, %msg, "internal store error");
-            IcebergError::InternalServerError {
-                message: "An internal error occurred".to_string(),
-            }
+        CatalogError::NotFound(msg) => IcebergError::NoSuchViewException { message: msg },
+        CatalogError::AlreadyExists(msg) => {
+            IcebergError::ViewAlreadyExistsException { message: msg }
         }
+        CatalogError::Conflict(msg) => IcebergError::CommitFailedException { message: msg },
+        other => map_common(other).unwrap_or(IcebergError::InternalServerError {
+            message: "An internal error occurred".to_string(),
+        }),
     }
 }
 
@@ -328,15 +308,11 @@ mod tests {
     #[test]
     fn test_iceberg_error_not_implemented_to_response() {
         let err = IcebergError::NotImplementedException {
-            message: "purgeRequested=true is not supported in V3".to_string(),
+            message: "cross-namespace rename is not supported".to_string(),
         };
         let resp = err.to_error_response();
         assert_eq!(resp.error.error_type, "NotImplementedException");
         assert_eq!(resp.error.code, 501);
-        assert_eq!(
-            resp.error.message,
-            "purgeRequested=true is not supported in V3"
-        );
     }
 
     #[test]
@@ -356,128 +332,91 @@ mod tests {
     }
 
     #[test]
-    fn test_store_error_to_iceberg_namespace_mapping() {
+    fn test_catalog_error_to_iceberg_namespace_mapping() {
         assert!(matches!(
-            store_error_to_iceberg_namespace(StoreError::NotFound("foo".into())),
+            catalog_error_to_iceberg_namespace(CatalogError::NotFound("foo".into())),
             IcebergError::NoSuchNamespaceException { message } if message == "foo"
         ));
         assert!(matches!(
-            store_error_to_iceberg_namespace(StoreError::AlreadyExists("foo".into())),
+            catalog_error_to_iceberg_namespace(CatalogError::AlreadyExists("foo".into())),
             IcebergError::NamespaceAlreadyExistsException { message } if message == "foo"
         ));
         assert!(matches!(
-            store_error_to_iceberg_namespace(StoreError::Conflict { msg: "foo".into() }),
+            catalog_error_to_iceberg_namespace(CatalogError::Conflict("foo".into())),
             IcebergError::NamespaceAlreadyExistsException { message } if message == "foo"
         ));
         assert!(matches!(
-            store_error_to_iceberg_namespace(StoreError::InvalidInput("bad".into())),
+            catalog_error_to_iceberg_namespace(CatalogError::Validation("bad".into())),
             IcebergError::BadRequestException { message } if message == "bad"
         ));
         assert!(matches!(
-            store_error_to_iceberg_namespace(StoreError::Internal {
-                msg: "oops".into(),
-                source: None
-            }),
+            catalog_error_to_iceberg_namespace(CatalogError::Internal("oops".into())),
             IcebergError::InternalServerError { message } if message == "An internal error occurred"
         ));
         assert!(matches!(
-            store_error_to_iceberg_namespace(StoreError::NamespaceNotEmpty {
-                namespace: "prod".into()
-            }),
-            IcebergError::CommitFailedException { message } if message.contains("'prod'")
-        ));
-        assert!(matches!(
-            store_error_to_iceberg_namespace(StoreError::DatabaseUnavailable { source: None }),
+            catalog_error_to_iceberg_namespace(CatalogError::Transient("oops".into())),
             IcebergError::ServiceUnavailableException { message } if message == "service temporarily unavailable"
-        ));
-        assert!(matches!(
-            store_error_to_iceberg_namespace(StoreError::Timeout {
-                operation: "list_namespaces".into()
-            }),
-            IcebergError::TimeoutException { message } if message.contains("list_namespaces")
         ));
     }
 
     #[test]
-    fn test_store_error_to_iceberg_table_mapping() {
+    fn test_catalog_error_to_iceberg_table_mapping() {
         assert!(matches!(
-            store_error_to_iceberg_table(StoreError::NotFound("bar".into())),
+            catalog_error_to_iceberg_table(CatalogError::NotFound("bar".into())),
             IcebergError::NoSuchTableException { message } if message == "bar"
         ));
         assert!(matches!(
-            store_error_to_iceberg_table(StoreError::AlreadyExists("bar".into())),
+            catalog_error_to_iceberg_table(CatalogError::AlreadyExists("bar".into())),
             IcebergError::TableAlreadyExistsException { message } if message == "bar"
         ));
         assert!(matches!(
-            store_error_to_iceberg_table(StoreError::Conflict {
-                msg: "conflict".into()
-            }),
+            catalog_error_to_iceberg_table(CatalogError::Conflict("conflict".into())),
             IcebergError::CommitFailedException { message } if message == "conflict"
         ));
         assert!(matches!(
-            store_error_to_iceberg_table(StoreError::InvalidInput("bad".into())),
+            catalog_error_to_iceberg_table(CatalogError::Validation("bad".into())),
             IcebergError::BadRequestException { message } if message == "bad"
         ));
         assert!(matches!(
-            store_error_to_iceberg_table(StoreError::Internal {
-                msg: "oops".into(),
-                source: None
-            }),
+            catalog_error_to_iceberg_table(CatalogError::Internal("oops".into())),
             IcebergError::InternalServerError { message } if message == "An internal error occurred"
         ));
         assert!(matches!(
-            store_error_to_iceberg_table(StoreError::DatabaseUnavailable { source: None }),
+            catalog_error_to_iceberg_table(CatalogError::Transient("oops".into())),
             IcebergError::ServiceUnavailableException { message } if message == "service temporarily unavailable"
-        ));
-        assert!(matches!(
-            store_error_to_iceberg_table(StoreError::Timeout {
-                operation: "load_table".into()
-            }),
-            IcebergError::TimeoutException { message } if message.contains("load_table")
         ));
     }
 
     #[test]
-    fn test_store_error_to_iceberg_view_mapping() {
+    fn test_catalog_error_to_iceberg_view_mapping() {
         assert!(matches!(
-            store_error_to_iceberg_view(StoreError::NotFound("bar".into())),
+            catalog_error_to_iceberg_view(CatalogError::NotFound("bar".into())),
             IcebergError::NoSuchViewException { message } if message == "bar"
         ));
         assert!(matches!(
-            store_error_to_iceberg_view(StoreError::AlreadyExists("bar".into())),
+            catalog_error_to_iceberg_view(CatalogError::AlreadyExists("bar".into())),
             IcebergError::ViewAlreadyExistsException { message } if message == "bar"
         ));
         assert!(matches!(
-            store_error_to_iceberg_view(StoreError::Conflict {
-                msg: "conflict".into()
-            }),
+            catalog_error_to_iceberg_view(CatalogError::Conflict("conflict".into())),
             IcebergError::CommitFailedException { message } if message == "conflict"
         ));
         assert!(matches!(
-            store_error_to_iceberg_view(StoreError::InvalidInput("bad".into())),
+            catalog_error_to_iceberg_view(CatalogError::Validation("bad".into())),
             IcebergError::BadRequestException { message } if message == "bad"
         ));
         assert!(matches!(
-            store_error_to_iceberg_view(StoreError::Internal {
-                msg: "oops".into(),
-                source: None
-            }),
+            catalog_error_to_iceberg_view(CatalogError::Internal("oops".into())),
             IcebergError::InternalServerError { message } if message == "An internal error occurred"
         ));
         assert!(matches!(
-            store_error_to_iceberg_view(StoreError::DatabaseUnavailable { source: None }),
+            catalog_error_to_iceberg_view(CatalogError::Transient("oops".into())),
             IcebergError::ServiceUnavailableException { message } if message == "service temporarily unavailable"
-        ));
-        assert!(matches!(
-            store_error_to_iceberg_view(StoreError::Timeout {
-                operation: "load_view".into()
-            }),
-            IcebergError::TimeoutException { message } if message.contains("load_view")
         ));
     }
 
     #[test]
-    fn test_v4_2_error_variants_to_response() {
+    fn test_view_error_variants_to_response() {
         let err = IcebergError::NoSuchViewException {
             message: "View not found".to_string(),
         };
@@ -498,12 +437,19 @@ mod tests {
         let resp = err.to_error_response();
         assert_eq!(resp.error.error_type, "AlreadyExistsException");
         assert_eq!(resp.error.code, 409);
+    }
 
-        let err = IcebergError::NoSuchSnapshotException {
-            message: "Snapshot not found".to_string(),
-        };
+    #[test]
+    fn internal_and_transient_messages_are_sanitized() {
+        let err =
+            catalog_error_to_iceberg_table(CatalogError::Internal("db password is hunter2".into()));
         let resp = err.to_error_response();
-        assert_eq!(resp.error.error_type, "NoSuchSnapshotException");
-        assert_eq!(resp.error.code, 404);
+        assert!(!resp.error.message.contains("hunter2"));
+
+        let err = catalog_error_to_iceberg_table(CatalogError::Transient(
+            "pool at postgres://secret".into(),
+        ));
+        let resp = err.to_error_response();
+        assert!(!resp.error.message.contains("secret"));
     }
 }

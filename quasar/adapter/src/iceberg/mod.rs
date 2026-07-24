@@ -1,12 +1,9 @@
-#[cfg(test)]
-pub mod crate_validation;
+pub mod dispatch;
 pub mod dto;
 pub mod error;
 pub mod metadata;
 pub mod namespace;
-pub mod scan_planning;
 pub mod table;
-pub mod table_metadata;
 pub mod view;
 pub mod view_metadata;
 
@@ -14,10 +11,40 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use quasar_core::CatalogStore;
+use quasar_core::IcebergCatalogStore;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::iceberg::error::IcebergError;
+
+/// Convert core JSON properties into the protocol string-map shape. The
+/// Iceberg write path only accepts string values, so non-string values are
+/// dropped defensively.
+pub(crate) fn properties_to_string_map(
+    properties: Option<serde_json::Value>,
+) -> HashMap<String, String> {
+    match properties {
+        Some(serde_json::Value::Object(map)) => map
+            .into_iter()
+            .filter_map(|(key, value)| value.as_str().map(|s| (key, s.to_string())))
+            .collect(),
+        _ => HashMap::new(),
+    }
+}
+
+/// Convert a protocol string-map into core JSON properties; an empty map
+/// is stored as `None` (no properties).
+pub(crate) fn string_map_to_properties(map: HashMap<String, String>) -> Option<serde_json::Value> {
+    if map.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (key, serde_json::Value::String(value)))
+                .collect(),
+        ))
+    }
+}
 
 /// Configuration for Iceberg REST Catalog endpoints.
 #[derive(Clone, Default)]
@@ -28,9 +55,56 @@ pub struct IcebergConfig {
     pub default_warehouse: String,
 }
 
+/// Commit outcome metrics sink for the Iceberg adapter.
+///
+/// Metrics are a server-side observability concern, but the adapter cannot
+/// depend on the server crate (layering rule). The server therefore adapts
+/// its registry into this lightweight handle and injects it via an
+/// `Extension`; handlers extract it as `Option<Extension<CommitMetrics>>`
+/// and fall back to the no-op `Default` when it is absent, so the adapter
+/// also works standalone (tests, embedded use).
+#[derive(Clone, Default)]
+pub struct CommitMetrics {
+    on_success: Option<Arc<dyn Fn() + Send + Sync>>,
+    on_conflict: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl CommitMetrics {
+    /// Build a sink from two callbacks (typically closures incrementing
+    /// the server registry's commit counters).
+    pub fn new(
+        on_success: impl Fn() + Send + Sync + 'static,
+        on_conflict: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            on_success: Some(Arc::new(on_success)),
+            on_conflict: Some(Arc::new(on_conflict)),
+        }
+    }
+
+    /// Record a successful commit. No-op when no sink is installed.
+    pub fn record_success(&self) {
+        if let Some(f) = &self.on_success {
+            f();
+        }
+    }
+
+    /// Record a commit conflict (CAS failure). No-op when no sink is installed.
+    pub fn record_conflict(&self) {
+        if let Some(f) = &self.on_conflict {
+            f();
+        }
+    }
+}
+
 /// Create Iceberg REST Catalog routes mounted at `/iceberg/v1/...`.
 /// Configuration is passed via Extension layer.
-pub fn routes() -> Router<Arc<dyn CatalogStore>> {
+///
+/// Namespace paths are hierarchical (D3): everything under
+/// `/namespaces/{*path}` is dispatched by [`dispatch`], which splits the
+/// reserved trailing segments (`tables`, `views`, `properties`,
+/// `register`, `metrics`) from the namespace path.
+pub fn routes() -> Router<Arc<dyn IcebergCatalogStore>> {
     Router::new()
         .route("/iceberg/v1/config", get(config::get_config))
         .route(
@@ -38,33 +112,11 @@ pub fn routes() -> Router<Arc<dyn CatalogStore>> {
             get(namespace::list_namespaces).post(namespace::create_namespace),
         )
         .route(
-            "/iceberg/v1/{prefix}/namespaces/{ns}",
-            get(namespace::get_namespace)
-                .head(namespace::namespace_exists)
-                .delete(namespace::drop_namespace),
-        )
-        .route(
-            "/iceberg/v1/{prefix}/namespaces/{ns}/properties",
-            post(namespace::update_namespace_properties),
-        )
-        .route(
-            "/iceberg/v1/{prefix}/namespaces/{ns}/tables",
-            get(table::list_tables).post(table::create_table),
-        )
-        .route(
-            "/iceberg/v1/{prefix}/namespaces/{ns}/register",
-            post(table::register_table),
-        )
-        .route(
-            "/iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}",
-            get(table::load_table)
-                .post(table::commit_table)
-                .delete(table::drop_table)
-                .head(table::table_exists),
-        )
-        .route(
-            "/iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}/metrics",
-            post(table::report_metrics),
+            "/iceberg/v1/{prefix}/namespaces/{*path}",
+            get(dispatch::get)
+                .head(dispatch::head)
+                .delete(dispatch::delete)
+                .post(dispatch::post),
         )
         .route(
             "/iceberg/v1/{prefix}/tables/rename",
@@ -74,45 +126,7 @@ pub fn routes() -> Router<Arc<dyn CatalogStore>> {
             "/iceberg/v1/{prefix}/transactions/commit",
             post(table::commit_transaction),
         )
-        // View routes (V4.2)
-        .route(
-            "/iceberg/v1/{prefix}/namespaces/{ns}/views",
-            get(view::list_views).post(view::create_view),
-        )
-        .route(
-            "/iceberg/v1/{prefix}/namespaces/{ns}/views/{view}",
-            get(view::load_view)
-                .post(view::replace_view)
-                .delete(view::drop_view)
-                .head(view::view_exists),
-        )
         .route("/iceberg/v1/{prefix}/views/rename", post(view::rename_view))
-        // Scan Planning routes (V4.2) - OpenAPI primary paths
-        .route(
-            "/iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}/plan",
-            post(scan_planning::submit_plan),
-        )
-        .route(
-            "/iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}/plan/{plan_id}",
-            get(scan_planning::fetch_plan).delete(scan_planning::cancel_plan),
-        )
-        .route(
-            "/iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}/tasks",
-            post(scan_planning::fetch_tasks),
-        )
-        // Scan Planning alias paths (Java ResourcePaths)
-        .route(
-            "/iceberg/v1/{prefix}/tables/{table}/plan",
-            post(scan_planning::submit_plan_alias),
-        )
-        .route(
-            "/iceberg/v1/{prefix}/tables/{table}/plan/{plan_id}",
-            get(scan_planning::fetch_plan_alias).delete(scan_planning::cancel_plan_alias),
-        )
-        .route(
-            "/iceberg/v1/{prefix}/tables/{table}/tasks",
-            post(scan_planning::fetch_tasks_alias),
-        )
 }
 
 /// Validate warehouse query parameter against the configured default warehouse.
@@ -171,7 +185,6 @@ pub mod config {
             "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics".to_string(),
             "POST /v1/{prefix}/tables/rename".to_string(),
             "POST /v1/{prefix}/transactions/commit".to_string(),
-            // V4.2 View endpoints
             "GET /v1/{prefix}/namespaces/{namespace}/views".to_string(),
             "POST /v1/{prefix}/namespaces/{namespace}/views".to_string(),
             "GET /v1/{prefix}/namespaces/{namespace}/views/{view}".to_string(),
@@ -179,11 +192,6 @@ pub mod config {
             "DELETE /v1/{prefix}/namespaces/{namespace}/views/{view}".to_string(),
             "POST /v1/{prefix}/namespaces/{namespace}/views/{view}".to_string(),
             "POST /v1/{prefix}/views/rename".to_string(),
-            // V4.2 Scan Planning endpoints
-            "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/plan".to_string(),
-            "GET /v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}".to_string(),
-            "DELETE /v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}".to_string(),
-            "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/tasks".to_string(),
         ]
     }
 

@@ -1,22 +1,32 @@
+//! Unified API — domain & namespace endpoint integration tests.
+//!
+//! Runs the real `unified::routes()` router against an embedded PostgreSQL
+//! instance through Tower `oneshot`: domain CRUD, hierarchical namespace
+//! CRUD with wildcard paths, token pagination, and RFC-7807 errors.
+
 #![cfg(feature = "unified")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{header, Request, StatusCode};
+use axum::response::Response;
 use deadpool_postgres::{Pool, Runtime};
 use http_body_util::BodyExt;
-use postgresql_embedded::PostgreSQL;
+use postgresql_embedded::{PostgreSQL, Settings};
 use quasar_adapter::unified;
-use quasar_core::{NamespaceStore, TabularStore};
+use quasar_core::CatalogStore;
 use quasar_storage::PgCatalogStore;
-use serde_json::Value;
+use serde_json::{json, Value};
 use serial_test::serial;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tower::ServiceExt;
 
+// ── Embedded PostgreSQL bootstrap (per test binary) ─────────
+
 static PG_INSTANCE: OnceCell<PgInstance> = OnceCell::const_new();
+
+const ZONKY_RELEASES_URL: &str = "https://github.com/zonkyio/embedded-postgres-binaries";
 
 struct PgInstance {
     #[allow(dead_code)]
@@ -28,14 +38,18 @@ impl PgInstance {
     async fn get() -> &'static Self {
         PG_INSTANCE
             .get_or_init(|| async {
-                let mut postgresql = PostgreSQL::default();
+                let settings = Settings {
+                    releases_url: ZONKY_RELEASES_URL.to_string(),
+                    ..Default::default()
+                };
+                let mut postgresql = PostgreSQL::new(settings);
                 postgresql.setup().await.expect("PostgreSQL setup failed");
                 postgresql.start().await.expect("PostgreSQL start failed");
                 postgresql
-                    .create_database("quasar_test_unified")
+                    .create_database("quasar_test_unified_namespace")
                     .await
                     .expect("create database failed");
-                let url = postgresql.settings().url("quasar_test_unified");
+                let url = postgresql.settings().url("quasar_test_unified_namespace");
                 PgInstance { postgresql, url }
             })
             .await
@@ -53,767 +67,359 @@ fn test_pool(url: &str) -> Pool {
         .expect("failed to create pool")
 }
 
+/// Reset to a clean, fully-migrated state (migrations seed the `default`
+/// domain, asset types and formats).
 async fn setup() -> Arc<PgCatalogStore> {
     let instance = PgInstance::get().await;
     let pool = test_pool(&instance.url);
-    let store = Arc::new(PgCatalogStore::new(pool.clone()));
+    {
+        let client = pool.get().await.expect("pool checkout failed");
+        client
+            .batch_execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+            .await
+            .expect("schema reset failed");
+    }
+    let store = Arc::new(PgCatalogStore::new(pool));
     store.initialize().await.expect("initialize failed");
-
-    let client = pool.get().await.expect("failed to get client");
-    client
-        .execute(
-            "TRUNCATE tabular_asset_versions, asset_versions, tabular_assets, assets, namespaces, asset_permissions CASCADE",
-            &[],
-        )
-        .await
-        .expect("failed to truncate tables");
-
     store
 }
 
-async fn inject_request_id(
-    mut req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    let request_id = req
-        .headers()
-        .get("x-request-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-    req.extensions_mut().insert(request_id.clone());
-    let mut response = next.run(req).await;
-    if let Ok(val) = request_id.parse() {
-        response.headers_mut().insert("x-request-id", val);
-    }
-    response
-}
-
 fn test_app(store: Arc<PgCatalogStore>) -> axum::Router {
-    use axum::Extension;
-    let store: Arc<dyn quasar_core::CatalogStore> = store;
+    let store: Arc<dyn CatalogStore> = store;
     unified::routes()
-        .layer(Extension(unified::UnifiedConfig::default()))
-        .layer(axum::middleware::from_fn(inject_request_id))
+        .layer(axum::Extension(unified::UnifiedConfig::default()))
         .with_state(store)
 }
 
-async fn body_json(response: axum::response::Response) -> Value {
+// ── HTTP helpers ────────────────────────────────────────────
+
+async fn body_json(response: Response) -> Value {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&body).unwrap()
 }
 
-#[tokio::test]
-#[serial]
-async fn test_create_namespace() {
-    let store = setup().await;
-    let app = test_app(store);
-
-    let response = app
+async fn request(app: &axum::Router, method: &str, uri: &str, body: Option<String>) -> Response {
+    let builder = Request::builder().method(method).uri(uri);
+    let builder = match &body {
+        Some(_) => builder.header(header::CONTENT_TYPE, "application/json"),
+        None => builder,
+    };
+    app.clone()
         .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/unified/v1/domains/default/namespaces")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"name": "prod", "comment": "production", "properties": {"team": "data"}}"#,
-                ))
+            builder
+                .body(body.map(Body::from).unwrap_or_else(Body::empty))
                 .unwrap(),
         )
         .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let json = body_json(response).await;
-    assert_eq!(json["name"], "prod");
-    assert_eq!(json["comment"], "production");
-    assert_eq!(json["properties"]["team"], "data");
-    assert!(json["id"].as_str().is_some());
+        .unwrap()
 }
 
-#[tokio::test]
-#[serial]
-async fn test_list_namespaces() {
-    let store = setup().await;
-    store
-        .create_namespace(
-            "default",
-            "prod",
-            Some("production".to_string()),
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    store
-        .create_namespace("default", "dev", None, HashMap::new())
-        .await
-        .unwrap();
-
-    let app = test_app(store);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/unified/v1/domains/default/namespaces")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_json(response).await;
-    let namespaces = json["namespaces"].as_array().unwrap();
-    assert_eq!(namespaces.len(), 2);
-    assert!(json["next_page_token"].is_null());
+async fn get(app: &axum::Router, uri: &str) -> Response {
+    request(app, "GET", uri, None).await
 }
 
-#[tokio::test]
-#[serial]
-async fn test_list_namespaces_pagination() {
-    let store = setup().await;
-    for i in 0..5 {
-        store
-            .create_namespace("default", &format!("ns{}", i), None, HashMap::new())
-            .await
-            .unwrap();
-    }
-
-    let app = test_app(store);
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/unified/v1/domains/default/namespaces?pageSize=2")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_json(response).await;
-    let namespaces = json["namespaces"].as_array().unwrap();
-    assert_eq!(namespaces.len(), 2);
-    let token = json["next_page_token"].as_str().unwrap();
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!(
-                    "/unified/v1/domains/default/namespaces?pageSize=2&pageToken={}",
-                    token
-                ))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_json(response).await;
-    let namespaces = json["namespaces"].as_array().unwrap();
-    assert_eq!(namespaces.len(), 2);
-    assert!(!json["next_page_token"].is_null());
+async fn post(app: &axum::Router, uri: &str, body: &str) -> Response {
+    request(app, "POST", uri, Some(body.to_string())).await
 }
 
-#[tokio::test]
-#[serial]
-async fn test_list_namespaces_page_size_too_large() {
-    let store = setup().await;
-    let app = test_app(store);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/unified/v1/domains/default/namespaces?pageSize=1001")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let json = body_json(response).await;
-    assert_eq!(json["code"], "PageSizeTooLarge");
-    assert_eq!(json["status"], 400);
+async fn patch(app: &axum::Router, uri: &str, body: &str) -> Response {
+    request(app, "PATCH", uri, Some(body.to_string())).await
 }
 
-#[tokio::test]
-#[serial]
-async fn test_list_namespaces_page_size_zero() {
-    let store = setup().await;
-    let app = test_app(store);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/unified/v1/domains/default/namespaces?pageSize=0")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let json = body_json(response).await;
-    assert_eq!(json["code"], "InvalidInput");
+async fn delete(app: &axum::Router, uri: &str) -> Response {
+    request(app, "DELETE", uri, None).await
 }
 
-#[tokio::test]
-#[serial]
-async fn test_get_namespace() {
-    let store = setup().await;
-    store
-        .create_namespace(
-            "default",
-            "prod",
-            Some("production".to_string()),
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-
-    let app = test_app(store);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/unified/v1/domains/default/namespaces/prod")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_json(response).await;
-    assert_eq!(json["name"], "prod");
-    assert_eq!(json["comment"], "production");
-}
-
-#[tokio::test]
-#[serial]
-async fn test_get_namespace_not_found() {
-    let store = setup().await;
-    let app = test_app(store);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/unified/v1/domains/default/namespaces/missing")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let json = body_json(response).await;
-    assert_eq!(json["code"], "NamespaceNotFound");
-    assert_eq!(json["status"], 404);
-    assert!(json["type"]
+/// Assert an RFC-7807 problem response with the expected status and machine code.
+async fn assert_problem(response: Response, status: StatusCode, code: &str) -> Value {
+    assert_eq!(response.status(), status);
+    assert_eq!(
+        response.headers().get(header::CONTENT_TYPE).unwrap(),
+        "application/problem+json"
+    );
+    let body = body_json(response).await;
+    assert_eq!(body["status"], status.as_u16());
+    assert_eq!(body["code"], code);
+    assert!(body["type"]
         .as_str()
         .unwrap()
-        .contains("namespace-not-found"));
+        .starts_with("https://quasar.io/errors/"));
+    assert!(body["request_id"].as_str().unwrap().len() >= 32);
+    body
+}
+
+async fn create_domain(app: &axum::Router, name: &str) -> Value {
+    let resp = post(
+        app,
+        "/unified/v1/domains",
+        &json!({"name": name}).to_string(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    body_json(resp).await
+}
+
+// ── Domain tests ────────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn domain_crud_roundtrip() {
+    let app = test_app(setup().await);
+
+    let created = create_domain(&app, "analytics").await;
+    assert_eq!(created["name"], "analytics");
+    assert!(created["id"].as_str().is_some());
+    // storage_config must never appear in responses (sensitive red line).
+    assert!(created.get("storage_config").is_none());
+
+    let resp = get(&app, "/unified/v1/domains/analytics").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let fetched = body_json(resp).await;
+    assert_eq!(fetched["id"], created["id"]);
+
+    let resp = delete(&app, "/unified/v1/domains/analytics").await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = get(&app, "/unified/v1/domains/analytics").await;
+    assert_problem(resp, StatusCode::NOT_FOUND, "NOT_FOUND").await;
 }
 
 #[tokio::test]
 #[serial]
-async fn test_delete_namespace() {
-    let store = setup().await;
-    store
-        .create_namespace("default", "prod", None, HashMap::new())
-        .await
-        .unwrap();
+async fn domain_create_conflict_and_invalid() {
+    let app = test_app(setup().await);
 
-    let app = test_app(store);
+    create_domain(&app, "dup").await;
+    let resp = post(
+        &app,
+        "/unified/v1/domains",
+        &json!({"name": "dup"}).to_string(),
+    )
+    .await;
+    assert_problem(resp, StatusCode::CONFLICT, "ALREADY_EXISTS").await;
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/unified/v1/domains/default/namespaces/prod")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    // Uppercase is not a valid slug.
+    let resp = post(
+        &app,
+        "/unified/v1/domains",
+        &json!({"name": "BadName"}).to_string(),
+    )
+    .await;
+    assert_problem(resp, StatusCode::BAD_REQUEST, "VALIDATION_FAILED").await;
 
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    // Invalid storage_type is rejected at the adapter layer.
+    let resp = post(
+        &app,
+        "/unified/v1/domains",
+        &json!({"name": "badtype", "storage_type": "ftp"}).to_string(),
+    )
+    .await;
+    assert_problem(resp, StatusCode::BAD_REQUEST, "VALIDATION_FAILED").await;
 }
 
 #[tokio::test]
 #[serial]
-async fn test_delete_non_empty_namespace() {
-    let store = setup().await;
-    store
-        .create_namespace("default", "prod", None, HashMap::new())
-        .await
-        .unwrap();
-    store
-        .create_tabular_asset(
-            "default",
-            "prod",
-            "users",
-            "iceberg",
-            "s3://bucket/users",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
+async fn domain_patch_three_states() {
+    let app = test_app(setup().await);
+    create_domain(&app, "patchy").await;
 
-    let app = test_app(store);
+    // Set comment and warehouse.
+    let resp = patch(
+        &app,
+        "/unified/v1/domains/patchy",
+        &json!({"comment": "hello", "warehouse": "s3://bucket/root"}).to_string(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["comment"], "hello");
+    assert_eq!(body["warehouse"], "s3://bucket/root");
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/unified/v1/domains/default/namespaces/prod")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let json = body_json(response).await;
-    assert_eq!(json["code"], "NamespaceNotEmpty");
-    assert_eq!(json["status"], 409);
+    // Unset comment, leave warehouse untouched (NoChange).
+    let resp = patch(
+        &app,
+        "/unified/v1/domains/patchy",
+        &json!({"comment": null}).to_string(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert!(body["comment"].is_null());
+    assert_eq!(body["warehouse"], "s3://bucket/root");
 }
 
 #[tokio::test]
 #[serial]
-async fn test_duplicate_create_returns_409() {
-    let store = setup().await;
-    store
-        .create_namespace("default", "prod", None, HashMap::new())
-        .await
-        .unwrap();
+async fn domain_delete_non_empty_conflict() {
+    let app = test_app(setup().await);
+    create_domain(&app, "parent").await;
+    let resp = post(
+        &app,
+        "/unified/v1/domains/parent/namespaces",
+        &json!({"path": "ns1"}).to_string(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
 
-    let app = test_app(store);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/unified/v1/domains/default/namespaces")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"name": "prod"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let json = body_json(response).await;
-    assert_eq!(json["code"], "NamespaceAlreadyExists");
-    assert_eq!(json["status"], 409);
+    let resp = delete(&app, "/unified/v1/domains/parent").await;
+    assert_problem(resp, StatusCode::CONFLICT, "CONFLICT").await;
 }
 
 #[tokio::test]
 #[serial]
-async fn test_create_namespace_invalid_name() {
-    let store = setup().await;
-    let app = test_app(store);
+async fn domain_list_pagination() {
+    let app = test_app(setup().await);
+    for name in ["d1", "d2", "d3"] {
+        create_domain(&app, name).await;
+    }
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/unified/v1/domains/default/namespaces")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"name": "bad name"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    // 3 created + seeded `default` = 4 domains; page size 2 gives two pages.
+    let resp = get(&app, "/unified/v1/domains?pageSize=2").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let page1 = body_json(resp).await;
+    assert_eq!(page1["items"].as_array().unwrap().len(), 2);
+    let token = page1["next_page_token"].as_str().unwrap().to_string();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let json = body_json(response).await;
-    assert_eq!(json["code"], "InvalidInput");
-}
+    let resp = get(
+        &app,
+        &format!("/unified/v1/domains?pageSize=2&pageToken={token}"),
+    )
+    .await;
+    let page2 = body_json(resp).await;
+    assert_eq!(page2["items"].as_array().unwrap().len(), 2);
+    // A full page always yields a token (DESIGN §5.4); the emptiness of the
+    // following page is only discovered on the next fetch.
+    let token2 = page2["next_page_token"].as_str().unwrap().to_string();
+    let resp = get(
+        &app,
+        &format!("/unified/v1/domains?pageSize=2&pageToken={token2}"),
+    )
+    .await;
+    let page3 = body_json(resp).await;
+    assert_eq!(page3["items"].as_array().unwrap().len(), 0);
+    assert!(page3.get("next_page_token").is_none());
 
-#[tokio::test]
-#[serial]
-async fn test_patch_comment_value() {
-    let store = setup().await;
-    store
-        .create_namespace("default", "prod", None, HashMap::new())
-        .await
-        .unwrap();
-
-    let app = test_app(store);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri("/unified/v1/domains/default/namespaces/prod")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"comment": "updated"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_json(response).await;
-    assert_eq!(json["comment"], "updated");
-}
-
-#[tokio::test]
-#[serial]
-async fn test_patch_comment_null() {
-    let store = setup().await;
-    store
-        .create_namespace(
-            "default",
-            "prod",
-            Some("before".to_string()),
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-
-    let app = test_app(store);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri("/unified/v1/domains/default/namespaces/prod")
-                .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"comment": null}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_json(response).await;
-    assert!(json["comment"].is_null());
-}
-
-#[tokio::test]
-#[serial]
-async fn test_patch_properties() {
-    let store = setup().await;
-    let mut props = HashMap::new();
-    props.insert("team".to_string(), "data".to_string());
-    props.insert("env".to_string(), "prod".to_string());
-    store
-        .create_namespace("default", "prod", None, props)
-        .await
-        .unwrap();
-
-    let app = test_app(store);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri("/unified/v1/domains/default/namespaces/prod")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"removals": ["team"], "updates": {"owner": "platform"}}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_json(response).await;
-    assert!(json["properties"]["team"].is_null());
-    assert_eq!(json["properties"]["env"], "prod");
-    assert_eq!(json["properties"]["owner"], "platform");
-}
-
-#[tokio::test]
-#[serial]
-async fn test_problem_details_content_type() {
-    let store = setup().await;
-    let app = test_app(store);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/unified/v1/domains/default/namespaces/missing")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let content_type = response
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap();
-    assert_eq!(content_type, "application/problem+json");
-}
-
-#[tokio::test]
-#[serial]
-async fn test_request_id_propagation() {
-    let store = setup().await;
-    let app = test_app(store);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/unified/v1/domains/default/namespaces/missing")
-                .header("X-Request-Id", "test-req-42")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let req_id_header = response
-        .headers()
-        .get("x-request-id")
-        .and_then(|v| v.to_str().ok())
-        .unwrap();
-    assert_eq!(req_id_header, "test-req-42");
-
-    let json = body_json(response).await;
-    assert_eq!(json["request_id"], "test-req-42");
-}
-
-#[tokio::test]
-#[serial]
-async fn test_generated_request_id_is_uuid() {
-    let store = setup().await;
-    let app = test_app(store);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/unified/v1/domains/default/namespaces/missing")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let req_id_header = response
-        .headers()
-        .get("x-request-id")
-        .and_then(|v| v.to_str().ok())
-        .unwrap()
-        .to_string();
-    uuid::Uuid::parse_str(&req_id_header).unwrap();
-
-    let json = body_json(response).await;
-    assert_eq!(json["request_id"], req_id_header);
-}
-
-// ── Domain CRUD smoke (V3 §4.1.3) ───────────────────────────────
-
-#[tokio::test]
-#[serial]
-async fn test_domain_crud_smoke() {
-    use quasar_core::DomainStore;
-    let store = setup().await;
-
-    // Ensure clean slate for non-default domains created here.
-    let instance = PG_INSTANCE.get().expect("instance initialised");
-    let pool = test_pool(&instance.url);
-    let client = pool.get().await.expect("client");
-    client
-        .execute("DELETE FROM domains WHERE name <> 'default'", &[])
-        .await
-        .expect("clear non-default domains");
-
-    let app = test_app(store.clone());
-
-    // Create
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/unified/v1/domains")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"name":"prod","comment":"production domain","properties":{"team":"platform"},"warehouse":"s3://warehouse/prod","owner":"data-platform","storage_type":"s3","storage_config":{"role_arn":"arn:aws:iam::123:role/quasar"}}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let json = body_json(response).await;
-    assert_eq!(json["name"], "prod");
-    assert_eq!(json["comment"], "production domain");
-    assert_eq!(json["properties"]["team"], "platform");
-    assert_eq!(json["warehouse"], "s3://warehouse/prod");
-    assert_eq!(json["owner"], "data-platform");
-    assert_eq!(json["storage_type"], "s3");
-    // V3 invariant 8 — storage_config never echoed back, even when set.
-    assert!(json.get("storage_config").is_none());
-
-    // List
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/unified/v1/domains")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_json(response).await;
-    let names: Vec<&str> = json["domains"]
+    let names: Vec<&str> = page1["items"]
         .as_array()
         .unwrap()
         .iter()
+        .chain(page2["items"].as_array().unwrap().iter())
         .map(|d| d["name"].as_str().unwrap())
         .collect();
-    assert!(names.contains(&"default"));
-    assert!(names.contains(&"prod"));
-    // storage_config is never present, regardless of which domain.
-    for domain in json["domains"].as_array().unwrap() {
-        assert!(domain.get("storage_config").is_none());
+    assert_eq!(names, vec!["d1", "d2", "d3", "default"]);
+
+    // pageSize=0 is invalid; oversized pageSize is clamped, not rejected.
+    let resp = get(&app, "/unified/v1/domains?pageSize=0").await;
+    assert_problem(resp, StatusCode::BAD_REQUEST, "VALIDATION_FAILED").await;
+    let resp = get(&app, "/unified/v1/domains?pageSize=99999").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+// ── Namespace tests ─────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn namespace_hierarchical_create_and_get() {
+    let app = test_app(setup().await);
+
+    // Creating a/b/c implicitly creates a and a/b (FR-N2).
+    let resp = post(
+        &app,
+        "/unified/v1/domains/default/namespaces",
+        &json!({"path": "a/b/c", "comment": "deep"}).to_string(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    assert_eq!(created["path"], "a/b/c");
+    assert_eq!(created["depth"], 3);
+
+    for path in ["a", "a/b", "a/b/c"] {
+        let resp = get(
+            &app,
+            &format!("/unified/v1/domains/default/namespaces/{path}"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "path {path} should exist");
     }
 
-    // Get
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/unified/v1/domains/prod")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_json(response).await;
-    assert_eq!(json["name"], "prod");
-    assert!(json.get("storage_config").is_none());
+    // Duplicate path conflicts.
+    let resp = post(
+        &app,
+        "/unified/v1/domains/default/namespaces",
+        &json!({"path": "a/b/c"}).to_string(),
+    )
+    .await;
+    assert_problem(resp, StatusCode::CONFLICT, "ALREADY_EXISTS").await;
 
-    // Update
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri("/unified/v1/domains/prod")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    r#"{"comment":"prod (updated)","updates":{"region":"us-west-2"}}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = body_json(response).await;
-    assert_eq!(json["comment"], "prod (updated)");
-    assert_eq!(json["properties"]["region"], "us-west-2");
+    // Invalid segment (uppercase) rejected.
+    let resp = post(
+        &app,
+        "/unified/v1/domains/default/namespaces",
+        &json!({"path": "a/Bad"}).to_string(),
+    )
+    .await;
+    assert_problem(resp, StatusCode::BAD_REQUEST, "VALIDATION_FAILED").await;
 
-    // Delete
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/unified/v1/domains/prod")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-
-    // Get after delete → 404
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/unified/v1/domains/prod")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let json = body_json(response).await;
-    assert_eq!(json["code"], "DomainNotFound");
-
-    // domain_exists confirms via the store directly.
-    assert!(!store.domain_exists("prod").await.unwrap());
+    // Missing domain 404.
+    let resp = get(&app, "/unified/v1/domains/ghost/namespaces/a").await;
+    assert_problem(resp, StatusCode::NOT_FOUND, "NOT_FOUND").await;
 }
 
 #[tokio::test]
 #[serial]
-async fn test_drop_non_empty_domain_returns_409() {
-    use quasar_core::DomainStore;
-    let store = setup().await;
-
-    let instance = PG_INSTANCE.get().expect("instance initialised");
-    let pool = test_pool(&instance.url);
-    let client = pool.get().await.expect("client");
-    client
-        .execute("DELETE FROM domains WHERE name <> 'default'", &[])
-        .await
-        .expect("clear non-default domains");
-
-    store
-        .create_domain(
-            "staging",
-            None,
-            HashMap::new(),
-            None,
-            serde_json::json!({}),
-            None,
-            None,
+async fn namespace_list_prefix_filter() {
+    let app = test_app(setup().await);
+    for path in ["team/x", "team/y", "other"] {
+        post(
+            &app,
+            "/unified/v1/domains/default/namespaces",
+            &json!({"path": path}).to_string(),
         )
-        .await
-        .unwrap();
-    store
-        .create_namespace("staging", "analytics", None, HashMap::new())
-        .await
-        .unwrap();
+        .await;
+    }
 
-    let app = test_app(store);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/unified/v1/domains/staging")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let resp = get(&app, "/unified/v1/domains/default/namespaces?prefix=team").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    let paths: Vec<&str> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["path"].as_str().unwrap())
+        .collect();
+    assert!(paths.contains(&"team"));
+    assert!(paths.contains(&"team/x"));
+    assert!(paths.contains(&"team/y"));
+    assert!(!paths.contains(&"other"));
+}
 
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let json = body_json(response).await;
-    assert_eq!(json["code"], "DomainNotEmpty");
-    assert!(json["detail"].as_str().unwrap().contains("staging"));
+#[tokio::test]
+#[serial]
+async fn namespace_patch_and_delete_rules() {
+    let app = test_app(setup().await);
+    post(
+        &app,
+        "/unified/v1/domains/default/namespaces",
+        &json!({"path": "life/child"}).to_string(),
+    )
+    .await;
+
+    let resp = patch(
+        &app,
+        "/unified/v1/domains/default/namespaces/life",
+        &json!({"comment": "updated"}).to_string(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["comment"], "updated");
+
+    // Parent with a child cannot be deleted.
+    let resp = delete(&app, "/unified/v1/domains/default/namespaces/life").await;
+    assert_problem(resp, StatusCode::CONFLICT, "CONFLICT").await;
+
+    // Delete child first, then parent.
+    let resp = delete(&app, "/unified/v1/domains/default/namespaces/life/child").await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = delete(&app, "/unified/v1/domains/default/namespaces/life").await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 }

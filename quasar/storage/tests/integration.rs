@@ -1,1034 +1,1222 @@
+//! Integration tests for the generic store traits (DESIGN §4.3):
+//! Domain / Namespace / Asset / Version / Tag / Registry / Tabular / CAS /
+//! UnifiedQuery, plus soft-delete lifecycle and CAS concurrency.
+
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use deadpool_postgres::{Pool, Runtime};
-use postgresql_embedded::PostgreSQL;
+mod common;
+
 use quasar_storage::{
-    AssetStore, CasCommitStore, DomainPatch, DomainStore, NamespaceStore, PatchField,
-    PgCatalogStore, StoreError, TabularStore, TabularVersionStore, UnifiedQueryStore,
+    AssetFilter, AssetPatch, AssetQuery, AssetStore, AssetTypeStore, CasCommitStore, CatalogError,
+    CreateAsset, CreateDomain, CreateNamespace, CreateVersion, DomainPatch, DomainStore,
+    NamespacePatch, NamespaceStore, PatchField, RegisterAssetType, RegisterFormat, TabularStore,
+    TagStore, UnifiedQueryStore, VersionStore,
 };
 use serial_test::serial;
 use std::collections::HashMap;
-use tokio::sync::OnceCell;
+use std::sync::Arc;
+use uuid::Uuid;
 
-static PG_INSTANCE: OnceCell<PgInstance> = OnceCell::const_new();
-
-/// Phase 2 default domain. The V2 trait surface is gone, but most legacy
-/// behavioral tests still operate inside the seeded `default` domain — the
-/// adapter shim does the same in Phase 2.
 const DEFAULT: &str = "default";
 
-struct PgInstance {
-    #[allow(dead_code)]
-    postgresql: PostgreSQL,
-    url: String,
-}
-
-impl PgInstance {
-    async fn get() -> &'static Self {
-        PG_INSTANCE
-            .get_or_init(|| async {
-                let mut postgresql = PostgreSQL::default();
-                postgresql.setup().await.expect("PostgreSQL setup failed");
-                postgresql.start().await.expect("PostgreSQL start failed");
-
-                postgresql
-                    .create_database("quasar_test_v2")
-                    .await
-                    .expect("create database failed");
-
-                let url = postgresql.settings().url("quasar_test_v2");
-                PgInstance { postgresql, url }
-            })
-            .await
-    }
-}
-
-fn test_pool(url: &str) -> Pool {
-    let config = url
-        .parse::<tokio_postgres::Config>()
-        .expect("invalid database URL");
-
-    let mgr = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
-    Pool::builder(mgr)
-        .runtime(Runtime::Tokio1)
-        .build()
-        .expect("failed to create pool")
-}
-
-async fn setup() -> PgCatalogStore {
-    let (store, _) = setup_with_pool().await;
-    store
-}
-
-async fn setup_with_pool() -> (PgCatalogStore, Pool) {
-    let instance = PgInstance::get().await;
-    let pool = test_pool(&instance.url);
-    let store = PgCatalogStore::new(pool.clone());
-
-    let client = pool.get().await.expect("failed to get client");
-
-    // Clean slate: drop any existing V1, V2, or V3 catalog objects from the
-    // shared embedded PostgreSQL instance (OnceCell-cached across runs) so
-    // `initialize()` can rebuild a fresh V3 schema.
-    let _ = client
-        .batch_execute(
-            r#"
-            DROP TABLE IF EXISTS
-                refinery_schema_history,
-                asset_permissions,
-                tabular_asset_versions,
-                asset_versions,
-                tabular_assets,
-                assets,
-                namespaces,
-                domains,
-                tabular_formats,
-                asset_types
-            CASCADE;
-            DROP FUNCTION IF EXISTS ensure_tabular_asset_type() CASCADE;
-            DROP FUNCTION IF EXISTS ensure_previous_version_same_asset() CASCADE;
-            "#,
-        )
-        .await;
-
-    store.initialize().await.expect("initialize failed");
-
-    (store, pool)
-}
-
-// ── Namespace ──────────────────────────────────────────────────────────────
+// ── DomainStore ────────────────────────────────────────────────────────────
 
 #[tokio::test]
 #[serial]
-async fn test_namespace_crud() {
-    let store = setup().await;
+async fn domain_crud_and_pagination() {
+    let store = common::store().await;
 
-    let ns = store
-        .create_namespace(DEFAULT, "test_ns", None, HashMap::new())
-        .await
-        .unwrap();
-    assert_eq!(ns.name, "test_ns");
-
-    let list = store.list_namespaces(DEFAULT, 0, 100).await.unwrap();
-    assert_eq!(list.len(), 1);
-    assert_eq!(list[0].name, "test_ns");
-
-    let got = store.get_namespace(DEFAULT, "test_ns").await.unwrap();
-    assert_eq!(got.id, ns.id);
-
-    assert!(store.namespace_exists(DEFAULT, "test_ns").await.unwrap());
-    assert!(!store.namespace_exists(DEFAULT, "missing").await.unwrap());
-
-    let err = store
-        .create_namespace(DEFAULT, "test_ns", None, HashMap::new())
-        .await
-        .unwrap_err();
-    assert!(matches!(err, StoreError::AlreadyExists(_)));
-
-    store.drop_namespace(DEFAULT, "test_ns").await.unwrap();
-    assert!(!store.namespace_exists(DEFAULT, "test_ns").await.unwrap());
-
-    let err = store.drop_namespace(DEFAULT, "test_ns").await.unwrap_err();
-    assert!(matches!(err, StoreError::NotFound(_)));
-}
-
-// ── Asset ──────────────────────────────────────────────────────────────────
-
-#[tokio::test]
-#[serial]
-async fn test_asset_crud() {
-    let store = setup().await;
-
-    store
-        .create_namespace(DEFAULT, "ns1", None, HashMap::new())
-        .await
-        .unwrap();
-
-    let (asset, _) = store
-        .create_tabular_asset(
-            DEFAULT,
-            "ns1",
-            "asset_a",
-            "lance",
-            "s3://bucket/data/asset_a",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(asset.name, "asset_a");
-
-    let list = store
-        .list_tabular_assets(DEFAULT, "ns1", Some("lance"), 0, 1000)
-        .await
-        .unwrap();
-    assert_eq!(list.len(), 1);
-    assert_eq!(list[0].0.name, "asset_a");
-
-    let (got, _) = store
-        .get_tabular_asset(DEFAULT, "ns1", "lance", "asset_a")
-        .await
-        .unwrap();
-    assert_eq!(got.id, asset.id);
-
-    assert!(store.asset_exists(DEFAULT, "ns1", "asset_a").await.unwrap());
-    assert!(!store.asset_exists(DEFAULT, "ns1", "missing").await.unwrap());
-
-    let err = store
-        .create_tabular_asset(
-            DEFAULT,
-            "ns1",
-            "asset_a",
-            "lance",
-            "s3://bucket/data/asset_a_dup",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap_err();
-    assert!(matches!(err, StoreError::AlreadyExists(_)));
-
-    store
-        .rename_asset(DEFAULT, "ns1", "asset_a", "asset_b", None)
-        .await
-        .unwrap();
-    assert!(store.asset_exists(DEFAULT, "ns1", "asset_b").await.unwrap());
-    assert!(!store.asset_exists(DEFAULT, "ns1", "asset_a").await.unwrap());
-
-    let (_, _) = store
-        .create_tabular_asset(
-            DEFAULT,
-            "ns1",
-            "asset_c",
-            "lance",
-            "s3://bucket/data/asset_c",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-
-    let err = store
-        .rename_asset(DEFAULT, "ns1", "asset_b", "asset_c", None)
-        .await
-        .unwrap_err();
-    assert!(matches!(err, StoreError::AlreadyExists(_)));
-
-    store.drop_asset(DEFAULT, "ns1", "asset_b").await.unwrap();
-    store.drop_asset(DEFAULT, "ns1", "asset_c").await.unwrap();
-
-    let list = store
-        .list_tabular_assets(DEFAULT, "ns1", Some("lance"), 0, 1000)
-        .await
-        .unwrap();
-    assert!(list.is_empty());
-}
-
-#[tokio::test]
-#[serial]
-async fn test_rename_asset_cross_namespace() {
-    let store = setup().await;
-
-    store
-        .create_namespace(DEFAULT, "ns1", None, HashMap::new())
-        .await
-        .unwrap();
-    store
-        .create_namespace(DEFAULT, "ns2", None, HashMap::new())
-        .await
-        .unwrap();
-
-    let (_, _) = store
-        .create_tabular_asset(
-            DEFAULT,
-            "ns1",
-            "asset_x",
-            "lance",
-            "s3://bucket/data/asset_x",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-
-    // Cross-namespace rename: ns1 -> ns2.
-    store
-        .rename_asset(DEFAULT, "ns1", "asset_x", "asset_x", Some("ns2"))
-        .await
-        .unwrap();
-
-    assert!(!store.asset_exists(DEFAULT, "ns1", "asset_x").await.unwrap());
-    assert!(store.asset_exists(DEFAULT, "ns2", "asset_x").await.unwrap());
-
-    // Target namespace does not exist.
-    let err = store
-        .rename_asset(DEFAULT, "ns2", "asset_x", "asset_x", Some("missing_ns"))
-        .await
-        .unwrap_err();
-    assert!(matches!(err, StoreError::NotFound(_)));
-
-    // Target namespace already has an asset with the same name.
-    let (_, _) = store
-        .create_tabular_asset(
-            DEFAULT,
-            "ns1",
-            "asset_y",
-            "lance",
-            "s3://bucket/data/asset_y",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    let err = store
-        .rename_asset(DEFAULT, "ns2", "asset_x", "asset_y", Some("ns1"))
-        .await
-        .unwrap_err();
-    assert!(matches!(err, StoreError::AlreadyExists(_)));
-}
-
-// ── Versions ───────────────────────────────────────────────────────────────
-
-#[tokio::test]
-#[serial]
-async fn test_version_commit_and_load() {
-    let store = setup().await;
-
-    store
-        .create_namespace(DEFAULT, "ns1", None, HashMap::new())
-        .await
-        .unwrap();
-
-    let (asset, _) = store
-        .create_tabular_asset(
-            DEFAULT,
-            "ns1",
-            "tbl",
-            "lance",
-            "s3://bucket/data/tbl",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-
-    let (v1, tav1) = store
-        .create_tabular_version(
-            asset.id,
-            "1",
-            Some(1),
-            None,
-            "s3://bucket/data/tbl/_v1.manifest",
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(v1.version_order, Some(1));
-    assert_eq!(tav1.metadata_location, "s3://bucket/data/tbl/_v1.manifest");
-
-    let (v2, _) = store
-        .create_tabular_version(
-            asset.id,
-            "2",
-            Some(2),
-            Some(v1.id),
-            "s3://bucket/data/tbl/_v2.manifest",
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(v2.version_order, Some(2));
-    assert_eq!(v2.previous_version_id, Some(v1.id));
-
-    // Latest tabular version
-    let latest = store.get_latest_tabular_version(asset.id).await.unwrap();
-    let (latest_v, _) = latest.expect("expected at least one version");
-    assert_eq!(latest_v.id, v2.id);
-
-    // Specific by key
-    let (loaded, _) = store.get_tabular_version(asset.id, "1").await.unwrap();
-    assert_eq!(loaded.id, v1.id);
-
-    // List in ascending order
-    let list = store.list_tabular_versions(asset.id).await.unwrap();
-    assert_eq!(list.len(), 2);
-    assert_eq!(list[0].0.id, v1.id);
-    assert_eq!(list[1].0.id, v2.id);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_version_conflict() {
-    let store = setup().await;
-
-    store
-        .create_namespace(DEFAULT, "ns1", None, HashMap::new())
-        .await
-        .unwrap();
-    let (asset, _) = store
-        .create_tabular_asset(
-            DEFAULT,
-            "ns1",
-            "tbl",
-            "lance",
-            "s3://bucket/data/tbl",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-
-    store
-        .create_tabular_version(
-            asset.id,
-            "1",
-            Some(1),
-            None,
-            "s3://bucket/data/tbl/_v1.manifest",
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-
-    // Duplicate version_key triggers `UNIQUE(asset_id, version_key)`
-    let err = store
-        .create_tabular_version(
-            asset.id,
-            "1",
-            Some(1),
-            None,
-            "s3://bucket/data/tbl/_v1b.manifest",
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap_err();
-    assert!(matches!(err, StoreError::AlreadyExists(_)));
-}
-
-#[tokio::test]
-#[serial]
-async fn test_previous_version_must_belong_to_same_asset() {
-    let store = setup().await;
-
-    store
-        .create_namespace(DEFAULT, "ns1", None, HashMap::new())
-        .await
-        .unwrap();
-    let (asset_a, _) = store
-        .create_tabular_asset(
-            DEFAULT,
-            "ns1",
-            "a",
-            "lance",
-            "s3://bucket/data/a",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    let (asset_b, _) = store
-        .create_tabular_asset(
-            DEFAULT,
-            "ns1",
-            "b",
-            "lance",
-            "s3://bucket/data/b",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-
-    let (v_a, _) = store
-        .create_tabular_version(
-            asset_a.id,
-            "1",
-            Some(1),
-            None,
-            "s3://bucket/data/a/_v1.manifest",
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-
-    // Referencing a version owned by asset_a from asset_b must conflict via
-    // the V3 `trg_asset_versions_previous_same_asset` trigger.
-    let err = store
-        .create_tabular_version(
-            asset_b.id,
-            "1",
-            Some(1),
-            Some(v_a.id),
-            "s3://bucket/data/b/_v1.manifest",
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap_err();
-    assert!(matches!(err, StoreError::Conflict { .. }));
-}
-
-#[tokio::test]
-#[serial]
-async fn test_drop_asset_cascades_tabular_and_versions() {
-    let store = setup().await;
-
-    store
-        .create_namespace(DEFAULT, "ns1", None, HashMap::new())
-        .await
-        .unwrap();
-    let (asset, _) = store
-        .create_tabular_asset(
-            DEFAULT,
-            "ns1",
-            "tbl",
-            "lance",
-            "s3://bucket/data/tbl",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    let (v1, _) = store
-        .create_tabular_version(
-            asset.id,
-            "1",
-            Some(1),
-            None,
-            "s3://bucket/data/tbl/_v1.manifest",
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-
-    store.drop_asset(DEFAULT, "ns1", "tbl").await.unwrap();
-
-    let err = store.get_tabular_version(asset.id, "1").await.unwrap_err();
-    assert!(matches!(err, StoreError::NotFound(_)));
-    let _ = v1;
-}
-
-#[tokio::test]
-#[serial]
-async fn test_not_found_errors() {
-    let store = setup().await;
-
-    let err = store.get_namespace(DEFAULT, "missing").await.unwrap_err();
-    assert!(matches!(err, StoreError::NotFound(_)));
-
-    store
-        .create_namespace(DEFAULT, "ns1", None, HashMap::new())
-        .await
-        .unwrap();
-
-    let err = store
-        .get_tabular_asset(DEFAULT, "ns1", "lance", "missing")
-        .await
-        .unwrap_err();
-    assert!(matches!(err, StoreError::NotFound(_)));
-}
-
-#[tokio::test]
-#[serial]
-async fn test_update_namespace_properties() {
-    let store = setup().await;
-
-    let mut initial_props = HashMap::new();
-    initial_props.insert("env".to_string(), "prod".to_string());
-    initial_props.insert("team".to_string(), "data".to_string());
-    store
-        .create_namespace(DEFAULT, "ns1", Some("initial".into()), initial_props)
-        .await
-        .unwrap();
-
-    let mut updates = HashMap::new();
-    updates.insert("env".to_string(), "staging".to_string());
-    updates.insert("region".to_string(), "us-east-1".to_string());
-    let removals = vec!["team".to_string(), "missing-key".to_string()];
-
-    let updated = store
-        .update_namespace(
-            DEFAULT,
-            "ns1",
-            PatchField::Value("updated".into()),
-            &removals,
-            &updates,
-        )
-        .await
-        .unwrap();
-    assert_eq!(updated.comment.as_deref(), Some("updated"));
-    assert_eq!(
-        updated.properties.get("env").map(String::as_str),
-        Some("staging")
-    );
-    assert_eq!(
-        updated.properties.get("region").map(String::as_str),
-        Some("us-east-1")
-    );
-    assert!(!updated.properties.contains_key("team"));
-
-    // Missing comment → no change.
-    let again = store
-        .update_namespace(DEFAULT, "ns1", PatchField::Missing, &[], &HashMap::new())
-        .await
-        .unwrap();
-    assert_eq!(again.comment.as_deref(), Some("updated"));
-
-    // Null comment → cleared.
-    let cleared = store
-        .update_namespace(DEFAULT, "ns1", PatchField::Null, &[], &HashMap::new())
-        .await
-        .unwrap();
-    assert!(cleared.comment.is_none());
-
-    let err = store
-        .update_namespace(
-            DEFAULT,
-            "missing",
-            PatchField::Missing,
-            &[],
-            &HashMap::new(),
-        )
-        .await
-        .unwrap_err();
-    assert!(matches!(err, StoreError::NotFound(_)));
-}
-
-// ── New V3 P0 tests (V3_DESIGN §11.2) ──────────────────────────────────────
-
-#[tokio::test]
-#[serial]
-async fn test_domain_crud_complete_flow() {
-    let store = setup().await;
-
-    // The default seed is already present, so a fresh create should add a
-    // second row.
     let created = store
-        .create_domain(
-            "prod",
-            Some("production catalog".into()),
-            HashMap::from([("env".into(), "prod".into())]),
-            Some("s3".into()),
-            serde_json::json!({"bucket": "prod-warehouse"}),
-            Some("s3://prod-warehouse/".into()),
-            Some("data-platform".into()),
-        )
+        .create_domain(CreateDomain {
+            name: "alpha".to_string(),
+            comment: Some("first".to_string()),
+            properties: Some(serde_json::json!({"tier": "gold"})),
+            storage_type: Some("s3".to_string()),
+            storage_config: Some(serde_json::json!({"bucket": "b1"})),
+            warehouse: Some("s3://b1/wh".to_string()),
+        })
         .await
         .unwrap();
-    assert_eq!(created.name, "prod");
-    assert_eq!(created.comment.as_deref(), Some("production catalog"));
-    assert!(
-        created
-            .storage_config
-            .get("bucket")
-            .and_then(|v| v.as_str())
-            == Some("prod-warehouse")
-    );
+    assert_eq!(created.name, "alpha");
+    assert_eq!(created.storage_type.as_deref(), Some("s3"));
 
-    let listed = store.list_domains(0, 100).await.unwrap();
-    let names: Vec<&str> = listed.iter().map(|d| d.name.as_str()).collect();
-    assert!(names.contains(&"default"));
-    assert!(names.contains(&"prod"));
-
-    let got = store.get_domain("prod").await.unwrap();
+    let got = store.get_domain("alpha").await.unwrap();
     assert_eq!(got.id, created.id);
-    assert!(store.domain_exists("prod").await.unwrap());
-    assert!(!store.domain_exists("nope").await.unwrap());
+    assert_eq!(got.warehouse.as_deref(), Some("s3://b1/wh"));
 
-    // Update: drop env, add owner-of-record, change comment.
-    let patched = store
+    // Duplicate name -> AlreadyExists.
+    let dup = store
+        .create_domain(CreateDomain {
+            name: "alpha".to_string(),
+            ..Default::default()
+        })
+        .await;
+    assert!(matches!(dup, Err(CatalogError::AlreadyExists(_))));
+
+    // Unknown domain -> NotFound.
+    let missing = store.get_domain("nope").await;
+    assert!(matches!(missing, Err(CatalogError::NotFound(_))));
+
+    // Pagination: ordered by name, seeded `default` participates.
+    store
+        .create_domain(CreateDomain {
+            name: "zeta".to_string(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let page1 = store.list_domains(0, 2).await.unwrap();
+    let page2 = store.list_domains(2, 2).await.unwrap();
+    let names: Vec<&str> = page1
+        .iter()
+        .chain(page2.iter())
+        .map(|d| d.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["alpha", "default", "zeta"]);
+
+    // Invalid storage_type -> CHECK violation -> Validation.
+    let bad = store
+        .create_domain(CreateDomain {
+            name: "badtype".to_string(),
+            storage_type: Some("ftp".to_string()),
+            ..Default::default()
+        })
+        .await;
+    assert!(matches!(bad, Err(CatalogError::Validation(_))));
+
+    // Delete an empty domain, then delete again -> NotFound.
+    store.delete_domain("zeta").await.unwrap();
+    let gone = store.delete_domain("zeta").await;
+    assert!(matches!(gone, Err(CatalogError::NotFound(_))));
+}
+
+#[tokio::test]
+#[serial]
+async fn domain_patch_three_states() {
+    let store = common::store().await;
+    store
+        .create_domain(CreateDomain {
+            name: "patchme".to_string(),
+            comment: Some("keep".to_string()),
+            warehouse: Some("s3://b/wh".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    // Set: comment overwritten; NoChange: warehouse kept.
+    let updated = store
         .update_domain(
-            "prod",
+            "patchme",
             DomainPatch {
-                comment: PatchField::Value("updated production".into()),
-                property_removals: vec!["env".into()],
-                property_updates: HashMap::from([("owner".into(), "team-a".into())]),
-                storage_type: PatchField::Missing,
-                storage_config: PatchField::Missing,
-                warehouse: PatchField::Missing,
-                owner: PatchField::Missing,
+                comment: PatchField::Set("changed".to_string()),
+                ..Default::default()
             },
         )
         .await
         .unwrap();
-    assert_eq!(patched.comment.as_deref(), Some("updated production"));
-    assert!(!patched.properties.contains_key("env"));
+    assert_eq!(updated.comment.as_deref(), Some("changed"));
+    assert_eq!(updated.warehouse.as_deref(), Some("s3://b/wh"));
+
+    // Unset: comment cleared to NULL.
+    let cleared = store
+        .update_domain(
+            "patchme",
+            DomainPatch {
+                comment: PatchField::Unset,
+                warehouse: PatchField::Unset,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(cleared.comment.is_none());
+    assert!(cleared.warehouse.is_none());
+
+    // Set properties.
+    let with_props = store
+        .update_domain(
+            "patchme",
+            DomainPatch {
+                properties: PatchField::Set(serde_json::json!({"k": "v"})),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(with_props.properties.unwrap()["k"], "v");
+
+    // Patching a missing domain -> NotFound.
+    let missing = store.update_domain("nope", DomainPatch::default()).await;
+    assert!(matches!(missing, Err(CatalogError::NotFound(_))));
+}
+
+#[tokio::test]
+#[serial]
+async fn delete_non_empty_domain_conflicts() {
+    let store = common::store().await;
+    store
+        .create_domain(CreateDomain {
+            name: "occupied".to_string(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    common::make_namespace(&store, "occupied", "ns").await;
+
+    let err = store.delete_domain("occupied").await;
+    assert!(matches!(err, Err(CatalogError::Conflict(_))));
+}
+
+// ── NamespaceStore ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn namespace_hierarchy_and_prefix_listing() {
+    let store = common::store().await;
+
+    // Intermediate nodes are created implicitly (FR-N2).
+    let leaf = store
+        .create_namespace(
+            DEFAULT,
+            "analytics/teams/finance",
+            CreateNamespace::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(leaf.path, "analytics/teams/finance");
+    assert_eq!(leaf.depth, 3);
+
+    let mid = store
+        .get_namespace(DEFAULT, "analytics/teams")
+        .await
+        .unwrap();
+    assert_eq!(mid.depth, 2);
+    store.get_namespace(DEFAULT, "analytics").await.unwrap();
+
+    // resolve_path maps the protocol path to the same entity.
+    let resolved = store
+        .resolve_path(DEFAULT, "analytics/teams")
+        .await
+        .unwrap();
+    assert_eq!(resolved.id, mid.id);
+
+    // Prefix listing: Some("analytics") covers the whole subtree.
+    let subtree = store
+        .list_namespaces(DEFAULT, Some("analytics"), 0, 100)
+        .await
+        .unwrap();
+    let paths: Vec<&str> = subtree.iter().map(|n| n.path.as_str()).collect();
     assert_eq!(
-        patched.properties.get("owner").map(String::as_str),
-        Some("team-a")
+        paths,
+        vec!["analytics", "analytics/teams", "analytics/teams/finance"]
     );
 
-    // Duplicate create → AlreadyExists.
-    let err = store
-        .create_domain(
-            "prod",
-            None,
-            HashMap::new(),
-            None,
-            serde_json::json!({}),
-            None,
-            None,
+    // Prefix that matches no path yields an empty page.
+    let empty = store
+        .list_namespaces(DEFAULT, Some("missing"), 0, 100)
+        .await
+        .unwrap();
+    assert!(empty.is_empty());
+
+    // Duplicate path -> AlreadyExists.
+    let dup = store
+        .create_namespace(DEFAULT, "analytics/teams", CreateNamespace::default())
+        .await;
+    assert!(matches!(dup, Err(CatalogError::AlreadyExists(_))));
+
+    // Missing domain -> NotFound.
+    let no_domain = store
+        .create_namespace("ghost", "ns", CreateNamespace::default())
+        .await;
+    assert!(matches!(no_domain, Err(CatalogError::NotFound(_))));
+
+    // Three-state patch.
+    let patched = store
+        .update_namespace(
+            DEFAULT,
+            "analytics",
+            NamespacePatch {
+                comment: PatchField::Set("root".to_string()),
+                ..Default::default()
+            },
         )
         .await
-        .unwrap_err();
-    assert!(matches!(err, StoreError::AlreadyExists(_)));
-
-    store.drop_domain("prod").await.unwrap();
-    assert!(!store.domain_exists("prod").await.unwrap());
+        .unwrap();
+    assert_eq!(patched.comment.as_deref(), Some("root"));
+    let cleared = store
+        .update_namespace(
+            DEFAULT,
+            "analytics",
+            NamespacePatch {
+                comment: PatchField::Unset,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(cleared.comment.is_none());
 }
 
 #[tokio::test]
 #[serial]
-async fn test_namespace_same_name_across_domains() {
-    let store = setup().await;
+async fn namespace_delete_rules() {
+    let store = common::store().await;
+    common::make_namespace(&store, DEFAULT, "parent/child").await;
 
-    store
-        .create_domain(
-            "prod",
-            None,
-            HashMap::new(),
-            None,
-            serde_json::json!({}),
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-    store
-        .create_domain(
-            "staging",
-            None,
-            HashMap::new(),
-            None,
-            serde_json::json!({}),
-            None,
-            None,
-        )
-        .await
-        .unwrap();
+    // Non-empty (child namespace) -> Conflict.
+    let err = store.delete_namespace(DEFAULT, "parent").await;
+    assert!(matches!(err, Err(CatalogError::Conflict(_))));
 
+    // Non-empty (holds an asset) -> Conflict.
     store
-        .create_namespace("prod", "analytics", None, HashMap::new())
+        .create_asset(common::asset_input(
+            DEFAULT,
+            "parent/child",
+            "t1",
+            "table",
+            None,
+        ))
         .await
         .unwrap();
-    // Same namespace name under a different domain must succeed (V3
-    // namespaces are unique on `(domain_id, name)`, not on `name` globally).
-    store
-        .create_namespace("staging", "analytics", None, HashMap::new())
-        .await
-        .unwrap();
+    let err = store.delete_namespace(DEFAULT, "parent/child").await;
+    assert!(matches!(err, Err(CatalogError::Conflict(_))));
 
-    let prod_ns = store.get_namespace("prod", "analytics").await.unwrap();
-    let stg_ns = store.get_namespace("staging", "analytics").await.unwrap();
-    assert_ne!(prod_ns.id, stg_ns.id);
-    assert_ne!(prod_ns.domain_id, stg_ns.domain_id);
+    // Deleting the asset frees the namespace; deleting the leaf frees the parent.
+    let asset = store
+        .get_asset_by_name(DEFAULT, "parent/child", "t1")
+        .await
+        .unwrap();
+    store.hard_delete_asset(asset.id).await.unwrap();
+    store
+        .delete_namespace(DEFAULT, "parent/child")
+        .await
+        .unwrap();
+    store.delete_namespace(DEFAULT, "parent").await.unwrap();
+
+    let gone = store.delete_namespace(DEFAULT, "parent").await;
+    assert!(matches!(gone, Err(CatalogError::NotFound(_))));
+}
+
+// ── AssetStore ─────────────────────────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn asset_create_get_and_validation() {
+    let store = common::store().await;
+    common::make_namespace(&store, DEFAULT, "ns").await;
+
+    let asset = store
+        .create_asset(CreateAsset {
+            properties: Some(serde_json::json!({"owner": "alice"})),
+            comment: Some("c".to_string()),
+            ..common::asset_input(DEFAULT, "ns", "users", "table", Some("iceberg"))
+        })
+        .await
+        .unwrap();
+    assert_eq!(asset.format.as_deref(), Some("iceberg"));
+    assert!(asset.current_version_key.is_none());
+    assert!(asset.deleted_at.is_none());
+
+    // get by id / by name return the same row.
+    let by_id = store.get_asset(asset.id).await.unwrap();
+    let by_name = store
+        .get_asset_by_name(DEFAULT, "ns", "users")
+        .await
+        .unwrap();
+    assert_eq!(by_id.id, by_name.id);
+
+    // Duplicate active name in the same namespace -> AlreadyExists.
+    let dup = store
+        .create_asset(common::asset_input(DEFAULT, "ns", "users", "table", None))
+        .await;
+    assert!(matches!(dup, Err(CatalogError::AlreadyExists(_))));
+
+    // Unregistered asset type -> Validation (FK mapped by call site).
+    let bad_type = store
+        .create_asset(common::asset_input(DEFAULT, "ns", "x1", "model", None))
+        .await;
+    assert!(matches!(bad_type, Err(CatalogError::Validation(_))));
+
+    // Unregistered format -> Validation.
+    let bad_format = store
+        .create_asset(common::asset_input(
+            DEFAULT,
+            "ns",
+            "x2",
+            "table",
+            Some("parquet"),
+        ))
+        .await;
+    assert!(matches!(bad_format, Err(CatalogError::Validation(_))));
+
+    // Missing namespace -> NotFound.
+    let no_ns = store
+        .create_asset(common::asset_input(DEFAULT, "ghost", "x3", "table", None))
+        .await;
+    assert!(matches!(no_ns, Err(CatalogError::NotFound(_))));
+
+    let missing = store.get_asset(Uuid::new_v4()).await;
+    assert!(matches!(missing, Err(CatalogError::NotFound(_))));
+    let missing_name = store.get_asset_by_name(DEFAULT, "ns", "ghost").await;
+    assert!(matches!(missing_name, Err(CatalogError::NotFound(_))));
 }
 
 #[tokio::test]
 #[serial]
-async fn test_non_empty_domain_delete_returns_conflict() {
-    let store = setup().await;
+async fn asset_list_filters() {
+    let store = common::store().await;
+    common::make_namespace(&store, DEFAULT, "ns").await;
 
+    let alice = store
+        .create_asset(CreateAsset {
+            properties: Some(serde_json::json!({"owner": "alice", "env": "prod"})),
+            ..common::asset_input(DEFAULT, "ns", "t_alice", "table", Some("iceberg"))
+        })
+        .await
+        .unwrap();
     store
-        .create_domain(
-            "biz",
-            None,
-            HashMap::new(),
-            None,
-            serde_json::json!({}),
-            None,
-            None,
+        .create_asset(CreateAsset {
+            properties: Some(serde_json::json!({"owner": "bob"})),
+            ..common::asset_input(DEFAULT, "ns", "t_bob", "table", Some("lance"))
+        })
+        .await
+        .unwrap();
+    store
+        .create_asset(common::asset_input(
+            DEFAULT,
+            "ns",
+            "v1",
+            "view",
+            Some("iceberg"),
+        ))
+        .await
+        .unwrap();
+
+    let in_ns = |extra: AssetFilter| AssetFilter {
+        domain: Some(DEFAULT.to_string()),
+        namespace: Some("ns".to_string()),
+        ..extra
+    };
+
+    // No filter -> all three.
+    let all = store
+        .list_assets(in_ns(AssetFilter::default()), 0, 100)
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 3);
+
+    // asset_type filter.
+    let tables = store
+        .list_assets(
+            in_ns(AssetFilter {
+                asset_type: Some("table".to_string()),
+                ..Default::default()
+            }),
+            0,
+            100,
         )
         .await
         .unwrap();
-    store
-        .create_namespace("biz", "ledger", None, HashMap::new())
-        .await
-        .unwrap();
+    assert_eq!(tables.len(), 2);
 
-    let err = store.drop_domain("biz").await.unwrap_err();
-    match err {
-        StoreError::DomainNotEmpty { domain } => assert_eq!(domain, "biz"),
-        other => panic!("expected DomainNotEmpty, got {:?}", other),
-    }
-
-    // Non-empty Namespace delete returns NamespaceNotEmpty.
-    store
-        .create_tabular_asset(
-            "biz",
-            "ledger",
-            "events",
-            "lance",
-            "s3://bucket/biz/ledger/events",
-            None,
-            None,
-            HashMap::new(),
+    // format filter.
+    let lance = store
+        .list_assets(
+            in_ns(AssetFilter {
+                format: Some("lance".to_string()),
+                ..Default::default()
+            }),
+            0,
+            100,
         )
         .await
         .unwrap();
-    let err = store.drop_namespace("biz", "ledger").await.unwrap_err();
-    match err {
-        StoreError::NamespaceNotEmpty { namespace } => assert_eq!(namespace, "ledger"),
-        other => panic!("expected NamespaceNotEmpty, got {:?}", other),
-    }
+    assert_eq!(lance.len(), 1);
+    assert_eq!(lance[0].name, "t_bob");
 
-    // After clearing children, the deletes succeed.
-    store.drop_asset("biz", "ledger", "events").await.unwrap();
-    store.drop_namespace("biz", "ledger").await.unwrap();
-    store.drop_domain("biz").await.unwrap();
-    assert!(!store.domain_exists("biz").await.unwrap());
+    // properties exact-match filter (AND across keys).
+    let prod_alice = store
+        .list_assets(
+            in_ns(AssetFilter {
+                properties: HashMap::from([
+                    ("owner".to_string(), "alice".to_string()),
+                    ("env".to_string(), "prod".to_string()),
+                ]),
+                ..Default::default()
+            }),
+            0,
+            100,
+        )
+        .await
+        .unwrap();
+    assert_eq!(prod_alice.len(), 1);
+    assert_eq!(prod_alice[0].id, alice.id);
+
+    // include_deleted=false hides soft-deleted rows (default).
+    store.soft_delete_asset(alice.id).await.unwrap();
+    let active = store
+        .list_assets(in_ns(AssetFilter::default()), 0, 100)
+        .await
+        .unwrap();
+    assert_eq!(active.len(), 2);
+    let with_deleted = store
+        .list_assets(
+            in_ns(AssetFilter {
+                include_deleted: true,
+                ..Default::default()
+            }),
+            0,
+            100,
+        )
+        .await
+        .unwrap();
+    assert_eq!(with_deleted.len(), 3);
 }
 
 #[tokio::test]
 #[serial]
-async fn test_asset_active_uniqueness_within_namespace() {
-    let store = setup().await;
+async fn asset_update_patch_and_rename() {
+    let store = common::store().await;
+    common::make_namespace(&store, DEFAULT, "src").await;
+    common::make_namespace(&store, DEFAULT, "dst").await;
 
-    store
-        .create_namespace(DEFAULT, "ns1", None, HashMap::new())
-        .await
-        .unwrap();
-    store
-        .create_tabular_asset(
-            DEFAULT,
-            "ns1",
-            "users",
-            "iceberg",
-            "s3://bucket/ns1/users",
-            None,
-            None,
-            HashMap::new(),
-        )
+    let asset = store
+        .create_asset(CreateAsset {
+            comment: Some("orig".to_string()),
+            ..common::asset_input(DEFAULT, "src", "t", "table", None)
+        })
         .await
         .unwrap();
 
-    // V3 enforces active asset name uniqueness within a namespace
-    // regardless of format — even when the second create requests a
-    // different format.
-    let err = store
-        .create_tabular_asset(
-            DEFAULT,
-            "ns1",
-            "users",
-            "lance",
-            "lance://ns1/users",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap_err();
-    assert!(matches!(err, StoreError::AlreadyExists(_)));
-
-    // Same name in a different namespace is fine.
-    store
-        .create_namespace(DEFAULT, "ns2", None, HashMap::new())
-        .await
-        .unwrap();
-    store
-        .create_tabular_asset(
-            DEFAULT,
-            "ns2",
-            "users",
-            "lance",
-            "lance://ns2/users",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-#[serial]
-async fn test_get_latest_version_uses_version_order() {
-    let store = setup().await;
-
-    store
-        .create_namespace(DEFAULT, "ns1", None, HashMap::new())
-        .await
-        .unwrap();
-    let (asset, _) = store
-        .create_tabular_asset(
-            DEFAULT,
-            "ns1",
-            "events",
-            "lance",
-            "s3://bucket/ns1/events",
-            None,
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-
-    // Insert versions out of order to make sure the "latest" query relies
-    // on `version_order DESC` rather than on version_key lexicographic
-    // sort or insertion order.
-    let (v1, _) = store
-        .create_tabular_version(
+    // Three-state update: Set comment, keep properties absent, then Unset.
+    let updated = store
+        .update_asset(
             asset.id,
-            "1",
-            Some(1),
-            None,
-            "s3://bucket/ns1/events/_v1.manifest",
-            None,
-            HashMap::new(),
+            AssetPatch {
+                comment: PatchField::Set("new".to_string()),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
-    let (v10, _) = store
-        .create_tabular_version(
+    assert_eq!(updated.comment.as_deref(), Some("new"));
+    let cleared = store
+        .update_asset(
             asset.id,
-            "10",
-            Some(10),
-            None,
-            "s3://bucket/ns1/events/_v10.manifest",
-            None,
-            HashMap::new(),
+            AssetPatch {
+                comment: PatchField::Unset,
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
-    let (v2, _) = store
-        .create_tabular_version(
-            asset.id,
-            "2",
-            Some(2),
-            None,
-            "s3://bucket/ns1/events/_v2.manifest",
-            None,
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
+    assert!(cleared.comment.is_none());
 
-    let latest = store
-        .get_latest_tabular_version(asset.id)
+    // In-place rename.
+    let renamed = store.rename_asset(asset.id, "t2", None).await.unwrap();
+    assert_eq!(renamed.name, "t2");
+    assert_eq!(renamed.namespace_id, asset.namespace_id);
+
+    // Cross-namespace move with unchanged name.
+    let dst_ns = store.get_namespace(DEFAULT, "dst").await.unwrap();
+    let moved = store
+        .rename_asset(asset.id, "t2", Some("dst"))
         .await
-        .unwrap()
-        .expect("expected at least one version");
-    let (latest_version, _) = latest;
-    assert_eq!(latest_version.id, v10.id);
-    assert_eq!(latest_version.version_order, Some(10));
-    let _ = (v1, v2);
+        .unwrap();
+    assert_eq!(moved.namespace_id, dst_ns.id);
+    store.get_asset_by_name(DEFAULT, "dst", "t2").await.unwrap();
+    let old = store.get_asset_by_name(DEFAULT, "src", "t2").await;
+    assert!(matches!(old, Err(CatalogError::NotFound(_))));
+
+    // Move to a missing namespace -> NotFound.
+    let no_ns = store.rename_asset(asset.id, "t2", Some("ghost")).await;
+    assert!(matches!(no_ns, Err(CatalogError::NotFound(_))));
+
+    // Name conflict in the destination namespace -> AlreadyExists.
+    store
+        .create_asset(common::asset_input(DEFAULT, "src", "clash", "table", None))
+        .await
+        .unwrap();
+    store
+        .create_asset(common::asset_input(DEFAULT, "dst", "clash", "table", None))
+        .await
+        .unwrap();
+    let src_clash = store
+        .get_asset_by_name(DEFAULT, "src", "clash")
+        .await
+        .unwrap();
+    let conflict = store.rename_asset(src_clash.id, "clash", Some("dst")).await;
+    assert!(matches!(conflict, Err(CatalogError::AlreadyExists(_))));
+
+    // Renaming a soft-deleted asset -> NotFound.
+    store.soft_delete_asset(src_clash.id).await.unwrap();
+    let deleted = store.rename_asset(src_clash.id, "zzz", None).await;
+    assert!(matches!(deleted, Err(CatalogError::NotFound(_))));
 }
 
-// ── Unified + CAS smoke tests (V3 traits) ──────────────────────────────────
+// ── Soft delete / restore / hard delete ────────────────────────────────────
 
 #[tokio::test]
 #[serial]
-async fn test_unified_query_pairs_asset_with_tabular() {
-    let store = setup().await;
+async fn soft_delete_restore_and_name_reuse() {
+    let store = common::store().await;
+    common::make_namespace(&store, DEFAULT, "ns").await;
 
-    store
-        .create_namespace(DEFAULT, "ns1", None, HashMap::new())
-        .await
-        .unwrap();
-    store
-        .create_tabular_asset(
-            DEFAULT,
-            "ns1",
-            "users",
-            "iceberg",
-            "s3://bucket/ns1/users",
-            Some("s3://bucket/ns1/users/metadata/00000.metadata.json"),
-            None,
-            HashMap::new(),
-        )
+    let asset = store
+        .create_asset(common::asset_input(DEFAULT, "ns", "t", "table", None))
         .await
         .unwrap();
 
-    let list = store
-        .list_assets_unified(DEFAULT, "ns1", Some("iceberg"), None, 0, 100)
-        .await
-        .unwrap();
-    assert_eq!(list.len(), 1);
-    let (asset, tabular) = &list[0];
-    assert_eq!(asset.name, "users");
-    let tabular = tabular.as_ref().expect("expected tabular extension");
-    assert_eq!(tabular.format, "iceberg");
+    store.soft_delete_asset(asset.id).await.unwrap();
 
-    let (asset2, tabular2) = store
-        .get_asset_unified(DEFAULT, "ns1", "users")
+    // Soft-deleted: by-name lookup misses, get-by-id still returns the row.
+    let by_name = store.get_asset_by_name(DEFAULT, "ns", "t").await;
+    assert!(matches!(by_name, Err(CatalogError::NotFound(_))));
+    let by_id = store.get_asset(asset.id).await.unwrap();
+    assert!(by_id.deleted_at.is_some());
+
+    // Double soft-delete -> NotFound.
+    let twice = store.soft_delete_asset(asset.id).await;
+    assert!(matches!(twice, Err(CatalogError::NotFound(_))));
+
+    // The name is free for a new active asset.
+    let replacement = store
+        .create_asset(common::asset_input(DEFAULT, "ns", "t", "table", None))
         .await
         .unwrap();
-    assert_eq!(asset2.id, asset.id);
-    assert!(tabular2.is_some());
+
+    // Restoring while the name is taken -> Conflict.
+    let conflict = store.restore_asset(asset.id).await;
+    assert!(matches!(conflict, Err(CatalogError::Conflict(_))));
+
+    // Free the name, restore succeeds.
+    store.hard_delete_asset(replacement.id).await.unwrap();
+    let restored = store.restore_asset(asset.id).await.unwrap();
+    assert!(restored.deleted_at.is_none());
+    store.get_asset_by_name(DEFAULT, "ns", "t").await.unwrap();
+
+    // Restoring an active asset -> Conflict.
+    let active = store.restore_asset(asset.id).await;
+    assert!(matches!(active, Err(CatalogError::Conflict(_))));
 }
 
 #[tokio::test]
 #[serial]
-async fn test_cas_commit_optimistic_concurrency() {
-    let store = setup().await;
+async fn hard_delete_cascades_extensions_versions_and_tags() {
+    let store = common::store().await;
+    common::make_namespace(&store, DEFAULT, "ns").await;
+
+    let with_tabular = common::make_tabular_asset(
+        &store,
+        DEFAULT,
+        "ns",
+        "t",
+        Some("iceberg"),
+        "s3://wh/ns/t",
+        Some("s3://wh/ns/t/metadata/00001.metadata.json"),
+    )
+    .await;
+    let id = with_tabular.asset.id;
 
     store
-        .create_namespace(DEFAULT, "ns1", None, HashMap::new())
+        .create_version(CreateVersion {
+            asset_id: id,
+            version_key: "00001".to_string(),
+            content_pointer: Some("s3://wh/ns/t/metadata/00001.metadata.json".to_string()),
+            ..Default::default()
+        })
         .await
         .unwrap();
-    let initial = "s3://bucket/ns1/orders/metadata/00000.metadata.json";
-    store
+    store.add_tag(id, "hot").await.unwrap();
+
+    store.soft_delete_asset(id).await.unwrap();
+    store.hard_delete_asset(id).await.unwrap();
+
+    // Everything reachable through the asset is gone.
+    let asset = store.get_asset(id).await;
+    assert!(matches!(asset, Err(CatalogError::NotFound(_))));
+    let tabular = store.get_tabular_asset(id).await;
+    assert!(matches!(tabular, Err(CatalogError::NotFound(_))));
+    assert!(store.list_versions(id, 0, 100).await.unwrap().is_empty());
+    assert!(store.list_tags(id).await.unwrap().is_empty());
+
+    // Deleting again -> NotFound.
+    let again = store.hard_delete_asset(id).await;
+    assert!(matches!(again, Err(CatalogError::NotFound(_))));
+}
+
+// ── VersionStore ───────────────────────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn version_chain_and_immutability() {
+    let store = common::store().await;
+    common::make_namespace(&store, DEFAULT, "ns").await;
+    let t = common::make_tabular_asset(&store, DEFAULT, "ns", "t", None, "s3://wh/t", None).await;
+    let other =
+        common::make_tabular_asset(&store, DEFAULT, "ns", "u", None, "s3://wh/u", None).await;
+
+    let v1 = store
+        .create_version(CreateVersion {
+            asset_id: t.asset.id,
+            version_key: "00001".to_string(),
+            version_properties: Some(serde_json::json!({"op": "create"})),
+            content_pointer: Some("s3://wh/t/metadata/00001.metadata.json".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(v1.previous_version_id.is_none());
+
+    // create_version mirrors the key onto assets.current_version_key.
+    let asset = store.get_asset(t.asset.id).await.unwrap();
+    assert_eq!(asset.current_version_key.as_deref(), Some("00001"));
+
+    let v2 = store
+        .create_version(CreateVersion {
+            asset_id: t.asset.id,
+            version_key: "00002".to_string(),
+            previous_version_id: Some(v1.id),
+            content_pointer: Some("s3://wh/t/metadata/00002.metadata.json".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(v2.previous_version_id, Some(v1.id));
+
+    let latest = store.get_latest_version(t.asset.id).await.unwrap();
+    assert_eq!(latest.version_key, "00002");
+
+    let got = store.get_version(t.asset.id, "00001").await.unwrap();
+    assert_eq!(got.id, v1.id);
+    assert_eq!(got.version_properties.unwrap()["op"], "create");
+
+    let listed = store.list_versions(t.asset.id, 0, 100).await.unwrap();
+    assert_eq!(listed.len(), 2);
+
+    // Version rows are immutable: re-inserting the same key is rejected.
+    let dup = store
+        .create_version(CreateVersion {
+            asset_id: t.asset.id,
+            version_key: "00001".to_string(),
+            ..Default::default()
+        })
+        .await;
+    assert!(matches!(dup, Err(CatalogError::AlreadyExists(_))));
+
+    // A second root version violates the single-root constraint.
+    let second_root = store
+        .create_version(CreateVersion {
+            asset_id: t.asset.id,
+            version_key: "00003".to_string(),
+            ..Default::default()
+        })
+        .await;
+    assert!(matches!(second_root, Err(CatalogError::AlreadyExists(_))));
+
+    // Cross-asset predecessor -> Validation (application-layer check).
+    let cross = store
+        .create_version(CreateVersion {
+            asset_id: t.asset.id,
+            version_key: "00004".to_string(),
+            previous_version_id: Some(
+                store
+                    .create_version(CreateVersion {
+                        asset_id: other.asset.id,
+                        version_key: "00001".to_string(),
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap()
+                    .id,
+            ),
+            ..Default::default()
+        })
+        .await;
+    assert!(matches!(cross, Err(CatalogError::Validation(_))));
+
+    // Missing asset / missing version / soft-deleted asset -> NotFound.
+    let no_asset = store
+        .create_version(CreateVersion {
+            asset_id: Uuid::new_v4(),
+            version_key: "00001".to_string(),
+            ..Default::default()
+        })
+        .await;
+    assert!(matches!(no_asset, Err(CatalogError::NotFound(_))));
+    let no_version = store.get_version(t.asset.id, "99999").await;
+    assert!(matches!(no_version, Err(CatalogError::NotFound(_))));
+
+    store.soft_delete_asset(other.asset.id).await.unwrap();
+    let deleted_asset = store
+        .create_version(CreateVersion {
+            asset_id: other.asset.id,
+            version_key: "00002".to_string(),
+            ..Default::default()
+        })
+        .await;
+    assert!(matches!(deleted_asset, Err(CatalogError::NotFound(_))));
+}
+
+// ── CasCommitStore ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn cas_commit_success_and_failures() {
+    let store = common::store().await;
+    common::make_namespace(&store, DEFAULT, "ns").await;
+    let m1 = "s3://wh/ns/t/metadata/00001.metadata.json";
+    let t = common::make_tabular_asset(
+        &store,
+        DEFAULT,
+        "ns",
+        "t",
+        Some("iceberg"),
+        "s3://wh/ns/t",
+        Some(m1),
+    )
+    .await;
+    let id = t.asset.id;
+
+    // Successful CAS: mirrored version inserted (root, since the asset had
+    // no version yet), current_version_key and tabular cache updated.
+    let m2 = "s3://wh/ns/t/metadata/00002.metadata.json";
+    let v1 = store
+        .compare_and_swap_pointer(
+            id,
+            m1,
+            CreateVersion {
+                asset_id: id,
+                version_key: "00002".to_string(),
+                content_pointer: Some(m2.to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(v1.previous_version_id.is_none());
+    assert_eq!(v1.content_pointer.as_deref(), Some(m2));
+
+    let asset = store.get_asset(id).await.unwrap();
+    assert_eq!(asset.current_version_key.as_deref(), Some("00002"));
+    let tabular = store.get_tabular_asset(id).await.unwrap();
+    assert_eq!(tabular.metadata_location.as_deref(), Some(m2));
+
+    // Second CAS auto-links the previous version via current_version_key.
+    let m3 = "s3://wh/ns/t/metadata/00003.metadata.json";
+    let v2 = store
+        .compare_and_swap_pointer(
+            id,
+            m2,
+            CreateVersion {
+                asset_id: id,
+                version_key: "00003".to_string(),
+                content_pointer: Some(m3.to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(v2.previous_version_id, Some(v1.id));
+
+    // Stale expected pointer -> Conflict.
+    let stale = store
+        .compare_and_swap_pointer(
+            id,
+            m2,
+            CreateVersion {
+                asset_id: id,
+                version_key: "00004".to_string(),
+                content_pointer: Some("s3://wh/ns/t/metadata/00004.metadata.json".to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(matches!(stale, Err(CatalogError::Conflict(_))));
+
+    // new_version.asset_id mismatch -> Validation.
+    let mismatched = store
+        .compare_and_swap_pointer(
+            id,
+            m3,
+            CreateVersion {
+                asset_id: Uuid::new_v4(),
+                version_key: "00004".to_string(),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(matches!(mismatched, Err(CatalogError::Validation(_))));
+
+    // Nonexistent asset -> NotFound.
+    let ghost_id = Uuid::new_v4();
+    let ghost = store
+        .compare_and_swap_pointer(
+            ghost_id,
+            m3,
+            CreateVersion {
+                asset_id: ghost_id,
+                version_key: "00004".to_string(),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(matches!(ghost, Err(CatalogError::NotFound(_))));
+
+    // Soft-deleted asset -> NotFound.
+    store.soft_delete_asset(id).await.unwrap();
+    let deleted = store
+        .compare_and_swap_pointer(
+            id,
+            m3,
+            CreateVersion {
+                asset_id: id,
+                version_key: "00004".to_string(),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(matches!(deleted, Err(CatalogError::NotFound(_))));
+
+    // Asset without a tabular extension -> NotFound (no CAS anchor).
+    let plain = store
+        .create_asset(common::asset_input(DEFAULT, "ns", "plain", "view", None))
+        .await
+        .unwrap();
+    let no_tabular = store
+        .compare_and_swap_pointer(
+            plain.id,
+            "whatever",
+            CreateVersion {
+                asset_id: plain.id,
+                version_key: "00001".to_string(),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(matches!(no_tabular, Err(CatalogError::NotFound(_))));
+}
+
+// ── TabularStore ───────────────────────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn tabular_store_double_write() {
+    let store = common::store().await;
+    common::make_namespace(&store, DEFAULT, "ns").await;
+
+    let created = store
         .create_tabular_asset(
-            DEFAULT,
-            "ns1",
-            "orders",
-            "iceberg",
-            "s3://bucket/ns1/orders",
-            Some(initial),
-            None,
-            HashMap::new(),
+            common::asset_input(DEFAULT, "ns", "t", "table", Some("iceberg")),
+            "s3://wh/ns/t",
+            Some("s3://wh/ns/t/metadata/00001.metadata.json"),
         )
         .await
         .unwrap();
+    assert_eq!(created.tabular.asset_id, created.asset.id);
+    assert_eq!(created.tabular.location, "s3://wh/ns/t");
 
-    let next = "s3://bucket/ns1/orders/metadata/00001.metadata.json";
-    let removals: Vec<String> = vec![];
-    let updates: HashMap<String, String> = HashMap::from([("phase".into(), "2".into())]);
+    // Same transaction wrote both rows: the extension is readable.
+    let tabular = store.get_tabular_asset(created.asset.id).await.unwrap();
+    assert_eq!(
+        tabular.metadata_location.as_deref(),
+        Some("s3://wh/ns/t/metadata/00001.metadata.json")
+    );
 
+    // Non-table asset type -> Validation (application-layer check).
+    let wrong_type = store
+        .create_tabular_asset(
+            common::asset_input(DEFAULT, "ns", "v", "view", Some("iceberg")),
+            "s3://wh/ns/v",
+            None,
+        )
+        .await;
+    assert!(matches!(wrong_type, Err(CatalogError::Validation(_))));
+
+    let missing = store.get_tabular_asset(Uuid::new_v4()).await;
+    assert!(matches!(missing, Err(CatalogError::NotFound(_))));
+}
+
+// ── TagStore ───────────────────────────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn tag_lifecycle() {
+    let store = common::store().await;
+    common::make_namespace(&store, DEFAULT, "ns").await;
+    let a = store
+        .create_asset(common::asset_input(DEFAULT, "ns", "a", "table", None))
+        .await
+        .unwrap();
+    let b = store
+        .create_asset(common::asset_input(DEFAULT, "ns", "b", "table", None))
+        .await
+        .unwrap();
+
+    store.add_tag(a.id, "pii").await.unwrap();
+    store.add_tag(a.id, "hot").await.unwrap();
+    store.add_tag(b.id, "hot").await.unwrap();
+
+    // Tags are listed in sorted order.
+    assert_eq!(store.list_tags(a.id).await.unwrap(), vec!["hot", "pii"]);
+
+    // Duplicate add -> AlreadyExists (per implementation semantics).
+    let dup = store.add_tag(a.id, "hot").await;
+    assert!(matches!(dup, Err(CatalogError::AlreadyExists(_))));
+
+    // Tagging a missing asset -> NotFound.
+    let ghost = store.add_tag(Uuid::new_v4(), "x").await;
+    assert!(matches!(ghost, Err(CatalogError::NotFound(_))));
+
+    // list_assets_by_tag returns active assets of the domain only.
+    let hot = store
+        .list_assets_by_tag(DEFAULT, "hot", 0, 100)
+        .await
+        .unwrap();
+    assert_eq!(hot.len(), 2);
+    store.soft_delete_asset(b.id).await.unwrap();
+    let hot_active = store
+        .list_assets_by_tag(DEFAULT, "hot", 0, 100)
+        .await
+        .unwrap();
+    assert_eq!(hot_active.len(), 1);
+    assert_eq!(hot_active[0].id, a.id);
+
+    // remove is idempotent.
+    store.remove_tag(a.id, "pii").await.unwrap();
+    store.remove_tag(a.id, "pii").await.unwrap();
+    assert_eq!(store.list_tags(a.id).await.unwrap(), vec!["hot"]);
+}
+
+// ── AssetTypeStore (registry) ──────────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn registry_register_list_and_conflicts() {
+    let store = common::store().await;
+
+    let model = store
+        .register_asset_type(RegisterAssetType {
+            name: "model".to_string(),
+            description: Some("ML model".to_string()),
+            category: "model".to_string(),
+            validation_schema: None,
+            extension_strategy: "jsonb".to_string(),
+            supports_native_protocol: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(model.category, "model");
+
+    let got = store.get_asset_type("model").await.unwrap();
+    assert!(!got.supports_native_protocol);
+
+    // Category filter: `tabular` only holds the seeded `table` type.
+    let tabular = store
+        .list_asset_types(Some("tabular"), 0, 100)
+        .await
+        .unwrap();
+    assert_eq!(tabular.len(), 1);
+    assert_eq!(tabular[0].name, "table");
+    let all = store.list_asset_types(None, 0, 100).await.unwrap();
+    assert_eq!(all.len(), 3); // table, view, model
+
+    // Duplicate type -> AlreadyExists.
+    let dup = store
+        .register_asset_type(RegisterAssetType {
+            name: "model".to_string(),
+            description: None,
+            category: "model".to_string(),
+            validation_schema: None,
+            extension_strategy: "jsonb".to_string(),
+            supports_native_protocol: false,
+        })
+        .await;
+    assert!(matches!(dup, Err(CatalogError::AlreadyExists(_))));
+
+    // Invalid category / strategy -> CHECK violation -> Validation.
+    let bad_category = store
+        .register_asset_type(RegisterAssetType {
+            name: "widget".to_string(),
+            description: None,
+            category: "nope".to_string(),
+            validation_schema: None,
+            extension_strategy: "jsonb".to_string(),
+            supports_native_protocol: false,
+        })
+        .await;
+    assert!(matches!(bad_category, Err(CatalogError::Validation(_))));
+
+    // Formats.
+    let parquet = store
+        .register_format(RegisterFormat {
+            name: "parquet".to_string(),
+            description: Some("Apache Parquet".to_string()),
+            mime_type: None,
+            serialization_hint: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(parquet.name, "parquet");
+    assert_eq!(store.list_formats(0, 100).await.unwrap().len(), 3);
+
+    let dup_format = store
+        .register_format(RegisterFormat {
+            name: "parquet".to_string(),
+            ..Default::default()
+        })
+        .await;
+    assert!(matches!(dup_format, Err(CatalogError::AlreadyExists(_))));
+
+    let missing = store.get_format("avro").await;
+    assert!(matches!(missing, Err(CatalogError::NotFound(_))));
+}
+
+// ── UnifiedQueryStore ──────────────────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn unified_query_discovers_across_namespaces() {
+    let store = common::store().await;
+    common::make_namespace(&store, DEFAULT, "a/b").await;
+    common::make_namespace(&store, DEFAULT, "a/c").await;
+    common::make_namespace(&store, DEFAULT, "z").await;
+
+    let in_b = store
+        .create_asset(common::asset_input(
+            DEFAULT,
+            "a/b",
+            "t1",
+            "table",
+            Some("iceberg"),
+        ))
+        .await
+        .unwrap();
+    store.add_tag(in_b.id, "hot").await.unwrap();
     store
-        .cas_update_metadata_location(
-            DEFAULT, "ns1", "orders", "iceberg", initial, next, None, &removals, &updates,
-        )
-        .await
-        .unwrap();
-
-    // Stale expected_location should now conflict.
-    let err = store
-        .cas_update_metadata_location(
+        .create_asset(common::asset_input(
             DEFAULT,
-            "ns1",
-            "orders",
-            "iceberg",
-            initial,
-            "s3://bucket/ns1/orders/metadata/00002.metadata.json",
-            None,
-            &removals,
-            &HashMap::new(),
-        )
-        .await
-        .unwrap_err();
-    assert!(matches!(err, StoreError::Conflict { .. }));
-
-    // Property delta from the successful CAS landed on the asset row.
-    let (asset, _) = store
-        .get_tabular_asset(DEFAULT, "ns1", "iceberg", "orders")
+            "a/c",
+            "t2",
+            "table",
+            Some("lance"),
+        ))
         .await
         .unwrap();
-    assert_eq!(asset.properties.get("phase").map(String::as_str), Some("2"));
+    store
+        .create_asset(common::asset_input(
+            DEFAULT,
+            "z",
+            "t3",
+            "table",
+            Some("iceberg"),
+        ))
+        .await
+        .unwrap();
+
+    let base = AssetQuery {
+        domain: DEFAULT.to_string(),
+        limit: 100,
+        ..Default::default()
+    };
+
+    // Prefix query covers the subtree but not sibling roots.
+    let subtree = store
+        .query_assets(AssetQuery {
+            namespace_prefix: Some("a".to_string()),
+            ..base.clone()
+        })
+        .await
+        .unwrap();
+    assert_eq!(subtree.len(), 2);
+
+    // Tag + format combination.
+    let hot_iceberg = store
+        .query_assets(AssetQuery {
+            namespace_prefix: Some("a".to_string()),
+            format: Some("iceberg".to_string()),
+            tags: vec!["hot".to_string()],
+            ..base.clone()
+        })
+        .await
+        .unwrap();
+    assert_eq!(hot_iceberg.len(), 1);
+    assert_eq!(hot_iceberg[0].id, in_b.id);
+
+    // Soft-deleted rows are hidden unless include_deleted is set.
+    store.soft_delete_asset(in_b.id).await.unwrap();
+    let active = store.query_assets(base.clone()).await.unwrap();
+    assert_eq!(active.len(), 2);
+    let with_deleted = store
+        .query_assets(AssetQuery {
+            include_deleted: true,
+            ..base
+        })
+        .await
+        .unwrap();
+    assert_eq!(with_deleted.len(), 3);
+}
+
+// ── CAS concurrency ────────────────────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn concurrent_cas_exactly_one_wins() {
+    let store = Arc::new(common::store().await);
+    common::make_namespace(&store, DEFAULT, "ns").await;
+    let m1 = "s3://wh/ns/t/metadata/00001.metadata.json";
+    let t = common::make_tabular_asset(
+        &store,
+        DEFAULT,
+        "ns",
+        "t",
+        Some("iceberg"),
+        "s3://wh/ns/t",
+        Some(m1),
+    )
+    .await;
+    let id = t.asset.id;
+
+    let attempt = |key: &'static str, pointer: &'static str| {
+        let store = Arc::clone(&store);
+        async move {
+            store
+                .compare_and_swap_pointer(
+                    id,
+                    m1,
+                    CreateVersion {
+                        asset_id: id,
+                        version_key: key.to_string(),
+                        content_pointer: Some(pointer.to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await
+        }
+    };
+
+    let (r1, r2) = tokio::join!(
+        attempt("00002", "s3://wh/ns/t/metadata/00002-a.metadata.json"),
+        attempt("00003", "s3://wh/ns/t/metadata/00003-b.metadata.json"),
+    );
+
+    // Exactly one commit wins; the loser sees a pointer-mismatch Conflict.
+    let results = [&r1, &r2];
+    let wins = results.iter().filter(|r| r.is_ok()).count();
+    let conflicts = results
+        .iter()
+        .filter(|r| matches!(r, Err(CatalogError::Conflict(_))))
+        .count();
+    assert_eq!((wins, conflicts), (1, 1), "r1={r1:?} r2={r2:?}");
+
+    // The mirrored history holds exactly one new version and the pointer
+    // matches the winner.
+    let versions = store.list_versions(id, 0, 100).await.unwrap();
+    assert_eq!(versions.len(), 1);
+    let tabular = store.get_tabular_asset(id).await.unwrap();
+    assert_eq!(
+        tabular.metadata_location, versions[0].content_pointer,
+        "tabular cache must point at the winning commit's metadata"
+    );
 }

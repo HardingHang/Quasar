@@ -1,9 +1,12 @@
 use axum::{
     extract::{Extension, Json, Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::IntoResponse,
 };
-use quasar_core::{CatalogStore, MetricsState, StoreError};
+use quasar_core::{
+    validate_name, validate_namespace_path, AssetFilter, AssetPatch, CatalogError, CreateVersion,
+    IcebergCatalogStore, IcebergTableCommit, PatchField, TabularAsset,
+};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,12 +16,11 @@ use super::dto::{
     CommitTableRequest, CreateTableRequest, ListTablesQuery, ListTablesResponse, LoadTableResponse,
     RegisterTableRequest, RenameTableRequest, TableIdentifier, WarehouseQuery,
 };
-use super::error::{store_error_to_iceberg_table, IcebergError};
-use super::{validate_warehouse, IcebergConfig};
+use super::error::{catalog_error_to_iceberg_table, IcebergError};
+use super::{string_map_to_properties, validate_warehouse, CommitMetrics, IcebergConfig};
 use crate::object_store_util::{
     delete_prefix, object_exists, read_json, s3_url_to_path, write_json,
 };
-use quasar_core::validate_name;
 
 // ── Object Store Helpers ───────────────────────────────────
 
@@ -91,6 +93,36 @@ async fn check_metadata_exists(location: &str, config: &IcebergConfig) -> bool {
 }
 
 // ── Helpers ────────────────────────────────────────────────
+
+/// Protocol isolation (DESIGN §4.2): an asset is only visible through the
+/// Iceberg API when its format is `iceberg`; anything else reads as
+/// "table not found".
+fn ensure_iceberg_format(
+    asset: &quasar_core::Asset,
+    ns: &str,
+    name: &str,
+) -> Result<(), IcebergError> {
+    if asset.format.as_deref() == Some("iceberg") {
+        Ok(())
+    } else {
+        Err(IcebergError::NoSuchTableException {
+            message: format!("Table '{}.{}' not found", ns, name),
+        })
+    }
+}
+
+/// Extract the string-valued `properties` object from a metadata document.
+fn metadata_properties(metadata: &serde_json::Value) -> HashMap<String, String> {
+    metadata
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 /// Fallback metadata builder for load_table when schema_snapshot is missing.
 /// Uses hand-rolled JSON instead of the iceberg crate wrapper to avoid
@@ -204,29 +236,39 @@ fn validate_purge_location(
 
 // ── Handlers ───────────────────────────────────────────────
 
-/// GET /iceberg/v1/{prefix}/namespaces/{ns}/tables
+/// GET /iceberg/v1/{prefix}/namespaces/{ns}/tables (dispatched)
 pub async fn list_tables(
-    State(store): State<Arc<dyn CatalogStore>>,
-    Path((prefix, ns)): Path<(String, String)>,
-    Query(query): Query<ListTablesQuery>,
-    Extension(config): Extension<IcebergConfig>,
-) -> Result<impl IntoResponse, IcebergError> {
-    validate_warehouse(query.warehouse.as_deref(), &config)?;
+    store: &Arc<dyn IcebergCatalogStore>,
+    config: &IcebergConfig,
+    prefix: &str,
+    ns: &str,
+    query: ListTablesQuery,
+) -> Result<(StatusCode, Json<ListTablesResponse>), IcebergError> {
+    validate_warehouse(query.warehouse.as_deref(), config)?;
 
-    let limit = query.page_size.unwrap_or(100).clamp(1, 1000);
+    let limit = query.page_size.unwrap_or(100).clamp(1, 1000) as u64;
     let offset = query
         .page_token
         .as_ref()
-        .and_then(|t| t.parse::<i64>().ok())
+        .and_then(|t| t.parse::<u64>().ok())
         .unwrap_or(0);
 
+    // Endpoint-level protocol isolation: only `iceberg`-format tables are
+    // visible through the Iceberg API.
+    let filter = AssetFilter {
+        domain: Some(prefix.to_string()),
+        namespace: Some(ns.to_string()),
+        asset_type: Some("table".to_string()),
+        format: Some("iceberg".to_string()),
+        ..AssetFilter::default()
+    };
     let assets = store
-        .list_tabular_assets(&prefix, &ns, Some("iceberg"), offset, limit)
+        .list_assets(filter, offset, limit)
         .await
-        .map_err(store_error_to_iceberg_table)?;
+        .map_err(catalog_error_to_iceberg_table)?;
 
-    let next_page_token = if assets.len() as i32 >= limit {
-        Some((offset + assets.len() as i64).to_string())
+    let next_page_token = if assets.len() as u64 >= limit {
+        Some((offset + assets.len() as u64).to_string())
     } else {
         None
     };
@@ -236,8 +278,8 @@ pub async fn list_tables(
         Json(ListTablesResponse {
             identifiers: assets
                 .into_iter()
-                .map(|(asset, _)| TableIdentifier {
-                    namespace: vec![ns.clone()],
+                .map(|asset| TableIdentifier {
+                    namespace: ns.split('/').map(str::to_string).collect(),
                     name: asset.name,
                 })
                 .collect(),
@@ -246,17 +288,18 @@ pub async fn list_tables(
     ))
 }
 
-/// POST /iceberg/v1/{prefix}/namespaces/{ns}/tables
+/// POST /iceberg/v1/{prefix}/namespaces/{ns}/tables (dispatched)
 pub async fn create_table(
-    State(store): State<Arc<dyn CatalogStore>>,
-    Extension(config): Extension<IcebergConfig>,
-    Path((prefix, ns)): Path<(String, String)>,
-    Query(query): Query<WarehouseQuery>,
-    Json(req): Json<CreateTableRequest>,
-) -> Result<impl IntoResponse, IcebergError> {
-    validate_warehouse(query.warehouse.as_deref(), &config)?;
-    validate_name(&ns).map_err(store_error_to_iceberg_table)?;
-    validate_name(&req.name).map_err(store_error_to_iceberg_table)?;
+    store: &Arc<dyn IcebergCatalogStore>,
+    config: &IcebergConfig,
+    prefix: &str,
+    ns: &str,
+    warehouse: Option<&str>,
+    req: CreateTableRequest,
+) -> Result<(StatusCode, Json<LoadTableResponse>), IcebergError> {
+    validate_warehouse(warehouse, config)?;
+    validate_namespace_path(ns).map_err(catalog_error_to_iceberg_table)?;
+    validate_name(&req.name).map_err(catalog_error_to_iceberg_table)?;
 
     let location = req.location.unwrap_or_else(|| {
         if let Some(ref wp) = config.warehouse_path {
@@ -281,38 +324,41 @@ pub async fn create_table(
     let metadata_location = format!("{}/metadata/00001-{}.metadata.json", location, table_uuid);
 
     // Write initial metadata.json to object store
-    write_metadata_to_store(&metadata_location, &metadata, &config).await?;
+    write_metadata_to_store(&metadata_location, &metadata, config).await?;
+
+    let properties_value = string_map_to_properties(properties).unwrap_or_else(|| json!({}));
 
     if req.stage_create == Some(true) {
         // Staged create: only insert staged record, no active catalog entry
         store
             .create_staged_table(
-                &prefix,
-                &ns,
+                prefix,
+                ns,
                 &req.name,
                 table_uuid,
                 &location,
                 &metadata_location,
                 metadata.clone(),
-                properties,
+                properties_value,
             )
             .await
-            .map_err(store_error_to_iceberg_table)?;
+            .map_err(catalog_error_to_iceberg_table)?;
     } else {
-        // Non-staged create: insert active catalog entry
+        // Non-staged create: register the catalog entry. The store creates
+        // the asset + tabular extension + first mirrored version in one
+        // transaction (DESIGN §6.1).
         let _ = store
-            .create_tabular_asset(
-                &prefix,
-                &ns,
+            .register_iceberg_table(
+                prefix,
+                ns,
                 &req.name,
-                "iceberg",
                 &location,
-                Some(&metadata_location),
-                Some(metadata.clone()),
-                properties,
+                &metadata_location,
+                metadata.clone(),
+                properties_value,
             )
             .await
-            .map_err(store_error_to_iceberg_table)?;
+            .map_err(catalog_error_to_iceberg_table)?;
     }
 
     Ok((
@@ -324,22 +370,30 @@ pub async fn create_table(
     ))
 }
 
-/// GET /iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}
+/// GET /iceberg/v1/{prefix}/namespaces/{ns}/tables/{table} (dispatched)
 pub async fn load_table(
-    State(store): State<Arc<dyn CatalogStore>>,
-    Extension(config): Extension<IcebergConfig>,
-    Path((prefix, ns, table)): Path<(String, String, String)>,
-    Query(query): Query<WarehouseQuery>,
-) -> Result<impl IntoResponse, IcebergError> {
-    validate_warehouse(query.warehouse.as_deref(), &config)?;
-    let (asset, tabular) = store
-        .get_tabular_asset(&prefix, &ns, "iceberg", &table)
+    store: &Arc<dyn IcebergCatalogStore>,
+    config: &IcebergConfig,
+    prefix: &str,
+    ns: &str,
+    table: &str,
+    warehouse: Option<&str>,
+) -> Result<(StatusCode, Json<LoadTableResponse>), IcebergError> {
+    validate_warehouse(warehouse, config)?;
+
+    let asset = store
+        .get_asset_by_name(prefix, ns, table)
         .await
-        .map_err(store_error_to_iceberg_table)?;
+        .map_err(catalog_error_to_iceberg_table)?;
+    ensure_iceberg_format(&asset, ns, table)?;
+    let tabular = store
+        .get_tabular_asset(asset.id)
+        .await
+        .map_err(catalog_error_to_iceberg_table)?;
 
     // Check metadata.json exists before loading
     if let Some(ref ml) = tabular.metadata_location {
-        if !check_metadata_exists(ml, &config).await {
+        if !check_metadata_exists(ml, config).await {
             return Err(IcebergError::MetadataNotFoundException {
                 message: format!("metadata.json not found at {}", ml),
             });
@@ -347,7 +401,7 @@ pub async fn load_table(
     }
 
     let metadata = if let Some(ref ml) = tabular.metadata_location {
-        read_metadata_from_store(ml, tabular.schema_snapshot.clone(), &config).await?
+        read_metadata_from_store(ml, tabular.schema_snapshot.clone(), config).await?
     } else {
         tabular.schema_snapshot.unwrap_or_else(|| {
             _build_fallback_metadata(asset.id, &asset.name, &tabular.location, None)
@@ -363,42 +417,51 @@ pub async fn load_table(
     ))
 }
 
-/// DELETE /iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}
+/// DELETE /iceberg/v1/{prefix}/namespaces/{ns}/tables/{table} (dispatched)
 pub async fn drop_table(
-    State(store): State<Arc<dyn CatalogStore>>,
-    Extension(config): Extension<IcebergConfig>,
-    Path((prefix, ns, table)): Path<(String, String, String)>,
-    Query(query): Query<super::dto::DropTableQuery>,
-) -> Result<impl IntoResponse, IcebergError> {
-    validate_warehouse(query.warehouse.as_deref(), &config)?;
+    store: &Arc<dyn IcebergCatalogStore>,
+    config: &IcebergConfig,
+    prefix: &str,
+    ns: &str,
+    table: &str,
+    warehouse: Option<&str>,
+    purge_requested: Option<bool>,
+) -> Result<StatusCode, IcebergError> {
+    validate_warehouse(warehouse, config)?;
 
-    if query.purge_requested == Some(true) {
-        // 1. Verify table exists and get its location.
-        let (_asset, tabular) = store
-            .get_tabular_asset(&prefix, &ns, "iceberg", &table)
+    let asset = store
+        .get_asset_by_name(prefix, ns, table)
+        .await
+        .map_err(catalog_error_to_iceberg_table)?;
+    ensure_iceberg_format(&asset, ns, table)?;
+
+    if purge_requested == Some(true) {
+        // 1. Read the tabular extension for the location.
+        let tabular = store
+            .get_tabular_asset(asset.id)
             .await
-            .map_err(store_error_to_iceberg_table)?;
+            .map_err(catalog_error_to_iceberg_table)?;
 
         // 2. Safety boundary check before any destructive operation.
         let table_path = validate_purge_location(
             &tabular.location,
             tabular.metadata_location.as_deref(),
-            &config,
+            config,
         )?;
 
         // 3. Transaction: create purge operation + drop catalog records.
         let (operation_id, table_location, _metadata_location) = store
-            .begin_iceberg_purge_and_drop_catalog(&prefix, &ns, &table)
+            .begin_iceberg_purge_and_drop_catalog(prefix, ns, table)
             .await
             .map_err(|e| match e {
-                StoreError::NotFound(msg) => IcebergError::NoSuchTableException { message: msg },
-                StoreError::Internal { msg, source } => {
-                    tracing::error!(error = ?source, %msg, "begin purge failed");
+                CatalogError::NotFound(msg) => IcebergError::NoSuchTableException { message: msg },
+                CatalogError::Internal(msg) => {
+                    tracing::error!(error = %msg, "begin purge failed");
                     IcebergError::InternalServerError {
                         message: "An internal error occurred".to_string(),
                     }
                 }
-                other => store_error_to_iceberg_table(other),
+                other => catalog_error_to_iceberg_table(other),
             })?;
 
         // 4. Delete objects from object store.
@@ -409,7 +472,7 @@ pub async fn drop_table(
                         .update_purge_operation(operation_id, "completed", None)
                         .await
                         .map_err(|e| {
-                            tracing::error!(error = ?e, "failed to mark purge completed");
+                            tracing::error!(error = %e, "failed to mark purge completed");
                             IcebergError::InternalServerError {
                                 message: "An internal error occurred".to_string(),
                             }
@@ -427,7 +490,7 @@ pub async fn drop_table(
                         .await
                         .map_err(|inner| {
                             tracing::error!(
-                                error = ?inner,
+                                error = %inner,
                                 "failed to mark purge failed"
                             );
                             IcebergError::InternalServerError {
@@ -443,147 +506,147 @@ pub async fn drop_table(
 
         Ok(StatusCode::NO_CONTENT)
     } else {
-        // purgeRequested=false or absent: only drop catalog records.
+        // purgeRequested=false or absent: soft-delete the catalog record;
+        // restore is a governance operation through the Unified API
+        // (docs/DESIGN.md §6.3).
         store
-            .get_tabular_asset(&prefix, &ns, "iceberg", &table)
+            .soft_delete_asset(asset.id)
             .await
-            .map_err(store_error_to_iceberg_table)?;
-
-        store
-            .drop_asset(&prefix, &ns, &table)
-            .await
-            .map_err(store_error_to_iceberg_table)?;
+            .map_err(catalog_error_to_iceberg_table)?;
 
         Ok(StatusCode::NO_CONTENT)
     }
 }
 
-/// POST /iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}/metrics
+/// POST /iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}/metrics (dispatched)
+#[allow(clippy::too_many_arguments)]
 pub async fn report_metrics(
-    State(store): State<Arc<dyn CatalogStore>>,
-    Path((prefix, ns, table)): Path<(String, String, String)>,
-    Query(query): Query<WarehouseQuery>,
-    Extension(config): Extension<IcebergConfig>,
-    headers: HeaderMap,
-    Json(report): Json<serde_json::Value>,
-) -> Result<impl IntoResponse, IcebergError> {
-    validate_warehouse(query.warehouse.as_deref(), &config)?;
+    store: &Arc<dyn IcebergCatalogStore>,
+    config: &IcebergConfig,
+    prefix: &str,
+    ns: &str,
+    table: &str,
+    warehouse: Option<&str>,
+    user_agent: Option<&str>,
+    report: serde_json::Value,
+) -> Result<StatusCode, IcebergError> {
+    validate_warehouse(warehouse, config)?;
 
-    let (asset, _tabular) = store
-        .get_tabular_asset(&prefix, &ns, "iceberg", &table)
+    let asset = store
+        .get_asset_by_name(prefix, ns, table)
         .await
-        .map_err(store_error_to_iceberg_table)?;
-
-    let user_agent = headers.get("user-agent").and_then(|v| v.to_str().ok());
+        .map_err(catalog_error_to_iceberg_table)?;
+    ensure_iceberg_format(&asset, ns, table)?;
 
     store
-        .record_scan_metrics_report(Some(asset.id), &prefix, &ns, &table, report, user_agent)
+        .record_scan_metrics_report(Some(asset.id), prefix, ns, table, report, user_agent)
         .await
         .map_err(|e| match e {
-            StoreError::Internal { msg, source } => {
-                tracing::error!(error = ?source, %msg, "failed to record scan metrics");
+            CatalogError::Internal(msg) => {
+                tracing::error!(error = %msg, "failed to record scan metrics");
                 IcebergError::InternalServerError {
                     message: "An internal error occurred".to_string(),
                 }
             }
-            other => store_error_to_iceberg_table(other),
+            other => catalog_error_to_iceberg_table(other),
         })?;
 
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// HEAD /iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}
+/// HEAD /iceberg/v1/{prefix}/namespaces/{ns}/tables/{table} (dispatched)
 pub async fn table_exists(
-    State(store): State<Arc<dyn CatalogStore>>,
-    Path((prefix, ns, table)): Path<(String, String, String)>,
-    Query(query): Query<WarehouseQuery>,
-    Extension(config): Extension<IcebergConfig>,
-) -> Result<impl IntoResponse, IcebergError> {
-    validate_warehouse(query.warehouse.as_deref(), &config)?;
-    let exists = match store
-        .get_tabular_asset(&prefix, &ns, "iceberg", &table)
-        .await
-    {
-        Ok(_) => true,
-        Err(StoreError::NotFound(_)) => false,
-        Err(e) => return Err(store_error_to_iceberg_table(e)),
-    };
+    store: &Arc<dyn IcebergCatalogStore>,
+    config: &IcebergConfig,
+    prefix: &str,
+    ns: &str,
+    table: &str,
+    warehouse: Option<&str>,
+) -> Result<StatusCode, IcebergError> {
+    validate_warehouse(warehouse, config)?;
 
-    if exists {
-        Ok(StatusCode::OK)
-    } else {
-        Err(IcebergError::NoSuchTableException {
+    match store.get_asset_by_name(prefix, ns, table).await {
+        Ok(asset) if asset.format.as_deref() == Some("iceberg") => Ok(StatusCode::NO_CONTENT),
+        Ok(_) | Err(CatalogError::NotFound(_)) => Err(IcebergError::NoSuchTableException {
             message: format!("Table '{}.{}' not found", ns, table),
-        })
+        }),
+        Err(e) => Err(catalog_error_to_iceberg_table(e)),
     }
 }
 
 /// POST /iceberg/v1/{prefix}/tables/rename
 pub async fn rename_table(
-    State(store): State<Arc<dyn CatalogStore>>,
+    State(store): State<Arc<dyn IcebergCatalogStore>>,
     Path(prefix): Path<String>,
     Query(query): Query<WarehouseQuery>,
     Extension(config): Extension<IcebergConfig>,
     Json(req): Json<RenameTableRequest>,
 ) -> Result<impl IntoResponse, IcebergError> {
     validate_warehouse(query.warehouse.as_deref(), &config)?;
-    validate_name(&req.source.name).map_err(store_error_to_iceberg_table)?;
-    validate_name(&req.destination.name).map_err(store_error_to_iceberg_table)?;
+    validate_name(&req.source.name).map_err(catalog_error_to_iceberg_table)?;
+    validate_name(&req.destination.name).map_err(catalog_error_to_iceberg_table)?;
 
-    let src_ns = req
-        .source
-        .namespace
-        .first()
-        .ok_or_else(|| IcebergError::BadRequestException {
+    if req.source.namespace.is_empty() {
+        return Err(IcebergError::BadRequestException {
             message: "source namespace must not be empty".to_string(),
-        })?;
-    let dst_ns =
-        req.destination
-            .namespace
-            .first()
-            .ok_or_else(|| IcebergError::BadRequestException {
-                message: "destination namespace must not be empty".to_string(),
-            })?;
+        });
+    }
+    if req.destination.namespace.is_empty() {
+        return Err(IcebergError::BadRequestException {
+            message: "destination namespace must not be empty".to_string(),
+        });
+    }
 
-    let new_namespace = if src_ns == dst_ns {
+    let src_ns = req.source.namespace.join("/");
+    let dst_ns = req.destination.namespace.join("/");
+
+    // Protocol isolation: the Iceberg rename cannot operate on a
+    // non-Iceberg source asset.
+    let asset = store
+        .get_asset_by_name(&prefix, &src_ns, &req.source.name)
+        .await
+        .map_err(catalog_error_to_iceberg_table)?;
+    ensure_iceberg_format(&asset, &src_ns, &req.source.name)?;
+
+    // Cross-namespace move (Iceberg REST spec): source and destination
+    // share the URL `{prefix}`, so the move always stays inside the same
+    // Domain; the destination namespace must exist.
+    let dest_namespace = if src_ns == dst_ns {
         None
     } else {
+        store
+            .get_namespace(&prefix, &dst_ns)
+            .await
+            .map_err(|e| match e {
+                CatalogError::NotFound(_) => IcebergError::NoSuchNamespaceException {
+                    message: format!("Namespace '{}' not found", dst_ns),
+                },
+                other => catalog_error_to_iceberg_table(other),
+            })?;
         Some(dst_ns.as_str())
     };
 
-    // V3 endpoint-level isolation: same rationale as drop_table —
-    // Iceberg rename cannot operate on a Lance-format source asset.
     store
-        .get_tabular_asset(&prefix, src_ns, "iceberg", &req.source.name)
+        .rename_asset(asset.id, &req.destination.name, dest_namespace)
         .await
-        .map_err(store_error_to_iceberg_table)?;
+        .map_err(catalog_error_to_iceberg_table)?;
 
-    store
-        .rename_asset(
-            &prefix,
-            src_ns,
-            &req.source.name,
-            &req.destination.name,
-            new_namespace,
-        )
-        .await
-        .map_err(store_error_to_iceberg_table)?;
-
-    Ok(StatusCode::OK)
+    Ok(StatusCode::NO_CONTENT)
 }
 
-/// POST /iceberg/v1/{prefix}/namespaces/{ns}/register
+/// POST /iceberg/v1/{prefix}/namespaces/{ns}/register (dispatched)
 /// Register an externally-managed Iceberg table into the catalog.
 pub async fn register_table(
-    State(store): State<Arc<dyn CatalogStore>>,
-    Extension(config): Extension<IcebergConfig>,
-    Path((prefix, ns)): Path<(String, String)>,
-    Query(query): Query<WarehouseQuery>,
-    Json(req): Json<RegisterTableRequest>,
-) -> Result<impl IntoResponse, IcebergError> {
-    validate_warehouse(query.warehouse.as_deref(), &config)?;
-    validate_name(&ns).map_err(store_error_to_iceberg_table)?;
-    validate_name(&req.name).map_err(store_error_to_iceberg_table)?;
+    store: &Arc<dyn IcebergCatalogStore>,
+    config: &IcebergConfig,
+    prefix: &str,
+    ns: &str,
+    warehouse: Option<&str>,
+    req: RegisterTableRequest,
+) -> Result<(StatusCode, Json<LoadTableResponse>), IcebergError> {
+    validate_warehouse(warehouse, config)?;
+    validate_namespace_path(ns).map_err(catalog_error_to_iceberg_table)?;
+    validate_name(&req.name).map_err(catalog_error_to_iceberg_table)?;
 
     // 1. Read metadata from object store
     let metadata_json =
@@ -613,19 +676,20 @@ pub async fn register_table(
 
     let location = metadata.location().to_string();
 
-    // 3. Register catalog record (no object store write)
+    // 3. Register catalog record (no object store write). The store
+    // creates the asset + tabular extension + first mirrored version.
     store
         .register_iceberg_table(
-            &prefix,
-            &ns,
+            prefix,
+            ns,
             &req.name,
             &location,
             &req.metadata_location,
             metadata_json.clone(),
-            HashMap::new(),
+            json!({}),
         )
         .await
-        .map_err(store_error_to_iceberg_table)?;
+        .map_err(catalog_error_to_iceberg_table)?;
 
     Ok((
         StatusCode::OK,
@@ -636,68 +700,63 @@ pub async fn register_table(
     ))
 }
 
-/// POST /iceberg/v1/{prefix}/namespaces/{ns}/tables/{table}
+/// POST /iceberg/v1/{prefix}/namespaces/{ns}/tables/{table} (dispatched)
 /// Commit table updates (CAS).
 ///
 /// Two paths:
-/// - existing active table → CAS update via `cas_update_metadata_location`.
+/// - existing active table → CAS commit via `compare_and_swap_pointer`;
+///   the store locks the asset row, compares the pointer, inserts the
+///   mirrored version and updates the caches (docs/DESIGN.md
+///   §6.4, S1–S6).
 /// - active table absent but a non-expired staged record exists → finalize
 ///   the staged-create commit via `commit_staged_table`. The request must
 ///   carry `assert-create` (`TableRequirement::NotExist`).
-///
-/// V4_DESIGN.md §5.13, §6.4.
+#[allow(clippy::too_many_arguments)]
 pub async fn commit_table(
-    State(store): State<Arc<dyn CatalogStore>>,
-    Extension(config): Extension<IcebergConfig>,
-    metrics: Option<Extension<MetricsState>>,
-    Path((prefix, ns, table)): Path<(String, String, String)>,
-    Query(query): Query<WarehouseQuery>,
-    Json(req): Json<CommitTableRequest>,
-) -> Result<impl IntoResponse, IcebergError> {
-    validate_warehouse(query.warehouse.as_deref(), &config)?;
-    let metrics = metrics.map(|e| e.0);
+    store: &Arc<dyn IcebergCatalogStore>,
+    config: &IcebergConfig,
+    metrics: CommitMetrics,
+    prefix: &str,
+    ns: &str,
+    table: &str,
+    warehouse: Option<&str>,
+    req: CommitTableRequest,
+) -> Result<(StatusCode, Json<LoadTableResponse>), IcebergError> {
+    validate_warehouse(warehouse, config)?;
 
-    // 0. Reject any V4.0-unsupported official TableUpdate variant before IO.
+    // 0. Reject unsupported official TableUpdate variants before IO.
     super::metadata::check_supported_updates(&req.updates).map_err(|u| {
         IcebergError::NotImplementedException {
-            message: format!("update '{}' is not supported in V4.0", u.0),
+            message: format!("update '{}' is not supported", u.0),
         }
     })?;
 
     // 1. Look up the active table; on NotFound, fall through to staged commit.
-    match store
-        .get_tabular_asset(&prefix, &ns, "iceberg", &table)
-        .await
-    {
-        Ok((_asset, tabular)) => {
-            commit_existing_table(
-                store.clone(),
-                config,
-                metrics,
-                prefix,
-                ns,
-                table,
-                tabular,
-                req,
-            )
-            .await
+    match store.get_asset_by_name(prefix, ns, table).await {
+        Ok(asset) => {
+            ensure_iceberg_format(&asset, ns, table)?;
+            let tabular = store
+                .get_tabular_asset(asset.id)
+                .await
+                .map_err(catalog_error_to_iceberg_table)?;
+            commit_existing_table(store, config, metrics, ns, table, asset, tabular, req).await
         }
-        Err(StoreError::NotFound(_)) => {
+        Err(CatalogError::NotFound(_)) => {
             commit_staged_table(store, config, metrics, prefix, ns, table, req).await
         }
-        Err(e) => Err(store_error_to_iceberg_table(e)),
+        Err(e) => Err(catalog_error_to_iceberg_table(e)),
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn commit_existing_table(
-    store: Arc<dyn CatalogStore>,
-    config: IcebergConfig,
-    metrics: Option<MetricsState>,
-    prefix: String,
-    ns: String,
-    table: String,
-    tabular: quasar_core::TabularAsset,
+    store: &Arc<dyn IcebergCatalogStore>,
+    config: &IcebergConfig,
+    metrics: CommitMetrics,
+    ns: &str,
+    table: &str,
+    asset: quasar_core::Asset,
+    tabular: TabularAsset,
     req: CommitTableRequest,
 ) -> Result<(StatusCode, Json<LoadTableResponse>), IcebergError> {
     let metadata_location =
@@ -708,7 +767,7 @@ async fn commit_existing_table(
             })?;
 
     // 2. Check metadata.json exists before committing (CAS requires current metadata)
-    if !check_metadata_exists(&metadata_location, &config).await {
+    if !check_metadata_exists(&metadata_location, config).await {
         return Err(IcebergError::CommitFailedException {
             message: format!(
                 "Cannot commit: metadata.json not found at {}",
@@ -719,84 +778,58 @@ async fn commit_existing_table(
 
     // 3. Load current metadata from object store (or fallback to schema_snapshot)
     let current_metadata_json =
-        read_metadata_from_store(&metadata_location, tabular.schema_snapshot.clone(), &config)
+        read_metadata_from_store(&metadata_location, tabular.schema_snapshot.clone(), config)
             .await?;
 
-    // 4. Extract old properties for delta computation
-    let old_properties = current_metadata_json
-        .get("properties")
-        .and_then(|p| p.as_object())
-        .map(|obj| {
-            obj.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect::<HashMap<String, String>>()
-        })
-        .unwrap_or_default();
-
-    // 5. Apply requirements and updates via metadata wrapper
+    // 4. Validate requirements and apply updates via the metadata wrapper
+    //    (outside the DB lock, against the immutable L1 document; DESIGN
+    //    §6.4 "锁外校验 + 锁内 CAS").
     let new_metadata_json =
         super::metadata::apply_commit(&current_metadata_json, &req.requirements, &req.updates)
             .map_err(|msg| IcebergError::CommitFailedException { message: msg })?;
 
-    // 6. Compute property changes
-    let new_properties = new_metadata_json
-        .get("properties")
-        .and_then(|p| p.as_object())
-        .map(|obj| {
-            obj.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect::<HashMap<String, String>>()
-        })
-        .unwrap_or_default();
-
-    let property_removals: Vec<String> = old_properties
-        .keys()
-        .filter(|k| !new_properties.contains_key(*k))
-        .cloned()
-        .collect();
-    let property_updates: HashMap<String, String> = new_properties
-        .iter()
-        .filter(|(k, v)| old_properties.get(*k) != Some(v))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-
-    // 7. Generate new metadata location
+    // 5. Generate new metadata location and write it to the object store.
     let new_metadata_location = super::metadata::next_metadata_location(&metadata_location)
         .map_err(|msg| IcebergError::InternalServerError { message: msg })?;
+    write_metadata_to_store(&new_metadata_location, &new_metadata_json, config).await?;
 
-    // 8. Write new metadata.json to object store
-    write_metadata_to_store(&new_metadata_location, &new_metadata_json, &config).await?;
-
-    // 9. CAS update via storage layer (atomically updates metadata_location, schema_snapshot, and properties)
+    // 6. CAS commit: the store locks the asset row, compares the pointer,
+    //    inserts the mirrored version (previous version auto-linked) and
+    //    updates current_version_key + the tabular cache (S1–S6).
+    let new_version = CreateVersion {
+        asset_id: asset.id,
+        version_key: super::metadata::version_key_from_location(&new_metadata_location),
+        version_properties: None,
+        content_inline: None,
+        content_pointer: Some(new_metadata_location.clone()),
+        previous_version_id: None,
+    };
     store
-        .cas_update_metadata_location(
-            &prefix,
-            &ns,
-            &table,
-            "iceberg",
-            &metadata_location,
-            &new_metadata_location,
-            Some(new_metadata_json.clone()),
-            &property_removals,
-            &property_updates,
-        )
+        .compare_and_swap_pointer(asset.id, &metadata_location, new_version)
         .await
         .map_err(|e| match e {
-            StoreError::Conflict { msg } => {
-                if let Some(ref m) = metrics {
-                    m.registry.record_iceberg_commit_conflict();
-                }
+            CatalogError::Conflict(msg) => {
+                metrics.record_conflict();
                 IcebergError::CommitFailedException { message: msg }
             }
-            StoreError::NotFound(msg) => IcebergError::NoSuchTableException { message: msg },
-            other => store_error_to_iceberg_table(other),
+            CatalogError::NotFound(msg) => IcebergError::NoSuchTableException { message: msg },
+            other => catalog_error_to_iceberg_table(other),
         })?;
+    metrics.record_success();
 
-    if let Some(ref m) = metrics {
-        m.registry.record_iceberg_commit_success();
+    // 7. Best-effort mirror of the protocol-truth properties into the
+    //    catalog row; intentionally non-atomic (DESIGN §6.1).
+    let patch = AssetPatch {
+        comment: PatchField::NoChange,
+        properties: match string_map_to_properties(metadata_properties(&new_metadata_json)) {
+            Some(value) => PatchField::Set(value),
+            None => PatchField::Unset,
+        },
+    };
+    if let Err(e) = store.update_asset(asset.id, patch).await {
+        tracing::warn!(error = %e, asset_id = %asset.id, "failed to mirror table properties");
     }
 
-    // 10. Return updated table
     Ok((
         StatusCode::OK,
         Json(LoadTableResponse {
@@ -806,21 +839,21 @@ async fn commit_existing_table(
     ))
 }
 
-/// Finalize a staged-create commit (V4_DESIGN.md §6.4).
+/// Finalize a staged-create commit (docs/DESIGN.md §6.4).
 async fn commit_staged_table(
-    store: Arc<dyn CatalogStore>,
-    config: IcebergConfig,
-    metrics: Option<MetricsState>,
-    prefix: String,
-    ns: String,
-    table: String,
+    store: &Arc<dyn IcebergCatalogStore>,
+    config: &IcebergConfig,
+    metrics: CommitMetrics,
+    prefix: &str,
+    ns: &str,
+    table: &str,
     req: CommitTableRequest,
 ) -> Result<(StatusCode, Json<LoadTableResponse>), IcebergError> {
     // 1. Look up the staged record. None → truly missing.
     let staged_metadata = store
-        .get_staged_table(&prefix, &ns, &table)
+        .get_staged_table(prefix, ns, table)
         .await
-        .map_err(store_error_to_iceberg_table)?
+        .map_err(catalog_error_to_iceberg_table)?
         .ok_or_else(|| IcebergError::NoSuchTableException {
             message: format!("Table '{}.{}' not found", ns, table),
         })?;
@@ -832,9 +865,7 @@ async fn commit_staged_table(
         .iter()
         .any(|r| matches!(r, iceberg::TableRequirement::NotExist))
     {
-        if let Some(ref m) = metrics {
-            m.registry.record_iceberg_commit_conflict();
-        }
+        metrics.record_conflict();
         return Err(IcebergError::CommitFailedException {
             message: "staged commit requires the assert-create requirement".to_string(),
         });
@@ -864,55 +895,41 @@ async fn commit_staged_table(
     let new_metadata_location = format!("{}/metadata/00002-{}.metadata.json", location, table_uuid);
 
     // 5. Write the new metadata to object store.
-    write_metadata_to_store(&new_metadata_location, &new_metadata_json, &config).await?;
+    write_metadata_to_store(&new_metadata_location, &new_metadata_json, config).await?;
 
     // 6. Extract properties for the catalog row.
-    let properties: HashMap<String, String> = new_metadata_json
-        .get("properties")
-        .and_then(|p| p.as_object())
-        .map(|obj| {
-            obj.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect()
-        })
-        .unwrap_or_default();
+    let properties_value = string_map_to_properties(metadata_properties(&new_metadata_json))
+        .unwrap_or_else(|| json!({}));
 
     // 7. Single-transaction: verify active absent, lock staged, insert
-    // assets+tabular_assets, delete staged record.
-    let (_asset, _tabular) = store
+    // assets + tabular_assets + first mirrored version, delete staged.
+    let _ = store
         .commit_staged_table(
-            &prefix,
-            &ns,
-            &table,
+            prefix,
+            ns,
+            table,
             &location,
             &new_metadata_location,
             new_metadata_json.clone(),
-            properties,
+            properties_value,
         )
         .await
         .map_err(|e| match e {
-            StoreError::AlreadyExists(msg) => {
-                if let Some(ref m) = metrics {
-                    m.registry.record_iceberg_commit_conflict();
-                }
+            CatalogError::AlreadyExists(msg) => {
+                metrics.record_conflict();
                 IcebergError::CommitFailedException { message: msg }
             }
             // The staged record is gone — either it expired between the
             // earlier get_staged_table() read and now (TTL race), or another
             // writer just consumed it. Either way the client should treat
             // this as a commit conflict and retry, not as "table missing".
-            StoreError::NotFound(msg) => {
-                if let Some(ref m) = metrics {
-                    m.registry.record_iceberg_commit_conflict();
-                }
+            CatalogError::NotFound(msg) => {
+                metrics.record_conflict();
                 IcebergError::CommitFailedException { message: msg }
             }
-            other => store_error_to_iceberg_table(other),
+            other => catalog_error_to_iceberg_table(other),
         })?;
-
-    if let Some(ref m) = metrics {
-        m.registry.record_iceberg_commit_success();
-    }
+    metrics.record_success();
 
     Ok((
         StatusCode::OK,
@@ -924,17 +941,17 @@ async fn commit_staged_table(
 }
 
 /// POST /iceberg/v1/{prefix}/transactions/commit
-/// Multi-table atomic commit (V4.1).
+/// Multi-table atomic commit.
 pub async fn commit_transaction(
-    State(store): State<Arc<dyn CatalogStore>>,
+    State(store): State<Arc<dyn IcebergCatalogStore>>,
     Extension(config): Extension<IcebergConfig>,
     Path(prefix): Path<String>,
-    Query(query): Query<super::dto::WarehouseQuery>,
+    Query(query): Query<WarehouseQuery>,
     Json(request): Json<super::dto::CommitTransactionRequest>,
 ) -> Result<impl IntoResponse, IcebergError> {
     validate_warehouse(query.warehouse.as_deref(), &config)?;
 
-    // 0. Reject encryption key actions before any IO.
+    // 0. Reject unsupported update actions before any IO.
     for change in &request.table_changes {
         super::metadata::check_supported_updates(&change.updates).map_err(|u| {
             IcebergError::NotImplementedException {
@@ -950,40 +967,36 @@ pub async fn commit_transaction(
     // Sort by (namespace, table) for consistent lock ordering (deadlock prevention).
     let mut sorted_changes = request.table_changes;
     sorted_changes.sort_by(|a, b| {
-        let a_ns = a.identifier.namespace.join(".");
-        let b_ns = b.identifier.namespace.join(".");
+        let a_ns = a.identifier.namespace.join("/");
+        let b_ns = b.identifier.namespace.join("/");
         a_ns.cmp(&b_ns)
             .then_with(|| a.identifier.name.cmp(&b.identifier.name))
     });
 
     // Phase 1: Prepare — validate all tables exist, apply updates, write to object store.
-    let mut table_updates: Vec<(
-        String,
-        String,
-        String,
-        String,
-        String,
-        Option<serde_json::Value>,
-    )> = Vec::new();
+    let mut commits: Vec<IcebergTableCommit> = Vec::with_capacity(sorted_changes.len());
 
     for change in &sorted_changes {
-        let ns = change
-            .identifier
-            .namespace
-            .first()
-            .ok_or_else(|| IcebergError::BadRequestException {
+        if change.identifier.namespace.is_empty() {
+            return Err(IcebergError::BadRequestException {
                 message: "namespace array must not be empty".to_string(),
-            })?
-            .clone();
+            });
+        }
+        let ns = change.identifier.namespace.join("/");
 
         // Verify table exists and read current metadata.
-        let (_, tabular) = store
-            .get_tabular_asset(&prefix, &ns, "iceberg", &change.identifier.name)
+        let asset = store
+            .get_asset_by_name(&prefix, &ns, &change.identifier.name)
             .await
             .map_err(|e| match e {
-                StoreError::NotFound(msg) => IcebergError::NoSuchTableException { message: msg },
-                other => store_error_to_iceberg_table(other),
+                CatalogError::NotFound(msg) => IcebergError::NoSuchTableException { message: msg },
+                other => catalog_error_to_iceberg_table(other),
             })?;
+        ensure_iceberg_format(&asset, &ns, &change.identifier.name)?;
+        let tabular = store
+            .get_tabular_asset(asset.id)
+            .await
+            .map_err(catalog_error_to_iceberg_table)?;
 
         let metadata_location =
             tabular
@@ -1024,24 +1037,26 @@ pub async fn commit_transaction(
         // Write to object store. Failure here aborts the entire transaction.
         write_metadata_to_store(&new_metadata_location, &new_metadata_json, &config).await?;
 
-        table_updates.push((
-            prefix.clone(),
-            ns,
-            change.identifier.name.clone(),
-            metadata_location,
-            new_metadata_location,
-            Some(new_metadata_json),
-        ));
+        commits.push(IcebergTableCommit {
+            domain: prefix.clone(),
+            namespace_path: ns,
+            table: change.identifier.name.clone(),
+            expected_pointer: metadata_location,
+            new_version_key: super::metadata::version_key_from_location(&new_metadata_location),
+            new_location: new_metadata_location,
+            schema_snapshot: Some(new_metadata_json),
+        });
     }
 
-    // Phase 2: DB commit — atomic CAS updates for all tables.
+    // Phase 2: DB commit — atomic CAS updates + version mirroring for all
+    // tables within a single PostgreSQL transaction (DESIGN §6.4).
     store
-        .commit_transaction_tables(table_updates)
+        .commit_transaction_tables(commits)
         .await
         .map_err(|e| match e {
-            StoreError::Conflict { msg } => IcebergError::CommitFailedException { message: msg },
-            StoreError::NotFound(msg) => IcebergError::NoSuchTableException { message: msg },
-            other => store_error_to_iceberg_table(other),
+            CatalogError::Conflict(msg) => IcebergError::CommitFailedException { message: msg },
+            CatalogError::NotFound(msg) => IcebergError::NoSuchTableException { message: msg },
+            other => catalog_error_to_iceberg_table(other),
         })?;
 
     Ok(StatusCode::NO_CONTENT)
